@@ -61,7 +61,7 @@ jobs:
 
     - name: Compilar Instalador Final (.exe)
       run: |
-        & C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 
     - name: Subir Instalador a GitHub
       uses: actions/upload-artifact@v4

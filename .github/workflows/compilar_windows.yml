@@ -26,8 +26,8 @@ jobs:
 
     - name: Compilar la aplicación con PyInstaller
       run: |
-        # Agregamos el comando --icon para incrustar tu logo en el .exe principal
-        pyinstaller --noconfirm --windowed --name "ControlFlota" --icon="Ico_Collie_Software.ico" --add-data "Logo.png;." --add-data "Logo_Collie_Software.png;." --collect-all customtkinter control_general.py
+        # Cambiamos el nombre de salida a ControlEventos
+        pyinstaller --noconfirm --windowed --name "ControlEventos" --icon="Ico_Collie_Software.ico" --add-data "Logo.png;." --add-data "Logo_Collie_Software.png;." --collect-all customtkinter control_general.py
 
     - name: Descargar Inno Setup (Creador de Instaladores)
       run: choco install innosetup
@@ -36,12 +36,12 @@ jobs:
       run: |
         $iss_content = @"
         [Setup]
-        AppName=Control de Flota Black Cube
+        AppName=Control de Eventos Black Cube
         AppVersion=1.5.4
-        DefaultDirName={autopf}\BlackCube\ControlFlota
-        DefaultGroupName=Control de Flota
+        DefaultDirName={autopf}\BlackCube\ControlEventos
+        DefaultGroupName=Control de Eventos
         OutputDir=.\dist
-        OutputBaseFilename=Instalar_ControlFlota_Windows
+        OutputBaseFilename=Instalar_ControlEventos_Windows
         Compression=lzma
         SolidCompression=yes
         PrivilegesRequired=lowest
@@ -51,11 +51,11 @@ jobs:
         Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
         
         [Files]
-        Source: "dist\ControlFlota\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+        Source: "dist\ControlEventos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
         
         [Icons]
-        Name: "{group}\Control de Flota"; Filename: "{app}\ControlFlota.exe"
-        Name: "{autodesktop}\Control de Flota"; Filename: "{app}\ControlFlota.exe"; Tasks: desktopicon
+        Name: "{group}\Control de Eventos"; Filename: "{app}\ControlEventos.exe"
+        Name: "{autodesktop}\Control de Eventos"; Filename: "{app}\ControlEventos.exe"; Tasks: desktopicon
         "@
         Set-Content -Path setup.iss -Value $iss_content -Encoding UTF8
 
@@ -66,5 +66,5 @@ jobs:
     - name: Subir Instalador a GitHub
       uses: actions/upload-artifact@v4
       with:
-        name: Instalador-ControlFlota-Windows
-        path: dist/Instalar_ControlFlota_Windows.exe
+        name: Instalador-ControlEventos-Windows
+        path: dist/Instalar_ControlEventos_Windows.exe

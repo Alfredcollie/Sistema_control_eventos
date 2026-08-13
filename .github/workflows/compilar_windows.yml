@@ -1,1 +1,71 @@
+name: Compilar para Windows
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest # Servidor Windows
+
+    steps:
+    - name: Clonar el repositorio
+      uses: actions/checkout@v4
+
+    - name: Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Compilar la aplicación con PyInstaller
+      run: |
+        # Agregamos el comando --icon para incrustar tu logo en el .exe principal
+        pyinstaller --noconfirm --windowed --name "ControlFlota" --icon="Ico_Collie_Software.ico" --add-data "Logo.png;." --add-data "Logo_Collie_Software.png;." --collect-all customtkinter control_general.py
+
+    - name: Descargar Inno Setup (Creador de Instaladores)
+      run: choco install innosetup
+
+    - name: Crear script automático del Instalador (.iss)
+      run: |
+        $iss_content = @"
+        [Setup]
+        AppName=Control de Flota Black Cube
+        AppVersion=1.5.4
+        DefaultDirName={autopf}\BlackCube\ControlEvento
+        DefaultGroupName=Control de Eventos
+        OutputDir=.\dist
+        OutputBaseFilename=Instalar_ControlEventos_Windows
+        Compression=lzma
+        SolidCompression=yes
+        PrivilegesRequired=lowest
+        SetupIconFile=Ico_Collie_Software.ico
+        
+        [Tasks]
+        Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
+        
+        [Files]
+        Source: "dist\ControlEventos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+        
+        [Icons]
+        Name: "{group}\Control de Flota"; Filename: "{app}\ControlFlota.exe"
+        Name: "{autodesktop}\Control de Eventos"; Filename: "{app}\ControlEventos.exe"; Tasks: desktopicon
+        "@
+        Set-Content -Path setup.iss -Value $iss_content -Encoding UTF8
+
+    - name: Compilar Instalador Final (.exe)
+      run: |
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+
+    - name: Subir Instalador a GitHub
+      uses: actions/upload-artifact@v4
+      with:
+        name: Instalador-ControlEventos-Windows
+        path: dist/Instalar_ControlEventos_Windows.exe
 

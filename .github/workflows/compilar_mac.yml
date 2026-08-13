@@ -1,4 +1,4 @@
-name: Compilar para macOS
+name: Compilar para Mac M1
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-mac:
-    runs-on: macos-14 # Procesador M1 (Apple Silicon)
+    runs-on: macos-14 # macos-14 usa arquitectura nativa ARM64 (Apple Silicon M1/M2/M3)
 
     steps:
     - name: Clonar el repositorio
@@ -17,6 +17,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+        architecture: 'arm64' # Aseguramos que instale la versión de Python para M1
 
     - name: Instalar dependencias
       run: |
@@ -26,18 +27,18 @@ jobs:
 
     - name: Compilar la aplicación con PyInstaller
       run: |
-        # Usamos control_general.py y nombramos la aplicación "ControlFlota"
-        pyinstaller --noconfirm --windowed --name "ControlFlota" --add-data "Logo.png:." --add-data "Logo_Collie_Software.png:." --collect-all customtkinter control_general.py
+        # ATENCIÓN: En Mac el separador de --add-data es dos puntos (:) no punto y coma (;)
+        # Nombramos la salida como "ControlEventos"
+        pyinstaller --noconfirm --windowed --name "ControlEventos" --add-data "Logo.png:." --add-data "Logo_Collie_Software.png:." --collect-all customtkinter control_general.py
 
-    - name: Comprimir la aplicación (Preservando estructura Mac)
+    - name: Comprimir la aplicación (.app a .zip)
       run: |
+        # Mac genera una carpeta .app, la comprimimos para poder descargarla
         cd dist
-        # La letra 'y' preserva la estructura interna para que Mac no la bloquee
-        zip -ry ControlFlota-Mac.zip "ControlFlota.app"
+        zip -r ControlEventos-Mac.zip ControlEventos.app/
 
-    - name: Subir el archivo final
+    - name: Subir Instalador a GitHub
       uses: actions/upload-artifact@v4
       with:
-        name: ControlEvento-Mac-APP
-        path: dist/ControlEvento-Mac.zip
-
+        name: Ejecutable-ControlEventos-Mac-M1
+        path: dist/ControlEventos-Mac.zip

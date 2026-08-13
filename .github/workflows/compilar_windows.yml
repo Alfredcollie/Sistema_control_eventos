@@ -38,10 +38,10 @@ jobs:
         [Setup]
         AppName=Control de Flota Black Cube
         AppVersion=1.5.4
-        DefaultDirName={autopf}\BlackCube\ControlEvento
-        DefaultGroupName=Control de Eventos
+        DefaultDirName={autopf}\BlackCube\ControlFlota
+        DefaultGroupName=Control de Flota
         OutputDir=.\dist
-        OutputBaseFilename=Instalar_ControlEventos_Windows
+        OutputBaseFilename=Instalar_ControlFlota_Windows
         Compression=lzma
         SolidCompression=yes
         PrivilegesRequired=lowest
@@ -51,11 +51,11 @@ jobs:
         Name: "desktopicon"; Description: "Crear un acceso directo en el escritorio"; GroupDescription: "Accesos directos:"
         
         [Files]
-        Source: "dist\ControlEventos\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+        Source: "dist\ControlFlota\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
         
         [Icons]
         Name: "{group}\Control de Flota"; Filename: "{app}\ControlFlota.exe"
-        Name: "{autodesktop}\Control de Eventos"; Filename: "{app}\ControlEventos.exe"; Tasks: desktopicon
+        Name: "{autodesktop}\Control de Flota"; Filename: "{app}\ControlFlota.exe"; Tasks: desktopicon
         "@
         Set-Content -Path setup.iss -Value $iss_content -Encoding UTF8
 
@@ -66,6 +66,5 @@ jobs:
     - name: Subir Instalador a GitHub
       uses: actions/upload-artifact@v4
       with:
-        name: Instalador-ControlEventos-Windows
-        path: dist/Instalar_ControlEventos_Windows.exe
-
+        name: Instalador-ControlFlota-Windows
+        path: dist/Instalar_ControlFlota_Windows.exe

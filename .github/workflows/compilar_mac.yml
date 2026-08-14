@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-mac:
-    runs-on: macos-14 # macos-14 usa arquitectura nativa ARM64 (Apple Silicon M1/M2/M3)
+    runs-on: macos-14 # 1. Servidor nativo ARM64 (M1/M2/M3)
 
     steps:
     - name: Clonar el repositorio
@@ -17,7 +17,7 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        architecture: 'arm64' # Aseguramos que instale la versión de Python para M1
+        architecture: 'arm64' # 2. Forzamos Python nativo para M1
 
     - name: Instalar dependencias
       run: |
@@ -27,13 +27,12 @@ jobs:
 
     - name: Compilar la aplicación con PyInstaller
       run: |
-        # ATENCIÓN: En Mac el separador de --add-data es dos puntos (:) no punto y coma (;)
-        # Nombramos la salida como "ControlEventos"
+        # 3. ATENCIÓN: Usamos ":" como separador en --add-data
         pyinstaller --noconfirm --windowed --name "ControlEventos" --add-data "Logo.png:." --add-data "Logo_Collie_Software.png:." --collect-all customtkinter control_general.py
 
     - name: Comprimir la aplicación (.app a .zip)
       run: |
-        # Mac genera una carpeta .app, la comprimimos para poder descargarla
+        # 4. Comprimimos la carpeta ControlEventos.app a un .zip
         cd dist
         zip -r ControlEventos-Mac.zip ControlEventos.app/
 

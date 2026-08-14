@@ -691,7 +691,15 @@ class VentanaCotizaciones:
         self.menu_ctx.add_command(label="Crear Nueva Versión (Mismo Evento)", command=self.duplicar_a_nueva_version)
         self.menu_ctx.add_command(label="Eliminar Registro de Cotización", command=self.eliminar_cotizacion)
         
-        self.tree_cot.bind("<Button-3>", self.mostrar_menu_contextual)
+        # =========================================================
+        # 🚀 SOLUCIÓN MULTIPLATAFORMA PARA CLIC DERECHO
+        # =========================================================
+        if sys.platform == "darwin":  
+            self.tree_cot.bind("<Button-2>", self.mostrar_menu_contextual)
+            self.tree_cot.bind("<Control-Button-1>", self.mostrar_menu_contextual)
+        else:
+            self.tree_cot.bind("<Button-3>", self.mostrar_menu_contextual)
+            
         self.tree_cot.bind("<Double-1>", lambda event: self.abrir_ventana_editar())
 
         self.root.after(100, self.carga_inicial_diferida)

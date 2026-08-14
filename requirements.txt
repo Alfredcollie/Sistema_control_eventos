@@ -6,3 +6,4 @@ pdfplumber
 pandas
 openpyxl
 bcrypt
+keyring

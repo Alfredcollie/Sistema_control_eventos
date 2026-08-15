@@ -14,6 +14,7 @@ import re
 import json
 import threading
 import importlib
+import urllib.request
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter

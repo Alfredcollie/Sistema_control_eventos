@@ -107,52 +107,62 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # 🛡️ TRUCO MAESTRO V2: Diccionario de Rescate para Mac
-    memoria_sel = {"inicio": None, "fin": None}
+    # 🛡️ TRUCO MAESTRO V3: Rastreador Continuo (Anti-Mac)
+    text_widget._memoria_sel = None
     
-    def atrapar_seleccion(event=None):
+    def rastreador_seleccion():
         try:
-            memoria_sel["inicio"] = text_widget.index(tk.SEL_FIRST)
-            memoria_sel["fin"] = text_widget.index(tk.SEL_LAST)
-        except tk.TclError:
-            pass # No borramos la memoria si falla. Se mantiene segura.
+            if text_widget.winfo_exists():
+                try:
+                    # Si hay algo seleccionado, lo guardamos constantemente
+                    inicio = text_widget.index(tk.SEL_FIRST)
+                    fin = text_widget.index(tk.SEL_LAST)
+                    text_widget._memoria_sel = (inicio, fin)
+                except tk.TclError:
+                    pass # Si no hay selección, NO borramos la memoria.
+                
+                # Repetir el chequeo cada 100 milisegundos
+                text_widget.after(100, rastreador_seleccion)
+        except Exception:
+            pass
             
-    def reiniciar_memoria(event=None):
-        try:
-            text_widget.index(tk.SEL_FIRST)
-        except tk.TclError:
-            memoria_sel["inicio"] = None
-            memoria_sel["fin"] = None
+    # Iniciar el rastreador en segundo plano
+    rastreador_seleccion()
 
-    text_widget.bind("<<Selection>>", atrapar_seleccion)
-    text_widget.bind("<Key>", reiniciar_memoria)      # Se borra si escribes
-    text_widget.bind("<Button-1>", reiniciar_memoria) # Se borra si das clic normal
+    # Si el usuario hace clic normal o empieza a escribir, vaciamos la memoria 
+    # para no aplicar formato a una palabra vieja.
+    def limpiar_memoria(e):
+        text_widget._memoria_sel = None
+
+    text_widget.bind("<Button-1>", limpiar_memoria, add="+")
+    text_widget.bind("<Key>", limpiar_memoria, add="+")
 
     def insertar_etiqueta(tag_abrir, tag_cerrar):
-        # 1. Intentar el foco nativo (Windows / Casos normales)
+        # 1. Intento normal (Funciona siempre en Windows)
         try:
             inicio = text_widget.index(tk.SEL_FIRST)
             fin = text_widget.index(tk.SEL_LAST)
             texto = text_widget.get(inicio, fin)
             text_widget.delete(inicio, fin)
             text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
-            memoria_sel["inicio"], memoria_sel["fin"] = None, None
+            text_widget._memoria_sel = None
             return
         except tk.TclError:
             pass
-            
-        # 2. Rescate desde memoria (Especial para Mac)
-        if memoria_sel["inicio"] and memoria_sel["fin"]:
+
+        # 2. Rescate con el Rastreador (El salvavidas para Mac)
+        if text_widget._memoria_sel:
             try:
-                texto = text_widget.get(memoria_sel["inicio"], memoria_sel["fin"])
-                text_widget.delete(memoria_sel["inicio"], memoria_sel["fin"])
-                text_widget.insert(memoria_sel["inicio"], f"{tag_abrir}{texto}{tag_cerrar}")
-                memoria_sel["inicio"], memoria_sel["fin"] = None, None
+                inicio, fin = text_widget._memoria_sel
+                texto = text_widget.get(inicio, fin)
+                text_widget.delete(inicio, fin)
+                text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
+                text_widget._memoria_sel = None
                 return
             except Exception:
                 pass
-                
-        # 3. Sin selección (Inserta etiquetas vacías y posiciona el cursor al centro)
+
+        # 3. Inserción vacía si de verdad no seleccionaste nada
         text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
         retroceso = f"insert-{len(tag_cerrar)}c"
         text_widget.mark_set(tk.INSERT, retroceso)

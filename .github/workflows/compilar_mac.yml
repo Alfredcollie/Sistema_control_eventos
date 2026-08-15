@@ -1,11 +1,20 @@
 name: 🍏 Constructor de Instalador Mac
 
 on:
-  workflow_dispatch: # Botón manual para ejecutarlo cuando lo necesites
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Escribe la versión para el Release (ejemplo: v1.6.0)'
+        required: true
+        default: 'v1.6.0'
 
 jobs:
   build-mac:
     runs-on: macos-latest
+    
+    # ⚠️ MUY IMPORTANTE: Permisos para que el robot pueda publicar en Releases
+    permissions:
+      contents: write 
 
     steps:
     - name: 📥 Clonar tu código desde GitHub
@@ -20,15 +29,11 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install pyinstaller
-        # Instala dependencias desde tu requirements.txt automáticamente
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        # Respaldo de seguridad para las librerías críticas
         pip install psycopg2-binary customtkinter reportlab keyring
 
     - name: 🏗️ Compilar la Aplicación (Black Cube)
       run: |
-        # Inicia desde control_general.py (esto jala todos tus otros .py automáticamente)
-        # --add-data ".:." empaca tus logos, json y recursos gráficos.
         pyinstaller --windowed --name "ControlEventos" --add-data ".:." control_general.py
 
     - name: 📦 Empaquetar en archivo .dmg
@@ -36,13 +41,17 @@ jobs:
         echo "Fabricando el disco de instalación..."
         mkdir -p Instalador_Temp
         cp -R "dist/ControlEventos.app" Instalador_Temp/
-        # Creamos el acceso directo a Aplicaciones para el instalador
         ln -s /Applications Instalador_Temp/Applications
-        # Horneamos el DMG final
         hdiutil create -volname "BlackCube" -srcfolder Instalador_Temp -ov -format UDZO "Instalador.Black.Cube.dmg"
 
-    - name: 📤 Entregar el Instalador Final
-      uses: actions/upload-artifact@v4
+    - name: 🚀 Publicar Automáticamente en Releases
+      uses: softprops/action-gh-release@v2
       with:
-        name: Instalador-Mac-BlackCube
-        path: Instalador.Black.Cube.dmg
+        tag_name: ${{ github.event.inputs.version }}
+        name: Sistema Black Cube ${{ github.event.inputs.version }}
+        body: |
+          🚀 **Nueva actualización de Black Cube para Mac**
+          - Instalador DMG generado automáticamente por GitHub Actions.
+        files: Instalador.Black.Cube.dmg
+        draft: false
+        prerelease: false

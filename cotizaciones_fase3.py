@@ -107,43 +107,52 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # 🛡️ TRUCO MAESTRO: Memoria fotográfica de la selección para Mac
-    def rastrear_seleccion(event=None):
+    # 🛡️ TRUCO MAESTRO V2: Diccionario de Rescate para Mac
+    memoria_sel = {"inicio": None, "fin": None}
+    
+    def atrapar_seleccion(event=None):
         try:
-            text_widget._sel_start = text_widget.index("sel.first")
-            text_widget._sel_end = text_widget.index("sel.last")
+            memoria_sel["inicio"] = text_widget.index(tk.SEL_FIRST)
+            memoria_sel["fin"] = text_widget.index(tk.SEL_LAST)
         except tk.TclError:
-            pass
-
-    def limpiar_memoria(event=None):
+            pass # No borramos la memoria si falla. Se mantiene segura.
+            
+    def reiniciar_memoria(event=None):
         try:
-            text_widget.index("sel.first")
+            text_widget.index(tk.SEL_FIRST)
         except tk.TclError:
-            text_widget._sel_start = None
-            text_widget._sel_end = None
+            memoria_sel["inicio"] = None
+            memoria_sel["fin"] = None
 
-    text_widget.bind("<<Selection>>", rastrear_seleccion)
-    text_widget.bind("<ButtonRelease-1>", limpiar_memoria, add="+")
-    text_widget.bind("<KeyRelease>", limpiar_memoria, add="+")
+    text_widget.bind("<<Selection>>", atrapar_seleccion)
+    text_widget.bind("<Key>", reiniciar_memoria)      # Se borra si escribes
+    text_widget.bind("<Button-1>", reiniciar_memoria) # Se borra si das clic normal
 
     def insertar_etiqueta(tag_abrir, tag_cerrar):
-        # 1. Intentamos usar la selección guardada en memoria fotográfica
-        s_start = getattr(text_widget, "_sel_start", None)
-        s_end = getattr(text_widget, "_sel_end", None)
-        
-        if s_start and s_end:
+        # 1. Intentar el foco nativo (Windows / Casos normales)
+        try:
+            inicio = text_widget.index(tk.SEL_FIRST)
+            fin = text_widget.index(tk.SEL_LAST)
+            texto = text_widget.get(inicio, fin)
+            text_widget.delete(inicio, fin)
+            text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
+            memoria_sel["inicio"], memoria_sel["fin"] = None, None
+            return
+        except tk.TclError:
+            pass
+            
+        # 2. Rescate desde memoria (Especial para Mac)
+        if memoria_sel["inicio"] and memoria_sel["fin"]:
             try:
-                texto = text_widget.get(s_start, s_end)
-                text_widget.delete(s_start, s_end)
-                text_widget.insert(s_start, f"{tag_abrir}{texto}{tag_cerrar}")
-                # Borramos la memoria
-                text_widget._sel_start = None
-                text_widget._sel_end = None
+                texto = text_widget.get(memoria_sel["inicio"], memoria_sel["fin"])
+                text_widget.delete(memoria_sel["inicio"], memoria_sel["fin"])
+                text_widget.insert(memoria_sel["inicio"], f"{tag_abrir}{texto}{tag_cerrar}")
+                memoria_sel["inicio"], memoria_sel["fin"] = None, None
                 return
             except Exception:
                 pass
                 
-        # 2. Si no había selección, lo ponemos en el cursor actual
+        # 3. Sin selección (Inserta etiquetas vacías y posiciona el cursor al centro)
         text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
         retroceso = f"insert-{len(tag_cerrar)}c"
         text_widget.mark_set(tk.INSERT, retroceso)

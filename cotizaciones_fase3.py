@@ -1,7 +1,3 @@
---- cotizaciones_fase3.py (原始)
-
-
-+++ cotizaciones_fase3.py (修改后)
 # -*- coding: utf-8 -*-
 
 import psycopg2
@@ -110,11 +106,10 @@ def texto_plano_sin_marcado(texto):
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
-
-    # 🛡️ TRUCO MAESTRO V6: Bloqueo por Acercamiento (Hover-Lock) Anti-Mac + Captura en ButtonPress
+    
+    # 🛡️ TRUCO MAESTRO V5: Bloqueo por Acercamiento (Hover-Lock) Anti-Mac
     text_widget._memoria_blindada = None
     text_widget._memoria_bloqueada = False
-    text_widget._seleccion_temporal = None  # 🆕 Nueva memoria temporal para el clic
 
     def rastreador_mac():
         try:
@@ -135,42 +130,25 @@ def crear_barra_formato(parent, text_widget):
     def activar_candado(e): text_widget._memoria_bloqueada = True
     def quitar_candado(e): text_widget._memoria_bloqueada = False
 
-    def capturar_seleccion_antes_clic(e):
-        """🆕 Captura la selección ANTES de que el botón robe el foco (ButtonPress)"""
-        try:
-            if text_widget.tag_ranges(tk.SEL):
-                text_widget._seleccion_temporal = (text_widget.index(tk.SEL_FIRST), text_widget.index(tk.SEL_LAST))
-        except Exception:
-            pass
-
     f_barra.bind("<Enter>", activar_candado, add="+")
     f_barra.bind("<Leave>", quitar_candado, add="+")
 
-    # 🎯 Vincular ButtonPress en TODA la barra para capturar selección antes del clic
-    f_barra.bind("<Button-1>", capturar_seleccion_antes_clic, add="+")
-
     def insertar_etiqueta(tag_abrir, tag_cerrar):
         s, e = None, None
+        
+        # 1. Intento normal (Windows y atajos de teclado)
+        try:
+            if text_widget.tag_ranges(tk.SEL):
+                s = text_widget.index(tk.SEL_FIRST)
+                e = text_widget.index(tk.SEL_LAST)
+        except Exception:
+            pass
 
-        # 1. Intento con selección temporal (capturada en el ButtonPress del botón)
-        if text_widget._seleccion_temporal:
-            s, e = text_widget._seleccion_temporal
-            text_widget._seleccion_temporal = None  # Limpiar después de usar
-
-        # 2. Intento normal (Windows y atajos de teclado)
-        if not s and not e:
-            try:
-                if text_widget.tag_ranges(tk.SEL):
-                    s = text_widget.index(tk.SEL_FIRST)
-                    e = text_widget.index(tk.SEL_LAST)
-            except Exception:
-                pass
-
-        # 3. Rescate con memoria blindada (Para el clic en Mac)
+        # 2. Rescate con memoria blindada (Para el clic en Mac)
         if not s and text_widget._memoria_blindada:
             s, e = text_widget._memoria_blindada
 
-        # 4. Aplicar los corchetes
+        # 3. Aplicar los corchetes
         if s and e:
             try:
                 texto = text_widget.get(s, e)
@@ -182,7 +160,7 @@ def crear_barra_formato(parent, text_widget):
             except Exception:
                 pass
         else:
-            # 5. Si realmente no se seleccionó nada
+            # 4. Si realmente no se seleccionó nada
             text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
             retroceso = f"insert-{len(tag_cerrar)}c"
             text_widget.mark_set(tk.INSERT, retroceso)
@@ -195,20 +173,18 @@ def crear_barra_formato(parent, text_widget):
     btn_b.pack(side="left", padx=2)
     btn_b.bind("<Enter>", activar_candado, add="+")
     btn_b.bind("<Leave>", quitar_candado, add="+")
-    btn_b.bind("<Button-1>", capturar_seleccion_antes_clic, add="+")
-
+    
     btn_c = ctk.CTkButton(f_barra, text="Color", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
     btn_c.pack(side="left", padx=2)
     btn_c.bind("<Enter>", activar_candado, add="+")
     btn_c.bind("<Leave>", quitar_candado, add="+")
-    btn_c.bind("<Button-1>", capturar_seleccion_antes_clic, add="+")
 
     # ⌨️ PLAN B INFALIBLE: Atajos de teclado para Mac (Cmd) y Win (Ctrl)
     text_widget.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
     text_widget.bind("<Command-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
     text_widget.bind("<Control-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
     text_widget.bind("<Control-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-
+    
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):
@@ -808,7 +784,7 @@ class VentanaEtapaProveedores:
                     _SCHEMA_F3_OK = True
                 except Exception: pass
                 finally: liberar_conexion(c_conn)
-
+                
             threading.Thread(target=tarea_init, daemon=True).start()
 
         self.f_info = ctk.CTkFrame(self.v_prov, corner_radius=10, fg_color="#1f538d")
@@ -833,7 +809,7 @@ class VentanaEtapaProveedores:
             pass
         if not self.cats_assigned:
             self.cats_assigned = ["No hay categorias disponibles"]
-
+            
         self.cmb_cat_e = ctk.CTkComboBox(self.f_inputs, values=self.cats_assigned, state="readonly", width=180, command=self.filtrar_proveedores_por_categoria)
         self.cmb_cat_e.grid(row=1, column=1, sticky="w", pady=5, padx=5)
         self.cmb_cat_e.set(self.cats_assigned[0])
@@ -841,7 +817,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(self.f_inputs, text="Proveedor asignado:", font=("Arial", 12, "bold")).grid(row=1, column=2, sticky="w", pady=5, padx=15)
         f_prov_accion = ctk.CTkFrame(self.f_inputs, fg_color="transparent")
         f_prov_accion.grid(row=1, column=3, sticky="w", pady=5, padx=5)
-
+        
         self.cmb_p_list = ctk.CTkComboBox(f_prov_accion, values=["--- Seleccione Proveedor ---"], state="readonly", width=250)
         self.cmb_p_list.pack(side="left", padx=(0, 5))
         self.cmb_p_list.set("--- Seleccione Proveedor ---")
@@ -921,10 +897,10 @@ class VentanaEtapaProveedores:
         f_header_notas = ctk.CTkFrame(f_notas_wrapper, fg_color="transparent")
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
-
+        
         # Ojo aquí: Le dejamos el exportselection=0 para que todo esté doblemente blindado
         self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0)
-
+        
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
         self.txt_p_notes.pack(fill="both", expand=True, side="top")
@@ -951,7 +927,7 @@ class VentanaEtapaProveedores:
                     import final_cotizaciones as motor_pdf
                 except Exception:
                     import cotizaciones as motor_pdf
-
+                    
                 conn_pdf = conectar_db(silencioso=True)
                 if not conn_pdf: return
                 try:
@@ -1192,10 +1168,10 @@ class VentanaEtapaProveedores:
     # 🚀 FIX: FILTRO PROVEEDORES ASÍNCRONO + CACHÉ CON MATCH DE CATEGORÍA
     def filtrar_proveedores_por_categoria(self, choice=None):
         cat_sel = str(self.cmb_cat_e.get()).strip().replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
-
+        
         clave_cache = "lista_proveedores_completos_con_cat"
         lista_completa = cache_sistema.obtener(clave_cache)
-
+        
         if lista_completa is not None:
             self._filtrar_y_aplicar(lista_completa, cat_sel)
         else:
@@ -1221,35 +1197,35 @@ class VentanaEtapaProveedores:
                                 # 3. Si no existe ninguna, traemos solo los nombres (Fallback de seguridad)
                                 cursor.execute("SELECT nombre FROM proveedores ORDER BY nombre ASC")
                                 data = [(str(r[0]).strip(), "") for r in cursor.fetchall() if r[0]]
-
+                                
                         cache_sistema.guardar(clave_cache, data)
                     except: pass
                     finally: liberar_conexion(conn)
-
+                    
                 if hasattr(self, 'root') and self.v_prov.winfo_exists():
                     self.root.after(0, lambda: self._filtrar_y_aplicar(data, cat_sel))
-
+                    
             threading.Thread(target=tarea_provs, daemon=True).start()
 
     def _filtrar_y_aplicar(self, lista_completa, cat_sel):
         if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return
-
+        
         prov_actual = self.cmb_p_list.get() # Guardar el seleccionado
-
+        
         if not cat_sel or cat_sel == "No hay categorias disponibles":
             lista = ["--- Seleccione Proveedor ---"] + [n for n, c in lista_completa]
         else:
             # Filtramos estrictamente comparando la categoría solicitada vs la registrada en proveedor
             provs_filtrados = [n for n, c in lista_completa if cat_sel.lower() in c.lower()]
-
+            
             if provs_filtrados:
                 lista = ["--- Seleccione Proveedor ---"] + provs_filtrados
             else:
                 # Si la categoría no coincide con ningún proveedor, mostramos todos con una advertencia visual
                 lista = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista_completa]
-
+                
         self.cmb_p_list.configure(values=lista)
-
+        
         # Restaurar la selección si sigue siendo válida en la nueva lista
         if prov_actual in lista and "Seleccione" not in prov_actual:
             self.cmb_p_list.set(prov_actual)
@@ -1263,12 +1239,12 @@ class VentanaEtapaProveedores:
         if not self.conn:
             return
         cat, prov = self.cmb_cat_e.get().strip(), self.cmb_p_list.get().strip()
-
+        
         # Validación de combobox sin seleccionar o cabeceras falsas
         if prov in ["Seleccione un proveedor", "Haga clic en Cargar Proveedores", "", "--- Sin proveedores específicos, mostrando todos ---", "--- Seleccione Proveedor ---", "--- Seleccione (No hay del rubro) ---"]:
             messagebox.showwarning("Atención", "Por favor despliegue la lista y seleccione un proveedor válido.", parent=self.v_prov)
             return
-
+            
         try:
             cant = int(self.ent_cant.get().strip())
             dias_cred = int(self.ent_dias_credito.get().strip() or 0)
@@ -1276,21 +1252,21 @@ class VentanaEtapaProveedores:
         except ValueError:
             messagebox.showwarning("Error numérico", "Importes, días o cantidades inválidas.", parent=self.v_prov)
             return
-
+            
         if pd > pl:
             messagebox.showwarning("Alerta", "El descuento no puede superar al precio de lista.", parent=self.v_prov)
             return
-
+            
         p_unid = pl + vg if self.cmb_tipo_ganancia.get() == "Monto Fijo" else pl * (1 + (vg / 100.0))
         p_final_venta = p_unid * cant
         t_ganancia_db = "Monto Fijo" if self.cmb_tipo_ganancia.get() == "Monto Fijo" else "Porcentaje"
         notes = self.txt_p_notes.get("1.0", "end-1c").strip()
         c = self.conn.cursor()
-
+        
         try:
             c.execute("""
-                INSERT INTO cotizacion_proveedores
-                (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, cantidad, dias_credito)
+                INSERT INTO cotizacion_proveedores 
+                (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, cantidad, dias_credito) 
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (self.codigo_cot, cat, prov, pl, pd, t_ganancia_db, vg, p_final_venta, notes, cant, dias_cred))
             self.conn.commit()
@@ -1376,10 +1352,10 @@ class VentanaEtapaProveedores:
         f_m_header = ctk.CTkFrame(f_m, fg_color="transparent")
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
-
+        
         # 🔧 El exportselection en 0, para mayor seguridad global
         txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0)
-
+        
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
         txt_m_notas.pack(fill="x", padx=10, pady=2)
@@ -1456,9 +1432,9 @@ class VentanaEtapaProveedores:
             conteo_lineas = texto_nota.count('\n') + 1
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
-
+                
             txt_notas = tk.Text(f_row, height=max(3, conteo_lineas), font=("Arial", 10), wrap="word", bg="#ffffff", bd=0, highlightthickness=0, exportselection=0)
-
+            
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)
             txt_notas.pack(side="left", fill="both", expand=True, padx=10, pady=5)

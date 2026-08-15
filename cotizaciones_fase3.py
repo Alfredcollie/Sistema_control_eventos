@@ -105,10 +105,28 @@ def texto_plano_sin_marcado(texto):
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
-    btn_b = ctk.CTkButton(f_barra, text="B", width=30, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: text_widget.insert(tk.INSERT, "[B][/B]"))
+    
+    def insertar_etiqueta(tag_abrir, tag_cerrar):
+        try:
+            # 1. Si el usuario seleccionó un texto con el mouse, lo envolvemos automáticamente
+            sel_start = text_widget.index("sel.first")
+            sel_end = text_widget.index("sel.last")
+            texto = text_widget.get(sel_start, sel_end)
+            text_widget.delete(sel_start, sel_end)
+            text_widget.insert(sel_start, f"{tag_abrir}{texto}{tag_cerrar}")
+        except tk.TclError:
+            # 2. Si no hay selección, ponemos las etiquetas y dejamos el cursor en el centro
+            text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
+            retroceso = f"insert-{len(tag_cerrar)}c"
+            text_widget.mark_set(tk.INSERT, retroceso)
+            text_widget.focus_set()
+
+    btn_b = ctk.CTkButton(f_barra, text="B", width=30, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
     btn_b.pack(side="left", padx=2)
-    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: text_widget.insert(tk.INSERT, "[M][/M]"))
+    
+    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
     btn_c.pack(side="left", padx=2)
+    
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):

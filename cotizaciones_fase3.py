@@ -107,29 +107,58 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    def insertar_etiqueta(tag_abrir, tag_cerrar):
+    # 🛡️ TRUCO MAESTRO V4: Memoria Indestructible para Mac
+    text_widget._sel_start = None
+    text_widget._sel_end = None
+    
+    def guardar_seleccion(event=None):
         try:
-            # Al pedir SEL_FIRST, si la caja nunca perdió el foco, SIEMPRE funcionará
-            inicio = text_widget.index(tk.SEL_FIRST)
-            fin = text_widget.index(tk.SEL_LAST)
-            
-            # TRUCO: Insertamos al revés para no borrar texto ni correr los índices
-            text_widget.insert(fin, tag_cerrar)
-            text_widget.insert(inicio, tag_abrir)
-            
-            # Limpiamos la selección visual para evitar clics repetidos accidentales
-            text_widget.tag_remove(tk.SEL, "1.0", tk.END)
+            # Solo actualizamos la memoria si encontramos algo sombreado
+            text_widget._sel_start = text_widget.index(tk.SEL_FIRST)
+            text_widget._sel_end = text_widget.index(tk.SEL_LAST)
         except tk.TclError:
-            # Solo entra aquí si el usuario realmente NO sombreó nada
+            # Si da error (ej. la Mac borró la selección), IGNORAMOS EL ERROR.
+            # No borramos la memoria. Conservamos la última selección válida.
+            pass
+            
+    def limpiar_memoria(event=None):
+        # Esta función borra la memoria solo si el usuario hace clic normal en la caja
+        # o empieza a escribir, para no arrastrar selecciones viejas.
+        text_widget._sel_start = None
+        text_widget._sel_end = None
+
+    text_widget.bind("<<Selection>>", guardar_seleccion, add="+")
+    text_widget.bind("<ButtonPress-1>", limpiar_memoria, add="+")
+    text_widget.bind("<Key>", limpiar_memoria, add="+")
+
+    def insertar_etiqueta(tag_abrir, tag_cerrar):
+        s = text_widget._sel_start
+        e = text_widget._sel_end
+        
+        if s and e:
+            try:
+                # 1. Usar las coordenadas guardadas en memoria
+                texto = text_widget.get(s, e)
+                text_widget.delete(s, e)
+                text_widget.insert(s, f"{tag_abrir}{texto}{tag_cerrar}")
+                
+                # Borramos la memoria luego de usarla
+                text_widget._sel_start = None
+                text_widget._sel_end = None
+                
+                try: text_widget.tag_remove(tk.SEL, "1.0", tk.END) except tk.TclError: pass
+            except Exception:
+                pass
+        else:
+            # 2. Si realmente no había nada seleccionado, insertar en cursor
             text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
             retroceso = f"insert-{len(tag_cerrar)}c"
             text_widget.mark_set(tk.INSERT, retroceso)
             
         text_widget.focus_set()
 
-    # 🛡️ SOLUCIÓN MAESTRA: En lugar de botones, usamos Etiquetas (Labels) que parecen botones.
-    # Así JAMÁS le robarán el foco del teclado a la caja de texto.
-    
+    # Usamos Etiquetas (Labels) en lugar de Botones.
+    # En Windows, evitan el parpadeo. En Mac, evitan robar el foco bruscamente.
     btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
     btn_b.pack(side="left", padx=2)
     btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))

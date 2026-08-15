@@ -107,69 +107,70 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # 🛡️ TRUCO MAESTRO V4: Memoria Indestructible para Mac
-    text_widget._sel_start = None
-    text_widget._sel_end = None
-    
-    def guardar_seleccion(event=None):
+    # 🛡️ LA MEMORIA INTELIGENTE
+    text_widget._mem_inicio = None
+    text_widget._mem_fin = None
+
+    def guardar_seleccion(e=None):
         try:
-            # Solo actualizamos la memoria si encontramos algo sombreado
-            text_widget._sel_start = text_widget.index(tk.SEL_FIRST)
-            text_widget._sel_end = text_widget.index(tk.SEL_LAST)
+            # Solo guardamos si REALMENTE hay algo sombreado.
+            # Si Mac manda un evento de "selección vacía", esto lo ignora y protege la memoria.
+            if text_widget.tag_ranges(tk.SEL):
+                text_widget._mem_inicio = text_widget.index(tk.SEL_FIRST)
+                text_widget._mem_fin = text_widget.index(tk.SEL_LAST)
         except tk.TclError:
-            # Si da error (ej. la Mac borró la selección), IGNORAMOS EL ERROR.
-            # No borramos la memoria. Conservamos la última selección válida.
             pass
-            
-    def limpiar_memoria(event=None):
-        # Esta función borra la memoria solo si el usuario hace clic normal en la caja
-        # o empieza a escribir, para no arrastrar selecciones viejas.
-        text_widget._sel_start = None
-        text_widget._sel_end = None
+
+    def resetear_memoria(e=None):
+        # Solo se borra la memoria si el usuario hace clic normal DENTRO de la caja de texto.
+        text_widget._mem_inicio = None
+        text_widget._mem_fin = None
 
     text_widget.bind("<<Selection>>", guardar_seleccion, add="+")
-    text_widget.bind("<ButtonPress-1>", limpiar_memoria, add="+")
-    text_widget.bind("<Key>", limpiar_memoria, add="+")
+    text_widget.bind("<ButtonPress-1>", resetear_memoria, add="+")
 
     def insertar_etiqueta(tag_abrir, tag_cerrar):
-        s = text_widget._sel_start
-        e = text_widget._sel_end
-        
-        if s and e:
+        inicio = None
+        fin = None
+
+        # 1. Intentar atrapar la selección en tiempo real (Funciona en Windows)
+        try:
+            if text_widget.tag_ranges(tk.SEL):
+                inicio = text_widget.index(tk.SEL_FIRST)
+                fin = text_widget.index(tk.SEL_LAST)
+        except tk.TclError:
+            pass
+
+        # 2. Si no hay selección (porque Mac la borró), usar la memoria protegida
+        if not inicio and text_widget._mem_inicio and text_widget._mem_fin:
+            inicio = text_widget._mem_inicio
+            fin = text_widget._mem_fin
+
+        # 3. Aplicar los corchetes
+        if inicio and fin:
             try:
-                # 1. Usar las coordenadas guardadas en memoria
-                texto = text_widget.get(s, e)
-                text_widget.delete(s, e)
-                text_widget.insert(s, f"{tag_abrir}{texto}{tag_cerrar}")
-                
-                # Borramos la memoria luego de usarla
-                text_widget._sel_start = None
-                text_widget._sel_end = None
-                
-                try: text_widget.tag_remove(tk.SEL, "1.0", tk.END) except tk.TclError: pass
+                texto = text_widget.get(inicio, fin)
+                text_widget.delete(inicio, fin)
+                text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
+                # Limpiamos para el próximo uso
+                text_widget._mem_inicio = None
+                text_widget._mem_fin = None
+                text_widget.tag_remove(tk.SEL, "1.0", tk.END)
             except Exception:
                 pass
         else:
-            # 2. Si realmente no había nada seleccionado, insertar en cursor
+            # Si en verdad no seleccionó nada, va en la posición del cursor
             text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
             retroceso = f"insert-{len(tag_cerrar)}c"
             text_widget.mark_set(tk.INSERT, retroceso)
             
         text_widget.focus_set()
 
-    # Usamos Etiquetas (Labels) en lugar de Botones.
-    # En Windows, evitan el parpadeo. En Mac, evitan robar el foco bruscamente.
-    btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
+    btn_b = ctk.CTkButton(f_barra, text="B", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
     btn_b.pack(side="left", padx=2)
-    btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    btn_b.bind("<Enter>", lambda e: btn_b.configure(fg_color="#c8c8c8"))
-    btn_b.bind("<Leave>", lambda e: btn_b.configure(fg_color="#e0e0e0"))
     
-    btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
+    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
     btn_c.pack(side="left", padx=2)
-    btn_c.bind("<Button-1>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-    btn_c.bind("<Enter>", lambda e: btn_c.configure(fg_color="#c8c8c8"))
-    btn_c.bind("<Leave>", lambda e: btn_c.configure(fg_color="#e0e0e0"))
     
     return f_barra
 

@@ -76,7 +76,6 @@ def abrir_documento(ruta):
 # =========================================================
 # HERRAMIENTAS DE TEXTO ENRIQUECIDO
 # =========================================================
-# Se agregó re.IGNORECASE para que acepte [b] y [B] por igual
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
 def hex_to_rgb(hex_color):
@@ -108,20 +107,47 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    def insertar_etiqueta(tag_abrir, tag_cerrar):
+    # 🛡️ TRUCO MAESTRO: Memoria fotográfica de la selección para Mac
+    def rastrear_seleccion(event=None):
         try:
-            # 1. Si el usuario seleccionó un texto con el mouse, lo envolvemos automáticamente
-            sel_start = text_widget.index("sel.first")
-            sel_end = text_widget.index("sel.last")
-            texto = text_widget.get(sel_start, sel_end)
-            text_widget.delete(sel_start, sel_end)
-            text_widget.insert(sel_start, f"{tag_abrir}{texto}{tag_cerrar}")
+            text_widget._sel_start = text_widget.index("sel.first")
+            text_widget._sel_end = text_widget.index("sel.last")
         except tk.TclError:
-            # 2. Si no hay selección, ponemos las etiquetas y dejamos el cursor en el centro
-            text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
-            retroceso = f"insert-{len(tag_cerrar)}c"
-            text_widget.mark_set(tk.INSERT, retroceso)
-            text_widget.focus_set()
+            pass
+
+    def limpiar_memoria(event=None):
+        try:
+            text_widget.index("sel.first")
+        except tk.TclError:
+            text_widget._sel_start = None
+            text_widget._sel_end = None
+
+    text_widget.bind("<<Selection>>", rastrear_seleccion)
+    text_widget.bind("<ButtonRelease-1>", limpiar_memoria, add="+")
+    text_widget.bind("<KeyRelease>", limpiar_memoria, add="+")
+
+    def insertar_etiqueta(tag_abrir, tag_cerrar):
+        # 1. Intentamos usar la selección guardada en memoria fotográfica
+        s_start = getattr(text_widget, "_sel_start", None)
+        s_end = getattr(text_widget, "_sel_end", None)
+        
+        if s_start and s_end:
+            try:
+                texto = text_widget.get(s_start, s_end)
+                text_widget.delete(s_start, s_end)
+                text_widget.insert(s_start, f"{tag_abrir}{texto}{tag_cerrar}")
+                # Borramos la memoria
+                text_widget._sel_start = None
+                text_widget._sel_end = None
+                return
+            except Exception:
+                pass
+                
+        # 2. Si no había selección, lo ponemos en el cursor actual
+        text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
+        retroceso = f"insert-{len(tag_cerrar)}c"
+        text_widget.mark_set(tk.INSERT, retroceso)
+        text_widget.focus_set()
 
     btn_b = ctk.CTkButton(f_barra, text="B", width=30, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
     btn_b.pack(side="left", padx=2)
@@ -842,7 +868,6 @@ class VentanaEtapaProveedores:
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
-        # 🔧 FIX MAC: exportselection=False agregado aquí
         self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=False)
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
@@ -1297,7 +1322,6 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
-        # 🔧 FIX MAC: exportselection=False en la ventana de edición
         txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=False)
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
@@ -1377,7 +1401,6 @@ class VentanaEtapaProveedores:
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
-            # 🔧 FIX MAC: exportselection=False también en la tabla
             txt_notas = tk.Text(f_row, height=max(3, conteo_lineas), font=("Arial", 10), wrap="word", bg="#ffffff", bd=0, highlightthickness=0, exportselection=False)
             
             configurar_tags_formato(txt_notas, tam=10)

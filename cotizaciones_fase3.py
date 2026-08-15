@@ -107,72 +107,40 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # 🛡️ TRUCO MAESTRO V3: Rastreador Continuo (Anti-Mac)
-    text_widget._memoria_sel = None
-    
-    def rastreador_seleccion():
-        try:
-            if text_widget.winfo_exists():
-                try:
-                    # Si hay algo seleccionado, lo guardamos constantemente
-                    inicio = text_widget.index(tk.SEL_FIRST)
-                    fin = text_widget.index(tk.SEL_LAST)
-                    text_widget._memoria_sel = (inicio, fin)
-                except tk.TclError:
-                    pass # Si no hay selección, NO borramos la memoria.
-                
-                # Repetir el chequeo cada 100 milisegundos
-                text_widget.after(100, rastreador_seleccion)
-        except Exception:
-            pass
-            
-    # Iniciar el rastreador en segundo plano
-    rastreador_seleccion()
-
-    # Si el usuario hace clic normal o empieza a escribir, vaciamos la memoria 
-    # para no aplicar formato a una palabra vieja.
-    def limpiar_memoria(e):
-        text_widget._memoria_sel = None
-
-    text_widget.bind("<Button-1>", limpiar_memoria, add="+")
-    text_widget.bind("<Key>", limpiar_memoria, add="+")
-
     def insertar_etiqueta(tag_abrir, tag_cerrar):
-        # 1. Intento normal (Funciona siempre en Windows)
         try:
+            # Al pedir SEL_FIRST, si la caja nunca perdió el foco, SIEMPRE funcionará
             inicio = text_widget.index(tk.SEL_FIRST)
             fin = text_widget.index(tk.SEL_LAST)
-            texto = text_widget.get(inicio, fin)
-            text_widget.delete(inicio, fin)
-            text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
-            text_widget._memoria_sel = None
-            return
+            
+            # TRUCO: Insertamos al revés para no borrar texto ni correr los índices
+            text_widget.insert(fin, tag_cerrar)
+            text_widget.insert(inicio, tag_abrir)
+            
+            # Limpiamos la selección visual para evitar clics repetidos accidentales
+            text_widget.tag_remove(tk.SEL, "1.0", tk.END)
         except tk.TclError:
-            pass
-
-        # 2. Rescate con el Rastreador (El salvavidas para Mac)
-        if text_widget._memoria_sel:
-            try:
-                inicio, fin = text_widget._memoria_sel
-                texto = text_widget.get(inicio, fin)
-                text_widget.delete(inicio, fin)
-                text_widget.insert(inicio, f"{tag_abrir}{texto}{tag_cerrar}")
-                text_widget._memoria_sel = None
-                return
-            except Exception:
-                pass
-
-        # 3. Inserción vacía si de verdad no seleccionaste nada
-        text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
-        retroceso = f"insert-{len(tag_cerrar)}c"
-        text_widget.mark_set(tk.INSERT, retroceso)
+            # Solo entra aquí si el usuario realmente NO sombreó nada
+            text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
+            retroceso = f"insert-{len(tag_cerrar)}c"
+            text_widget.mark_set(tk.INSERT, retroceso)
+            
         text_widget.focus_set()
 
-    btn_b = ctk.CTkButton(f_barra, text="B", width=30, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
-    btn_b.pack(side="left", padx=2)
+    # 🛡️ SOLUCIÓN MAESTRA: En lugar de botones, usamos Etiquetas (Labels) que parecen botones.
+    # Así JAMÁS le robarán el foco del teclado a la caja de texto.
     
-    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
+    btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
+    btn_b.pack(side="left", padx=2)
+    btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))
+    btn_b.bind("<Enter>", lambda e: btn_b.configure(fg_color="#c8c8c8"))
+    btn_b.bind("<Leave>", lambda e: btn_b.configure(fg_color="#e0e0e0"))
+    
+    btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
     btn_c.pack(side="left", padx=2)
+    btn_c.bind("<Button-1>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    btn_c.bind("<Enter>", lambda e: btn_c.configure(fg_color="#c8c8c8"))
+    btn_c.bind("<Leave>", lambda e: btn_c.configure(fg_color="#e0e0e0"))
     
     return f_barra
 

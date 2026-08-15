@@ -32,8 +32,10 @@ except Exception:
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
+COLOR_PRIMARIO = "#eb337a"
+
 # =========================================================
-# MULTIPLATAFORMA: Ocultar consola solo en Windows
+# MULTIPLATAFORMA: Funciones Universales
 # =========================================================
 if sys.platform == "win32":
     try:
@@ -43,10 +45,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-
-# =========================================================
-# MULTIPLATAFORMA: Función universal para maximizar
-# =========================================================
 def maximizar_ventana(ventana):
     try:
         if sys.platform == "win32":
@@ -63,9 +61,22 @@ def maximizar_ventana(ventana):
         except Exception:
             pass
 
+def abrir_documento(ruta):
+    """Abre el PDF generado con el visor predeterminado según el Sistema Operativo"""
+    try:
+        if sys.platform == "win32":
+            os.startfile(ruta)
+        elif sys.platform == "darwin":
+            subprocess.call(["open", ruta])
+        else:
+            subprocess.call(["xdg-open", ruta])
+    except Exception as e:
+        print(f"No se pudo abrir el documento automáticamente: {e}")
 
+# =========================================================
+# HERRAMIENTAS DE TEXTO ENRIQUECIDO
+# =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])')
-
 
 def hex_to_rgb(hex_color):
     try:
@@ -73,7 +84,6 @@ def hex_to_rgb(hex_color):
         return tuple(int(hex_color[i:i+2], 16)/255.0 for i in (0, 2, 4))
     except Exception:
         return (0.0, 0.0, 0.0)
-
 
 def parsear_segmentos_formato(texto):
     resultado, negrita, color_p = [], False, False
@@ -90,9 +100,34 @@ def parsear_segmentos_formato(texto):
             resultado.append((parte, negrita, color_p))
     return resultado
 
-
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
+
+def crear_barra_formato(parent, text_widget):
+    f_barra = ctk.CTkFrame(parent, fg_color="transparent")
+    btn_b = ctk.CTkButton(f_barra, text="B", width=30, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: text_widget.insert(tk.INSERT, "[B][/B]"))
+    btn_b.pack(side="left", padx=2)
+    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: text_widget.insert(tk.INSERT, "[M][/M]"))
+    btn_c.pack(side="left", padx=2)
+    return f_barra
+
+def configurar_tags_formato(txt_widget, tam=10):
+    txt_widget.tag_configure("bold", font=("Arial", tam, "bold"))
+    txt_widget.tag_configure("color", foreground=COLOR_PRIMARIO)
+    txt_widget.tag_configure("bold_color", font=("Arial", tam, "bold"), foreground=COLOR_PRIMARIO)
+
+def insertar_texto_formateado(txt_widget, texto):
+    txt_widget.delete("1.0", tk.END)
+    segmentos = parsear_segmentos_formato(texto)
+    for frag, neg, col in segmentos:
+        tags = tuple()
+        if neg and col:
+            tags = ("bold_color",)
+        elif neg:
+            tags = ("bold",)
+        elif col:
+            tags = ("color",)
+        txt_widget.insert(tk.END, frag, tags)
 
 # =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS

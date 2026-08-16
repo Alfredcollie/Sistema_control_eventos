@@ -4,20 +4,6 @@
 =========================================================
 FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 =========================================================
-Genera la Cotización oficial en PDF.
-La interfaz (ventanas) vive en cotizaciones.py; aquí queda
-únicamente el motor de impresión para no duplicar código.
-
-Mejoras:
-- Regex [B]/[M] corregido.
-- Ruta de config_local.json absoluta (app_paths).
-- ALTER TABLE solo la primera vez (_SCHEMA_PDF_OK).
-- Logo con escala inteligente (no estira logos pequeños).
-- Modo "Razón Comercial" para el nombre del cliente.
-- Penalidad con salto de línea automático.
-- FIX: Removido mask='auto' que crasheaba JPGs y PNGs sin canal alfa.
-- FIX: Normalización de rutas para Windows.
-- 🚀 FIX MAC: Ruta de respaldo segura (Escritorio) + Alerta de GDrive.
 """
 
 import os
@@ -29,7 +15,7 @@ from datetime import datetime
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
-from tkinter import messagebox  # Importamos la caja de alertas
+from tkinter import messagebox
 
 try:
     from app_paths import CONFIG_FILE
@@ -37,9 +23,7 @@ try:
 except Exception:
     RUTA_CONFIG = "config_local.json"
 
-
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
-
 
 def hex_to_rgb(hex_color):
     try:
@@ -47,7 +31,6 @@ def hex_to_rgb(hex_color):
         return tuple(int(hex_color[i:i+2], 16) / 255.0 for i in (0, 2, 4))
     except Exception:
         return (0.0, 0.0, 0.0)
-
 
 def parsear_segmentos_formato(texto):
     resultado, negrita, color_p = [], False, False
@@ -65,22 +48,16 @@ def parsear_segmentos_formato(texto):
             resultado.append((parte, negrita, color_p))
     return resultado
 
-
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
-
 _SCHEMA_PDF_OK = False
-
 
 def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
     global _SCHEMA_PDF_OK
     try:
         cursor = conn_shared.cursor()
 
-        # --------------------------------------------------
-        # ALTER TABLE SOLO LA PRIMERA VEZ (BANDERA DE ESQUEMA)
-        # --------------------------------------------------
         if not _SCHEMA_PDF_OK:
             for sql in (
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
@@ -116,9 +93,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         except Exception:
             conn_shared.rollback()
 
-        # --------------------------------------------------
-        # CONFIGURACIÓN CON RUTA ABSOLUTA Y CLAVES LIMPIAS
-        # --------------------------------------------------
         config = {}
         if os.path.exists(RUTA_CONFIG):
             try:
@@ -152,10 +126,14 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             conn_shared.rollback()
 
         # --------------------------------------------------
-        # 🚀 RUTAS DE GUARDADO Y ALERTA DE GDRIVE EN MAC
+        # 🚀 FIX MAC: RUTAS DE GUARDADO BLINDADAS
         # --------------------------------------------------
         ruta_drive = str(config.get("ruta_drive", "")).strip()
-        usando_escritorio = False
+        usando_respaldo = False
+
+        # Si por error el usuario seleccionó la raíz del disco de Mac (/), lo ignoramos.
+        if ruta_drive == "/" or ruta_drive == "\\":
+            ruta_drive = ""
 
         if ruta_drive and os.path.exists(ruta_drive):
             carpeta_destino = os.path.join(ruta_drive, "Cotizaciones")
@@ -163,24 +141,27 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             if os.path.exists(r"G:\Mi unidad"):
                 carpeta_destino = r"G:\Mi unidad\Programa de control black Cube\Cotizaciones"
             else:
-                # Si falla lo anterior, guardamos en el Escritorio del usuario de Mac/Windows
                 escritorio = os.path.join(os.path.expanduser("~"), "Desktop")
                 carpeta_destino = os.path.join(escritorio, "Cotizaciones")
-                usando_escritorio = True
+                usando_respaldo = True
                 
-        if not os.path.exists(carpeta_destino):
-            try:
+        # Intentamos crear la carpeta. Si Mac lo bloquea, usamos Descargas.
+        try:
+            if not os.path.exists(carpeta_destino):
                 os.makedirs(carpeta_destino)
-            except Exception:
-                pass
+        except Exception:
+            carpeta_destino = os.path.join(os.path.expanduser("~"), "Downloads", "Cotizaciones")
+            usando_respaldo = True
+            if not os.path.exists(carpeta_destino):
+                try:
+                    os.makedirs(carpeta_destino)
+                except Exception:
+                    pass
                 
         nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
 
         c = canvas.Canvas(nombre_archivo, pagesize=letter)
 
-        # --------------------------------------------------
-        # LOGO CON ESCALA INTELIGENTE (CORREGIDO PARA CUALQUIER FORMATO)
-        # --------------------------------------------------
         ruta_usar = None
         mostrar_logo = True
         
@@ -237,9 +218,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 techo_textos = 685
                 margen_inferior_logo = y_logo - 25
                 offset = (margen_inferior_logo - techo_textos) if margen_inferior_logo < techo_textos else 0
-                
             except Exception as e:
-                print(f"Error renderizando logo: {e}")
                 try:
                     c.drawImage(ruta_usar, 40, 685, width=150, height=80, preserveAspectRatio=True)
                 except Exception:
@@ -503,16 +482,12 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
         c.save()
 
-        # --------------------------------------------------
-        # 🚀 AVISO SI SE USÓ EL PLAN DE RESPALDO (ESCRITORIO)
-        # --------------------------------------------------
-        if usando_escritorio:
+        if usando_respaldo:
             try:
                 messagebox.showwarning(
-                    "Sincronización en la Nube Inactiva", 
-                    "Tu cotización fue guardada localmente en tu Escritorio porque no se detectó Google Drive.\n\n"
-                    "Para Mac: Recuerda instalar la aplicación de Google Drive (Gdrive) "
-                    "y luego seleccionar la ruta correcta desde la 'Configuración General' de Black Cube para enlazar la carpeta."
+                    "Google Drive No Encontrado", 
+                    "Tu cotización fue guardada en tus Documentos Locales (Escritorio o Descargas) porque no se detectó la ruta de Google Drive.\n\n"
+                    "Recuerda revisar la 'Configuración General' del sistema para asegurarte de que la ruta conectada no sea el disco raíz '/' y apunte a tu unidad GDrive."
                 )
             except Exception:
                 pass

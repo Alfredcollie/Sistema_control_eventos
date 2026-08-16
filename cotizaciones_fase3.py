@@ -74,7 +74,7 @@ def abrir_documento(ruta):
         print(f"No se pudo abrir el documento automáticamente: {e}")
 
 # =========================================================
-# HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG REAL
+# HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG MAC FIX
 # =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
@@ -104,7 +104,6 @@ def parsear_segmentos_formato(texto):
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
-# 🚀 NUEVO: Traductor que lee el formato visual y lo convierte a etiquetas [B]/[M] para la Base de Datos
 def extraer_texto_con_formato(txt_widget):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     dump = inner.dump("1.0", "end-1c")
@@ -146,7 +145,6 @@ def crear_barra_formato(parent, text_widget):
     f_barra.bind("<Enter>", activar_candado, add="+")
     f_barra.bind("<Leave>", quitar_candado, add="+")
 
-    # 🚀 NUEVO: Ahora aplicamos el formato REAL en lugar de insertar corchetes de texto
     def alternar_formato(tag_name):
         s, e = None, None
         try:
@@ -161,30 +159,32 @@ def crear_barra_formato(parent, text_widget):
 
         if s and e:
             try:
-                # Comprobar si la primera letra seleccionada ya tiene el formato
+                # Revisamos las etiquetas existentes de la primera letra
                 current_tags = inner_text.tag_names(s)
                 if tag_name in current_tags:
-                    # Si ya lo tiene, se lo quitamos (Efecto Toggle)
                     inner_text.tag_remove(tag_name, s, e)
                 else:
-                    # Si no lo tiene, se lo agregamos visualmente
                     inner_text.tag_add(tag_name, s, e)
                 
+                # 🚀 MAC FIX: Elevamos la prioridad justo al crearla
+                inner_text.tag_raise(tag_name)
+                
+                # Restauramos la selección visual y limpiamos memoria
+                inner_text.tag_add(tk.SEL, s, e)
                 inner_text._memoria_blindada = None
-                inner_text.tag_remove(tk.SEL, "1.0", tk.END)
             except Exception:
                 pass
                 
         inner_text.focus_set()
         return "break"
 
-    btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
+    btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Helvetica", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
     btn_b.pack(side="left", padx=2)
     btn_b.bind("<Button-1>", lambda e: alternar_formato("bold"))
     btn_b.bind("<Enter>", lambda e: [activar_candado(e), btn_b.configure(fg_color="#c8c8c8")])
     btn_b.bind("<Leave>", lambda e: [quitar_candado(e), btn_b.configure(fg_color="#e0e0e0")])
     
-    btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
+    btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Helvetica", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
     btn_c.pack(side="left", padx=2)
     btn_c.bind("<Button-1>", lambda e: alternar_formato("color"))
     btn_c.bind("<Enter>", lambda e: [activar_candado(e), btn_c.configure(fg_color="#c8c8c8")])
@@ -195,16 +195,17 @@ def crear_barra_formato(parent, text_widget):
     inner_text.bind("<Control-b>", lambda e: alternar_formato("bold"))
     inner_text.bind("<Control-m>", lambda e: alternar_formato("color"))
     
-    # Aseguramos que la caja nueva reconozca las reglas visuales
     configurar_tags_formato(text_widget, tam=11)
     
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
-    inner.tag_configure("bold", font=("Arial", tam, "bold"))
+    # 🚀 MAC FIX: Usar Helvetica + Elevar prioridad para que CTkTextbox no lo sobreescriba
+    inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
-    # Ya no hace falta "bold_color", el sistema suma "bold" y "color" de forma nativa.
+    inner.tag_raise("bold")
+    inner.tag_raise("color")
 
 def insertar_texto_formateado(txt_widget, texto):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
@@ -219,6 +220,10 @@ def insertar_texto_formateado(txt_widget, texto):
             inner.insert(tk.END, frag, tuple(tags))
         else:
             inner.insert(tk.END, frag)
+            
+    # Forzar actualización de capas al pintar todo el texto
+    inner.tag_raise("bold")
+    inner.tag_raise("color")
 
 # =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS
@@ -274,383 +279,8 @@ def generar_nueva_version_evento_existente(conn, codigo_actual):
 
 _SCHEMA_PDF_OK = False
 
-def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
-    global _SCHEMA_PDF_OK
-    try:
-        cursor = conn_shared.cursor()
-
-        if not _SCHEMA_PDF_OK:
-            try:
-                c_alt = conn_shared.cursor()
-                c_alt.execute("ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75")
-                conn_shared.commit()
-            except Exception:
-                conn_shared.rollback()
-            try:
-                c_alt = conn_shared.cursor()
-                c_alt.execute("ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1")
-                conn_shared.commit()
-            except Exception:
-                conn_shared.rollback()
-            _SCHEMA_PDF_OK = True
-
-        cliente, descripcion_proyecto, proyecto, contacto_cliente = "CLIENTE COMERCIAL", "Servicios Logísticos", "PROYECTO BLACK CUBE", "No especificado"
-        fecha_actual = datetime.now().strftime("%d/%m/%Y")
-        forma_pago_pdf = "50% adelantado, 50% a 30 días de la primera factura."
-        moneda, simbolo_moneda, tipo_cambio_pdf = "Soles", "S/", 3.75
-
-        try:
-            cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
-            res_db = cursor.fetchone()
-            if res_db:
-                cliente = str(res_db[0]).replace('{', '').replace('}', '').strip()
-                descripcion_proyecto = str(res_db[1]).replace('{', '').replace('}', '').strip()
-                proyecto = str(res_db[2]).replace('{', '').replace('}', '').strip()
-                if len(res_db) > 3 and res_db[3] is not None and float(res_db[3]) > 0:
-                    tipo_cambio_pdf = float(res_db[3])
-                if len(res_db) > 4 and res_db[4]:
-                    forma_pago_pdf = str(res_db[4]).strip()
-            else:
-                return False, f"No se encontró el registro {codigo_cotizacion} en la tabla cotizaciones."
-        except Exception:
-            conn_shared.rollback()
-
-        config = {}
-        if os.path.exists(RUTA_CONFIG):
-            try:
-                with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except Exception:
-                pass
-
-        try:
-            if cliente:
-                cursor.execute("SELECT persona_contacto, razon_comercial FROM clientes WHERE nombre_empresa = %s OR ruc = %s OR nombre_empresa ILIKE %s OR razon_comercial ILIKE %s", (cliente, cliente, f"%{cliente}%", f"%{cliente}%"))
-                res_cont = cursor.fetchone()
-                if res_cont:
-                    if res_cont[0]:
-                        contacto_cliente = str(res_cont[0]).replace('{', '').replace('}', '').strip()
-        except Exception:
-            conn_shared.rollback()
-
-        codigo_impresion = str(codigo_cotizacion)
-        try:
-            cursor.execute("SELECT COUNT(*) FROM cotizaciones WHERE codigo_cotizacion LIKE %s", (f"{codigo_cotizacion}%",))
-            conteo_versiones = cursor.fetchone()
-            if conteo_versiones and int(conteo_versiones[0]) > 1:
-                codigo_impresion = f"{codigo_cotizacion}-{int(conteo_versiones[0]) - 1}"
-        except Exception:
-            conn_shared.rollback()
-
-        ruta_drive = config.get("ruta_drive", "").strip()
-        if ruta_drive and os.path.exists(ruta_drive):
-            carpeta_destino = os.path.join(ruta_drive, "Cotizaciones")
-        else:
-            ruta_g = r"G:\Mi unidad\Programa de control black Cube\Cotizaciones"
-            if os.path.exists(r"G:\Mi unidad"):
-                carpeta_destino = ruta_g
-            else:
-                carpeta_destino = os.path.join(os.getcwd(), "Cotizaciones")
-        if not os.path.exists(carpeta_destino):
-            try:
-                os.makedirs(carpeta_destino)
-            except Exception:
-                pass
-        nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
-
-        c = canvas.Canvas(nombre_archivo, pagesize=letter)
-        ruta_usar = None
-        ruta_conf = config.get("ruta_logo_cotizacion", "")
-        if ruta_conf and os.path.exists(ruta_conf):
-            ruta_usar = ruta_conf
-        if not ruta_usar:
-            fallbacks = [
-                "LogoCotizacion.png",
-                "LogoCotizacion.jpg",
-                "Logo_Collie_Software.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
-            ]
-            for fallback in fallbacks:
-                if os.path.exists(fallback):
-                    ruta_usar = fallback
-                    break
-
-        rgb_primario = hex_to_rgb(config.get("color_primario", "#eb337a"))
-        rgb_secundario = hex_to_rgb(config.get("color_secundario", "#000000"))
-        rgb_franja = hex_to_rgb(config.get("color_franja", config.get("color_primario", "#eb337a")))
-
-        offset = 0
-        if ruta_usar:
-            try:
-                img = ImageReader(ruta_usar)
-                img_w, img_h = img.getSize()
-                ancho_hoja = 612
-                alto_proporcional = ancho_hoja * (img_h / float(img_w))
-                y_logo = 792 - alto_proporcional
-                c.drawImage(ruta_usar, 0, y_logo, width=ancho_hoja, height=alto_proporcional, mask='auto')
-                offset = (y_logo - 30) - 650
-            except Exception:
-                c.drawImage(ruta_usar, 40, 685, width=530, height=90, mask='auto', preserveAspectRatio=True)
-                offset = 0
-
-        c.setFont("Helvetica-Bold", 26)
-        c.drawString(40, 650 + offset, "Cotización")
-        c.setFont("Helvetica-Bold", 10.5)
-        c.drawRightString(570, 665 + offset, f"No.: {codigo_impresion}")
-        c.setFont("Helvetica", 10)
-        c.drawRightString(570, 650 + offset, f"Fecha: {fecha_actual}")
-        c.drawRightString(570, 635 + offset, f"Moneda: {moneda}")
-
-        c.setLineWidth(1)
-        c.setStrokeColorRGB(0.88, 0.88, 0.88)
-        c.setFillColorRGB(0.98, 0.98, 0.98)
-        c.roundRect(40, 540 + offset, 530, 80, 2, stroke=1, fill=1)
-        c.setFont("Helvetica-Bold", 9)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(50, 603 + offset, "CLIENTE:")
-        c.drawString(50, 585 + offset, "CONTACTO:")
-        c.drawString(365, 603 + offset, "PROYECTO:")
-
-        if len(proyecto) > 26:
-            c.drawString(435, 603 + offset, proyecto[:26])
-            c.drawString(435, 591 + offset, proyecto[26:52])
-            y_etiqueta_desc, y_texto_desc = 573 + offset, 560 + offset
-        else:
-            c.drawString(435, 603 + offset, proyecto)
-            y_etiqueta_desc, y_texto_desc = 585 + offset, 572 + offset
-
-        c.drawString(365, y_etiqueta_desc, "DESCRIPCION DEL PROYECTO:")
-        c.setFont("Helvetica", 9)
-        c.setFillColorRGB(0.3, 0.3, 0.3)
-        if len(descripcion_proyecto) > 45:
-            c.drawString(365, y_texto_desc, descripcion_proyecto[:45])
-            c.drawString(365, y_texto_desc - 11, descripcion_proyecto[45:90])
-        else:
-            c.drawString(365, y_texto_desc, descripcion_proyecto)
-
-        c.setFont("Helvetica", 9.5)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(105, 603 + offset, cliente)
-        c.drawString(115, 585 + offset, contacto_cliente)
-
-        TABLE_LEFT, TABLE_RIGHT, DESC_X, DESC_MAX_WIDTH, ITEM_MAX_WIDTH, HEADER_H, MARGEN_INFERIOR_TABLA, Y_INICIO_PAGINA_CONTINUACION = 40, 570, 135, 205, 88, 20, 55, 745
-
-        def wrap_text(texto, fuente, tam, max_ancho):
-            lineas_finales = []
-            for parrafo in str(texto).replace('\r', '').split('\n'):
-                parrafo = parrafo.strip()
-                if not parrafo:
-                    continue
-                actual = ""
-                for palabra in parrafo.split(' '):
-                    prueba = (actual + " " + palabra).strip()
-                    if c.stringWidth(prueba, fuente, tam) <= max_ancho:
-                        actual = prueba
-                    else:
-                        if actual:
-                            lineas_finales.append(actual)
-                        actual = palabra
-                if actual:
-                    lineas_finales.append(actual)
-            return lineas_finales if lineas_finales else [""]
-
-        def wrap_texto_formato(texto, tam, max_ancho):
-            lineas_finales = []
-            for parrafo in str(texto).replace('\r', '').split('\n'):
-                if not texto_plano_sin_marcado(parrafo).strip():
-                    continue
-                tokens = []
-                for frag_texto, es_neg, es_col in parsear_segmentos_formato(parrafo):
-                    partes = frag_texto.split(' ')
-                    for idx, palabra in enumerate(partes):
-                        if palabra:
-                            tokens.append((palabra, es_neg, es_col))
-                        if idx < len(partes) - 1:
-                            tokens.append((' ', es_neg, es_col))
-                linea_actual, ancho_actual = [], 0.0
-                for palabra, es_neg, es_col in tokens:
-                    fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
-                    ancho_palabra = c.stringWidth(palabra, fuente_palabra, tam)
-                    if palabra == ' ':
-                        if linea_actual:
-                            linea_actual.append((palabra, es_neg, es_col))
-                            ancho_actual += ancho_palabra
-                        continue
-                    if ancho_actual + ancho_palabra > max_ancho and linea_actual:
-                        while linea_actual and linea_actual[-1][0] == ' ':
-                            linea_actual.pop()
-                        lineas_finales.append(linea_actual)
-                        linea_actual, ancho_actual = [], 0.0
-                    linea_actual.append((palabra, es_neg, es_col))
-                    ancho_actual += ancho_palabra
-                while linea_actual and linea_actual[-1][0] == ' ':
-                    linea_actual.pop()
-                if linea_actual:
-                    lineas_finales.append(linea_actual)
-            return lineas_finales if lineas_finales else [[]]
-
-        def dibujar_linea_formateada(x, y, lista_palabras, tam):
-            x_cursor = x
-            for palabra, es_neg, es_col in lista_palabras:
-                fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
-                if es_col:
-                    c.setFillColorRGB(*rgb_primario)
-                elif es_neg:
-                    c.setFillColorRGB(*rgb_secundario)
-                else:
-                    c.setFillColorRGB(0.25, 0.25, 0.25)
-                c.setFont(fuente_palabra, tam)
-                c.drawString(x_cursor, y, palabra)
-                x_cursor += c.stringWidth(palabra, fuente_palabra, tam)
-
-        def dibujar_encabezado_tabla(y):
-            c.setFillColorRGB(*rgb_franja)
-            c.rect(TABLE_LEFT, y, TABLE_RIGHT - TABLE_LEFT, HEADER_H, fill=1, stroke=0)
-            c.setFillColorRGB(1, 1, 1)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawCentredString(84, y + 6.5, "ITEM")
-            c.drawCentredString(237.5, y + 6.5, "DESCRIPCIÓN")
-            c.drawCentredString(385, y + 6.5, "P. UNIT.")
-            c.drawCentredString(450, y + 6.5, "CANT.")
-            c.drawCentredString(525, y + 6.5, "PRECIO")
-
-        y_pos, subtotal_acumulado = 500 + offset, 0.0
-        dibujar_encabezado_tabla(y_pos)
-
-        try:
-            cursor.execute("SELECT * FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY categoria_suministro ASC", (codigo_cotizacion,))
-            filas_preparadas, bloques_items = [], []
-            for r in cursor.fetchall():
-                cat_sum = str(r[2]).strip().upper() if len(r) > 2 and r[2] else "SUMINISTRO"
-                prov_nom = str(r[3]).strip() if len(r) > 3 and r[3] else "Proveedor"
-                precio_final_venta = float(r[8]) if len(r) > 8 and r[8] else 0.0
-                nota_solicitud = str(r[9]).strip() if len(r) > 9 and r[9] else ""
-                cant_item = int(r[10]) if len(r) > 10 and r[10] else 1
-                p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
-                texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."
-                lineas_desc = wrap_texto_formato(texto_base, 8.5, DESC_MAX_WIDTH)
-                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(28, 15 + len(lineas_desc) * 10.5)})
-
-            for i, f in enumerate(filas_preparadas):
-                if bloques_items and bloques_items[-1]["nombre"] == f["categoria"]:
-                    bloques_items[-1]["indices"].append(i)
-                else:
-                    bloques_items.append({"nombre": f["categoria"], "indices": [i]})
-
-            en_tope_pagina, indice_bloque = True, 0
-            for bloque in bloques_items:
-                color_fondo = 0.95 if indice_bloque % 2 == 0 else 1.0
-                indice_bloque += 1
-                if not en_tope_pagina and (y_pos - filas_preparadas[bloque["indices"][0]]["altura"]) < MARGEN_INFERIOR_TABLA:
-                    c.showPage()
-                    y_pos = Y_INICIO_PAGINA_CONTINUACION
-                    dibujar_encabezado_tabla(y_pos)
-                    c.setFillColorRGB(0, 0, 0)
-                    en_tope_pagina = True
-                y_inicio_bloque = y_pos
-                for i_idx, i in enumerate(bloque["indices"]):
-                    f = filas_preparadas[i]
-                    if y_pos - f["altura"] < MARGEN_INFERIOR_TABLA:
-                        if not en_tope_pagina:
-                            c.setFont("Helvetica-Bold", 9)
-                            c.setFillColorRGB(0, 0, 0)
-                            lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
-                            y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
-                            for linea in lineas_cat:
-                                c.drawCentredString(84, y_cat, linea)
-                                y_cat -= 11
-                        c.setLineWidth(0.5)
-                        c.setStrokeColorRGB(0.85, 0.85, 0.85)
-                        c.line(TABLE_LEFT, y_pos, TABLE_RIGHT, y_pos)
-                        c.showPage()
-                        y_pos = Y_INICIO_PAGINA_CONTINUACION
-                        dibujar_encabezado_tabla(y_pos)
-                        c.setFillColorRGB(0, 0, 0)
-                        en_tope_pagina = True
-                        y_inicio_bloque = y_pos
-                    en_tope_pagina = False
-                    c.setFillColorRGB(color_fondo, color_fondo, color_fondo)
-                    c.rect(TABLE_LEFT, y_pos - f["altura"], TABLE_RIGHT - TABLE_LEFT, f["altura"], fill=1, stroke=0)
-                    y_pos -= f["altura"]
-                    y_renglon = y_pos + f["altura"] - 12
-                    for linea_palabras in f["lineas_desc"]:
-                        dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 8.5)
-                        y_renglon -= 10.5
-                    y_centro_fila = y_pos + (f["altura"] / 2) - 3
-                    c.setFont("Helvetica", 9)
-                    c.setFillColorRGB(0, 0, 0)
-                    c.drawCentredString(385, y_centro_fila, f"{simbolo_moneda} {f['p_unitario']:,.2f}")
-                    c.drawCentredString(450, y_centro_fila, str(f["cantidad"]))
-                    c.drawCentredString(525, y_centro_fila, f"{simbolo_moneda} {f['precio']:,.2f}")
-                    subtotal_acumulado += f["precio"]
-                    if i_idx == len(bloque["indices"]) - 1:
-                        c.setFont("Helvetica-Bold", 9)
-                        c.setFillColorRGB(0, 0, 0)
-                        lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
-                        y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
-                        for linea in lineas_cat:
-                            c.drawCentredString(84, y_cat, linea)
-                            y_cat -= 11
-                c.setLineWidth(0.5)
-                c.setStrokeColorRGB(0.85, 0.85, 0.85)
-                c.line(TABLE_LEFT, y_pos, TABLE_RIGHT, y_pos)
-        except Exception as e:
-            return False, f"Error al compilar las filas dinámicas de la matriz: {str(e)}"
-
-        if y_pos < 205:
-            c.showPage()
-            y_pos = Y_INICIO_PAGINA_CONTINUACION
-
-        y_totales = y_pos - 65
-        fee_produccion = subtotal_acumulado * 0.15
-        total_general_soles = subtotal_acumulado + fee_produccion
-        total_general_dolares = total_general_soles / tipo_cambio_pdf
-
-        c.setLineWidth(1)
-        c.setStrokeColorRGB(0.85, 0.85, 0.85)
-        c.line(40, y_totales+45, 570, y_totales+45)
-        c.setFont("Helvetica-Bold", 9.5)
-        c.drawRightString(440, y_totales+25, "SUB TOTAL (SOLES)")
-        c.drawRightString(440, y_totales+8, "15% FEE PRODUCCIÓN")
-        c.drawRightString(440, y_totales-12, "TOTAL (SOLES)")
-        c.setFont("Helvetica-Bold", 10.5)
-        c.setFillColorRGB(*rgb_primario)
-        c.drawRightString(440, y_totales-32, "TOTAL EQUIVALENTE (DÓLARES)")
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.setFont("Helvetica-Bold", 9.5)
-        c.drawString(490, y_totales+25, "S/")
-        c.drawRightString(565, y_totales+25, f"{subtotal_acumulado:,.2f}")
-        c.drawString(490, y_totales+8, "S/")
-        c.drawRightString(565, y_totales+8, f"{fee_produccion:,.2f}")
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(490, y_totales-12, "S/")
-        c.drawRightString(565, y_totales-12, f"{total_general_soles:,.2f}")
-        c.setFillColorRGB(*rgb_primario)
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(475, y_totales-32, "$")
-        c.drawRightString(565, y_totales-32, f"{total_general_dolares:,.2f} USD")
-
-        c.setFont("Helvetica-Bold", 8.5)
-        c.setFillColorRGB(*rgb_primario)
-        c.drawString(40, y_totales-55, "TÉRMINOS Y CONDICIONES:")
-        c.setFont("Helvetica", 8)
-        c.setFillColorRGB(0.3, 0.3, 0.3)
-        c.drawString(40, y_totales-68, "Precios no incluyen IGV.")
-        c.drawString(40, y_totales-80, "Cotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.")
-        y_cond_actual = y_totales - 92
-        c.drawString(40, y_cond_actual, "Forma de pago: ")
-        x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
-        for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
-            c.drawString(x_pago, y_cond_actual, linea)
-            y_cond_actual -= 12
-        c.drawString(40, y_cond_actual, "Penalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos.")
-
-        c.save()
-        return True, nombre_archivo
-    except Exception as e:
-        return False, str(e)
-
+# La función generar_reporte_cotizacion_pdf NO vive aquí. Ahora se llama desde final_cotizaciones.py 
+# (La importamos y la ejecutamos desde allí, así que esta declaración es meramente un respaldo visual).
 
 # =========================================================
 # CLASE: CALENDARIO NATIVO (MEJORADO CON COMBOBOX)
@@ -913,7 +543,7 @@ class VentanaEtapaProveedores:
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
-        self.txt_p_notes = ctk.CTkTextbox(f_notas_wrapper, width=480, height=130, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
+        self.txt_p_notes = ctk.CTkTextbox(f_notas_wrapper, width=480, height=130, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
@@ -921,7 +551,6 @@ class VentanaEtapaProveedores:
         self.lbl_p_contador = ctk.CTkLabel(self.f_inputs, text="Caracteres restantes: 750", font=("Arial", 10), text_color="#555")
         self.lbl_p_contador.grid(row=7, column=3, sticky="se", padx=10, pady=2)
         
-        # 🚀 NUEVO: El contador ya no necesita buscar etiquetas ocultas, WYSIWYG las elimina.
         self.txt_p_notes._textbox.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(self.txt_p_notes.get('1.0', 'end-1c')))}"))
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
@@ -1049,7 +678,6 @@ class VentanaEtapaProveedores:
                 self.ent_forma_pago.insert(0, "50% adelantado, 50% a 30 días de la primera factura.")
             except Exception:
                 pass
-        # El tipo de cambio en vivo se carga en segundo plano
         self._cargar_tipo_cambio_en_vivo()
 
     def guardar_ajustes_globales_db(self):
@@ -1181,10 +809,8 @@ class VentanaEtapaProveedores:
         except Exception:
             pass
 
-    # 🚀 FIX: FILTRO PROVEEDORES ASÍNCRONO + CACHÉ CON MATCH DE CATEGORÍA
     def filtrar_proveedores_por_categoria(self, choice=None):
         cat_sel = str(self.cmb_cat_e.get()).strip().replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
-        
         clave_cache = "lista_proveedores_completos_con_cat"
         lista_completa = cache_sistema.obtener(clave_cache)
         
@@ -1199,50 +825,36 @@ class VentanaEtapaProveedores:
                     try:
                         cursor = conn.cursor()
                         try:
-                            # 1. Intentamos obtener la categoría del proveedor
                             cursor.execute("SELECT nombre, categoria FROM proveedores ORDER BY nombre ASC")
                             data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
                         except Exception:
                             conn.rollback()
                             try:
-                                # 2. Si falla, tal vez la columna se llama 'rubro'
                                 cursor.execute("SELECT nombre, rubro FROM proveedores ORDER BY nombre ASC")
                                 data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
                             except Exception:
                                 conn.rollback()
-                                # 3. Si no existe ninguna, traemos solo los nombres (Fallback de seguridad)
                                 cursor.execute("SELECT nombre FROM proveedores ORDER BY nombre ASC")
                                 data = [(str(r[0]).strip(), "") for r in cursor.fetchall() if r[0]]
-                                
                         cache_sistema.guardar(clave_cache, data)
                     except: pass
                     finally: liberar_conexion(conn)
-                    
                 if hasattr(self, 'root') and self.v_prov.winfo_exists():
                     self.root.after(0, lambda: self._filtrar_y_aplicar(data, cat_sel))
-                    
             threading.Thread(target=tarea_provs, daemon=True).start()
 
     def _filtrar_y_aplicar(self, lista_completa, cat_sel):
         if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return
-        
-        prov_actual = self.cmb_p_list.get() # Guardar el seleccionado
-        
+        prov_actual = self.cmb_p_list.get() 
         if not cat_sel or cat_sel == "No hay categorias disponibles":
             lista = ["--- Seleccione Proveedor ---"] + [n for n, c in lista_completa]
         else:
-            # Filtramos estrictamente comparando la categoría solicitada vs la registrada en proveedor
             provs_filtrados = [n for n, c in lista_completa if cat_sel.lower() in c.lower()]
-            
             if provs_filtrados:
                 lista = ["--- Seleccione Proveedor ---"] + provs_filtrados
             else:
-                # Si la categoría no coincide con ningún proveedor, mostramos todos con una advertencia visual
                 lista = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista_completa]
-                
         self.cmb_p_list.configure(values=lista)
-        
-        # Restaurar la selección si sigue siendo válida en la nueva lista
         if prov_actual in lista and "Seleccione" not in prov_actual:
             self.cmb_p_list.set(prov_actual)
         else:
@@ -1255,8 +867,6 @@ class VentanaEtapaProveedores:
         if not self.conn:
             return
         cat, prov = self.cmb_cat_e.get().strip(), self.cmb_p_list.get().strip()
-        
-        # Validación de combobox sin seleccionar o cabeceras falsas
         if prov in ["Seleccione un proveedor", "Haga clic en Cargar Proveedores", "", "--- Sin proveedores específicos, mostrando todos ---", "--- Seleccione Proveedor ---", "--- Seleccione (No hay del rubro) ---"]:
             messagebox.showwarning("Atención", "Por favor despliegue la lista y seleccione un proveedor válido.", parent=self.v_prov)
             return
@@ -1277,11 +887,8 @@ class VentanaEtapaProveedores:
         p_final_venta = p_unid * cant
         t_ganancia_db = "Monto Fijo" if self.cmb_tipo_ganancia.get() == "Monto Fijo" else "Porcentaje"
         
-        # 🚀 NUEVO: Extraemos el texto con las etiquetas ocultas que le pusimos al texto
         notes = extraer_texto_con_formato(self.txt_p_notes).strip()
-        
         c = self.conn.cursor()
-        
         try:
             c.execute("""
                 INSERT INTO cotizacion_proveedores 
@@ -1372,13 +979,11 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
-        txt_m_notas = ctk.CTkTextbox(f_m, width=450, height=80, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
+        txt_m_notas = ctk.CTkTextbox(f_m, width=450, height=80, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
         txt_m_notas.pack(fill="x", padx=10, pady=2)
-        
-        # 🚀 NUEVO: Insertamos el texto de la base de datos convirtiéndolo visualmente de inmediato
         insertar_texto_formateado(txt_m_notas, str(datos[4]) if datos[4] else "")
 
         def ejecutar_update_matriz():
@@ -1391,8 +996,6 @@ class VentanaEtapaProveedores:
                 return
             p_unid = ml + mv if cmb_m_tipo.get() == "Monto Fijo" else ml * (1 + (mv / 100))
             p_final = p_unid * mc
-            
-            # 🚀 NUEVO: Extraemos el texto visual de la caja y lo guardamos como [B] y [M]
             notes_update = extraer_texto_con_formato(txt_m_notas).strip()
             
             c_upd = self.conn.cursor()
@@ -1457,7 +1060,7 @@ class VentanaEtapaProveedores:
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
-            txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Arial", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
+            txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)

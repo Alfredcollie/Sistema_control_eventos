@@ -1,45 +1,62 @@
-#!/bin/bash
+name: 🍏 Constructor de Instalador Mac
 
-echo "=========================================="
-echo " 🚀 INICIANDO INSTALACIÓN DE BLACK CUBE "
-echo "=========================================="
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Escribe la versión para el Release (ejemplo: v1.6.0)'
+        required: true
+        default: 'v1.6.0'
 
-# 1. Variables de configuración (Apunta siempre a la última versión)
-GITHUB_URL="https://github.com/Alfredcollie/Sistema_control_eventos/releases/latest/download/Instalador.Black.Cube.dmg"
-APP_NAME="ControlEventos.app"
-DMG_NAME="BlackCubeTemp.dmg"
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    
+    permissions:
+      contents: write 
 
-# 2. Descargar la aplicación
-echo "⬇️ Descargando la última versión del sistema desde GitHub..."
-curl -L -o /tmp/$DMG_NAME "$GITHUB_URL"
+    steps:
+    - name: 📥 Clonar tu código desde GitHub
+      uses: actions/checkout@v4
 
-# 3. Montar el DMG e Instalar en Aplicaciones
-echo "📦 Instalando en la carpeta Aplicaciones..."
-hdiutil attach /tmp/$DMG_NAME -nobrowse -mountpoint /Volumes/BlackCubeMount
-rm -rf "/Applications/$APP_NAME"
-cp -R "/Volumes/BlackCubeMount/$APP_NAME" "/Applications/"
-hdiutil detach /Volumes/BlackCubeMount -force
-rm /tmp/$DMG_NAME
+    - name: 🐍 Configurar Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11' 
 
-# 4. Inyectar Credenciales en el Llavero
-echo "🔐 Configurando seguridad de base de datos..."
-echo "Aparecerá una ventana de Mac solicitando tu contraseña de usuario..."
+    - name: 📦 Instalar dependencias y librerías
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install psycopg2-binary customtkinter reportlab keyring
 
-USER_KC="/Users/$(whoami)/Library/Keychains/login.keychain-db"
+    - name: 🏗️ Compilar la Aplicación (Black Cube)
+      run: |
+        # 🚀 FIX: Forzamos a PyInstaller a incluir el motor del Llavero de Mac
+        pyinstaller --windowed --name "ControlEventos" --hidden-import keyring.backends.macOS --add-data ".:." control_general.py
+        
+        echo "Forzando Modo Claro en Info.plist..."
+        defaults write "$PWD/dist/ControlEventos.app/Contents/Info.plist" NSRequiresAquaSystemAppearance -bool YES
+        plutil -convert xml1 "$PWD/dist/ControlEventos.app/Contents/Info.plist"
 
-# 🚀 FIX: Cambiado -a '6543' por -a 'SUPABASE_DB_PORT'
-CRED_CMDS="security add-generic-password -a 'SUPABASE_DB_HOST' -s 'ControlEventos' -w 'aws-1-us-west-2.pooler.supabase.com' -U -A '$USER_KC' && security add-generic-password -a 'SUPABASE_DB_PORT' -s 'ControlEventos' -w '6543' -U -A '$USER_KC' && security add-generic-password -a 'SUPABASE_DB_NAME' -s 'ControlEventos' -w 'postgres' -U -A '$USER_KC' && security add-generic-password -a 'SUPABASE_DB_USER' -s 'ControlEventos' -w 'postgres.xqhlkmqiwkeldpcxomhb' -U -A '$USER_KC' && security add-generic-password -a 'SUPABASE_DB_PASSWORD' -s 'ControlEventos' -w 'Fc10339092Fc' -U -A '$USER_KC'"
+    - name: 📦 Empaquetar en archivo .dmg
+      run: |
+        echo "Fabricando el disco de instalación..."
+        mkdir -p Instalador_Temp
+        cp -R "dist/ControlEventos.app" Instalador_Temp/
+        ln -s /Applications Instalador_Temp/Applications
+        hdiutil create -volname "BlackCube" -srcfolder Instalador_Temp -ov -format UDZO "Instalador.Black.Cube.dmg"
 
-osascript -e "do shell script \"$CRED_CMDS\" with administrator privileges"
-
-# 5. Quitar el bloqueo de desarrollador no identificado
-echo "🔓 Desbloqueando seguridad de Apple..."
-xattr -cr "/Applications/$APP_NAME"
-
-# 6. Ejecutar la aplicación
-echo "✅ Instalación completada con éxito."
-echo "Abriendo Black Cube..."
-open "/Applications/$APP_NAME"
-
-echo "Puedes cerrar esta ventana."
-exit 0
+    - name: 🚀 Publicar Automáticamente en Releases
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.version }}
+        name: Sistema Black Cube ${{ github.event.inputs.version }}
+        body: |
+          🚀 **Nueva actualización de Black Cube para Mac**
+          - 🔌 FIX: Conexión segura a Supabase reparada.
+        files: Instalador.Black.Cube.dmg
+        draft: false
+        prerelease: false
+        make_latest: true # 🚀 Garantiza que sea marcado como Latest

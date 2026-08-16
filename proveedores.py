@@ -464,18 +464,52 @@ class SistemaProveedores:
 
         def tarea():
             try:
+                import ssl
+                import json
+                import urllib.request
+                import urllib.error
+                import os
+                
+                # 🚀 FIX MAC: Desactivar la verificación estricta de SSL (El Escudo de Apple)
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                
+                # 🚀 FIX CAJA FUERTE: Recuperar Token si existe en la configuración segura
+                token = ""
+                try:
+                    from app_paths import CONFIG_FILE
+                    ruta_segura = str(CONFIG_FILE)
+                    if os.path.exists(ruta_segura):
+                        with open(ruta_segura, "r", encoding="utf-8") as f:
+                            data_conf = json.load(f)
+                            token = data_conf.get("token_api_ruc", "") # Lee el token si lo tienes configurado
+                except Exception:
+                    pass
+
+                # Preparamos la petición a la API
+                headers = {'User-Agent': 'Mozilla/5.0'}
                 url = f"https://api.apis.net.pe/v1/ruc?numero={ruc}"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
+                
+                if token:
+                    headers['Authorization'] = f'Bearer {token}'
+
+                req = urllib.request.Request(url, headers=headers)
+                
+                # 🚀 Inyectamos el contexto SSL permisivo aquí (context=ctx)
+                with urllib.request.urlopen(req, context=ctx, timeout=8) as response:
                     if response.status == 200:
                         data = json.loads(response.read().decode())
                         self.root.after(0, lambda: self._aplicar_datos_ruc(data, nombre_entry, dir_entry))
                     else:
-                        self.root.after(0, lambda: messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC o el servicio está inactivo."))
-            except urllib.error.URLError:
-                self.root.after(0, lambda: messagebox.showerror("Error de Conexión", "No se pudo conectar al servicio de consulta de RUC. Verifique su internet."))
+                        self.root.after(0, lambda: messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC."))
+            
+            except urllib.error.URLError as e:
+                # Extraemos el error real para saber si fue la Mac o el internet
+                error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {msg}"))
             except Exception as e:
-                self.root.after(0, lambda: messagebox.showwarning("Error", f"Ocurrió un problema al consultar el RUC: {e}"))
+                self.root.after(0, lambda err=e: messagebox.showwarning("Error", f"Ocurrió un problema: {err}"))
 
         threading.Thread(target=tarea, daemon=True).start()
 

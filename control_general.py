@@ -5,6 +5,8 @@ CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
 - Pool de Conexiones Activo y Liberación Correcta.
 - Dashboard de Bienvenida (Alertas) asíncrono y acelerado.
 - Sincronización Rclone Silenciosa en Segundo Plano.
+- 🚀 FIX: Compatibilidad Mac en FileDialog.
+- 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
 """
 import tkinter as tk
 import customtkinter as ctk
@@ -18,13 +20,17 @@ import urllib.request
 import bcrypt
 import subprocess
 import threading
+import webbrowser  # 🚀 NUEVO: Para abrir el enlace de la actualización
 from datetime import datetime, timedelta
+
+# 🚀 NUEVO: Definimos la versión actual de tu código
+VERSION_ACTUAL = "v1.6.0"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
+# IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 from app_paths import CONFIG_FILE
@@ -139,7 +145,6 @@ def verify_password(password: str, hashed: str) -> bool:
     try: return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
     except Exception: return False
 
-# 🚀 FIX: AUTO-CURACIÓN DE SEGURIDAD EN SEGUNDO PLANO
 _SCHEMA_SEGURIDAD_OK = False
 
 def inicializar_seguridad_db():
@@ -381,7 +386,7 @@ class ControlGeneralEventos:
             except Exception as e:
                 messagebox.showerror("Error Crítico", f"Ocurrió un problema en el sistema:\n{e}")
             finally:
-                liberar_conexion(conn) # 🚀 FIX: Liberar pool
+                liberar_conexion(conn)
 
         btn_entrar = ctk.CTkButton(frame_log, text="Ingresar al Sistema", width=200, height=35, font=("Arial", 12, "bold"), fg_color="#1f538d", hover_color="#163b65", command=verificar_credenciales)
         btn_entrar.pack(pady=5)
@@ -410,8 +415,8 @@ class ControlGeneralEventos:
         cache_sistema.iniciar_ciclo()
         
         self.root.after(5000, self.ciclo_sincronizacion_nube)
+        self.buscar_actualizaciones_github() # 🚀 LANZAMOS EL BUSCADOR DE ACTUALIZACIONES
         
-        # 🚀 FIX: PRE-CACHÉ EN SEGUNDO PLANO
         def pre_cargar_listas():
             conn = conectar_db(silencioso=True)
             if conn:
@@ -452,7 +457,7 @@ class ControlGeneralEventos:
         ctk.CTkLabel(frame_top_sidebar, text=f"Rol: {self.rol_activo}", font=("Arial", 10), text_color="white").pack(pady=(0, 5))
         frame_bottom_sidebar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         frame_bottom_sidebar.pack(side="bottom", fill="x", pady=(5, 10))
-        lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text="Software desarrollado por Alfred Collie\nVersión 1.5.5 © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
+        lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text=f"Software desarrollado por Alfred Collie\nVersión {VERSION_ACTUAL} © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
         lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
 
         def cerrar_sistema():
@@ -508,9 +513,6 @@ class ControlGeneralEventos:
         if not hasattr(self.contenedor_central, 'resizable'): self.contenedor_central.resizable = dummy
         if not hasattr(self.contenedor_central, 'iconbitmap'): self.contenedor_central.iconbitmap = dummy
 
-    # =======================================================
-    # 🚀 FIX: DASHBOARD DE BIENVENIDA ASÍNCRONO
-    # =======================================================
     def mostrar_pantalla_bienvenida(self):
         self.limpiar_contenedor()
         f_dashboard = ctk.CTkScrollableFrame(self.contenedor_central, fg_color="transparent")
@@ -1176,11 +1178,19 @@ class ControlGeneralEventos:
         ent_logo.pack(side="left", fill="x", expand=True, padx=(0, 10))
         ent_logo.insert(0, config_actual.get("ruta_logo_cotizacion", ""))
 
+        # 🚀 FIX MAC: FileDialog Multiplataforma sin punto y coma
         def buscar_logo_cotizacion():
-            ruta = filedialog.askopenfilename(title="Seleccionar Logo", filetypes=[("Imágenes", "*.png;*.jpg;*.jpeg")])
+            tipos_seguros = [
+                ("Archivos de Imagen", "*.png *.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("JPEG", "*.jpg"),
+                ("Todos", "*.*")
+            ]
+            ruta = filedialog.askopenfilename(title="Seleccionar Logo", filetypes=tipos_seguros)
             if ruta:
                 ent_logo.delete(0, tk.END)
                 ent_logo.insert(0, ruta)
+                
         ctk.CTkButton(f_ruta_logo, text="📂 Buscar Imagen", width=140, command=buscar_logo_cotizacion).pack(side="right")
 
         # ---------- 6. PREFERENCIAS REGIONALES Y RCLONE ----------
@@ -1639,6 +1649,39 @@ class ControlGeneralEventos:
         ctk.CTkButton(f_btn, text="💾 Guardar Usuario", font=("Arial", 12, "bold"), fg_color="#27ae60", hover_color="#1e8449", command=registrar_o_modificar).pack(side="left", padx=5)
         ctk.CTkButton(f_btn, text="🗑️ Eliminar Usuario", font=("Arial", 12, "bold"), command=eliminar_usuario, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=5)
         cargar_usuarios()
+
+    # =======================================================
+    # 🚀 NUEVO: VERIFICADOR DE ACTUALIZACIONES GITHUB
+    # =======================================================
+    def buscar_actualizaciones_github(self):
+        def tarea_check():
+            try:
+                url = "https://api.github.com/repos/Alfredcollie/Sistema_control_eventos/releases/latest"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    if response.status == 200:
+                        data = json.loads(response.read().decode())
+                        version_github = data.get("tag_name", "")
+                        
+                        if version_github and version_github != VERSION_ACTUAL:
+                            
+                            def preguntar_actualizacion():
+                                respuesta = messagebox.askyesno(
+                                    "🚀 Nueva Actualización Disponible",
+                                    f"¡Hay una nueva versión de Black Cube disponible!\n\n"
+                                    f"Versión actual: {VERSION_ACTUAL}\n"
+                                    f"Versión nueva: {version_github}\n\n"
+                                    "¿Deseas descargar e instalar la actualización ahora?",
+                                    parent=self.root
+                                )
+                                if respuesta:
+                                    webbrowser.open("https://github.com/Alfredcollie/Sistema_control_eventos/releases/latest")
+                                    
+                            self.root.after(2000, preguntar_actualizacion)
+            except Exception:
+                pass
+
+        threading.Thread(target=tarea_check, daemon=True).start()
 
     def confirmar_salida(self):
         if messagebox.askyesno("Confirmar Salida", "⚠️ ¿Estás seguro de que deseas cerrar completamente el sistema?", parent=self.root):

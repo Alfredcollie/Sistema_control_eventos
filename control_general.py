@@ -8,6 +8,7 @@ CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
 - 🚀 FIX: Compatibilidad Mac en FileDialog.
 - 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
 - 🚀 FIX: Consulta de RUC en Configuración con escudo SSL desactivado para Mac.
+- 🚀 FIX MAC: Bypass de icono .ico nativo en ventanas para evitar crash.
 """
 import tkinter as tk
 import customtkinter as ctk
@@ -75,6 +76,16 @@ def ruta_recurso(ruta_relativa):
     except Exception:
         ruta_base = os.path.abspath(".")
     return os.path.join(ruta_base, ruta_relativa)
+
+# 🚀 FIX MAC: Aplicar Icono a ventanas solo si es Windows
+def aplicar_icono_ventana(ventana):
+    if sys.platform == "win32":
+        try:
+            ruta_ico = ruta_recurso("Ico_Collie_Software.ico")
+            if os.path.exists(ruta_ico):
+                ventana.iconbitmap(ruta_ico)
+        except Exception:
+            pass
 
 def obtener_comando_rclone():
     nombre_ejecutable = "rclone.exe" if sys.platform == "win32" else "rclone"
@@ -217,6 +228,7 @@ class ControlGeneralEventos:
     def __init__(self, root):
         self.root = root
         self.root.title("SISTEMA DE CONTROL GENERAL DE EVENTOS")
+        aplicar_icono_ventana(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self.confirmar_salida)
         inicializar_seguridad_db()
         self.usuario_activo = "No autenticado"
@@ -279,6 +291,7 @@ class ControlGeneralEventos:
     def abrir_ventana_login(self):
         self.v_login = ctk.CTkToplevel(self.root)
         self.v_login.title("Acceso Seguro")
+        aplicar_icono_ventana(self.v_login)
         ancho_ventana, alto_ventana = 400, 520
         self.v_login.geometry(f"{ancho_ventana}x{alto_ventana}")
         self.v_login.resizable(False, False)

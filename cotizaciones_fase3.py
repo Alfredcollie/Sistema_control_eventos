@@ -74,7 +74,7 @@ def abrir_documento(ruta):
         print(f"No se pudo abrir el documento automáticamente: {e}")
 
 # =========================================================
-# HERRAMIENTAS DE TEXTO ENRIQUECIDO
+# HERRAMIENTAS DE TEXTO ENRIQUECIDO (AHORA ADAPTADO A CTkTextbox)
 # =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
@@ -107,95 +107,88 @@ def texto_plano_sin_marcado(texto):
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # 🛡️ TRUCO MAESTRO V5: Bloqueo por Acercamiento (Hover-Lock) Anti-Mac
-    text_widget._memoria_blindada = None
-    text_widget._memoria_bloqueada = False
+    # CustomTkinter envuelve la caja real dentro de un atributo llamado _textbox
+    inner_text = text_widget._textbox if hasattr(text_widget, "_textbox") else text_widget
+    
+    inner_text._memoria_blindada = None
+    inner_text._memoria_bloqueada = False
 
     def rastreador_mac():
         try:
-            if not text_widget.winfo_exists():
-                return
-            # Si el usuario tiene seleccionado texto, lo actualizamos siempre
-            if text_widget.tag_ranges(tk.SEL):
-                text_widget._memoria_blindada = (text_widget.index(tk.SEL_FIRST), text_widget.index(tk.SEL_LAST))
-            # Si no hay selección, SOLO borramos la memoria si NO estamos encima de los botones
-            elif not text_widget._memoria_bloqueada:
-                text_widget._memoria_blindada = None
+            if not inner_text.winfo_exists(): return
+            if inner_text.tag_ranges(tk.SEL):
+                inner_text._memoria_blindada = (inner_text.index(tk.SEL_FIRST), inner_text.index(tk.SEL_LAST))
+            elif not inner_text._memoria_bloqueada:
+                inner_text._memoria_blindada = None
         except Exception:
             pass
-        text_widget.after(50, rastreador_mac)
+        inner_text.after(50, rastreador_mac)
 
     rastreador_mac()
 
-    def activar_candado(e): text_widget._memoria_bloqueada = True
-    def quitar_candado(e): text_widget._memoria_bloqueada = False
+    def activar_candado(e): inner_text._memoria_bloqueada = True
+    def quitar_candado(e): inner_text._memoria_bloqueada = False
 
     f_barra.bind("<Enter>", activar_candado, add="+")
     f_barra.bind("<Leave>", quitar_candado, add="+")
 
     def insertar_etiqueta(tag_abrir, tag_cerrar):
         s, e = None, None
-        
-        # 1. Intento normal (Windows y atajos de teclado)
         try:
-            if text_widget.tag_ranges(tk.SEL):
-                s = text_widget.index(tk.SEL_FIRST)
-                e = text_widget.index(tk.SEL_LAST)
+            if inner_text.tag_ranges(tk.SEL):
+                s = inner_text.index(tk.SEL_FIRST)
+                e = inner_text.index(tk.SEL_LAST)
         except Exception:
             pass
 
-        # 2. Rescate con memoria blindada (Para el clic en Mac)
-        if not s and text_widget._memoria_blindada:
-            s, e = text_widget._memoria_blindada
+        if not s and inner_text._memoria_blindada:
+            s, e = inner_text._memoria_blindada
 
-        # 3. Aplicar los corchetes
         if s and e:
             try:
-                texto = text_widget.get(s, e)
-                text_widget.delete(s, e)
-                text_widget.insert(s, f"{tag_abrir}{texto}{tag_cerrar}")
-                # Reiniciamos
-                text_widget._memoria_blindada = None
-                text_widget.tag_remove(tk.SEL, "1.0", tk.END)
+                texto = inner_text.get(s, e)
+                inner_text.delete(s, e)
+                inner_text.insert(s, f"{tag_abrir}{texto}{tag_cerrar}")
+                inner_text._memoria_blindada = None
+                inner_text.tag_remove(tk.SEL, "1.0", tk.END)
             except Exception:
                 pass
         else:
-            # 4. Si realmente no se seleccionó nada
-            text_widget.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
+            inner_text.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
             retroceso = f"insert-{len(tag_cerrar)}c"
-            text_widget.mark_set(tk.INSERT, retroceso)
+            inner_text.mark_set(tk.INSERT, retroceso)
 
-        text_widget.focus_set()
-        return "break" # Evita comportamientos raros de teclado
+        inner_text.focus_set()
+        return "break"
 
-    # Botones
     btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
     btn_b.pack(side="left", padx=2)
     btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    btn_b.bind("<Enter>", lambda e: btn_b.configure(fg_color="#c8c8c8"))
-    btn_b.bind("<Leave>", lambda e: btn_b.configure(fg_color="#e0e0e0"))
+    btn_b.bind("<Enter>", lambda e: [activar_candado(e), btn_b.configure(fg_color="#c8c8c8")])
+    btn_b.bind("<Leave>", lambda e: [quitar_candado(e), btn_b.configure(fg_color="#e0e0e0")])
     
     btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
     btn_c.pack(side="left", padx=2)
     btn_c.bind("<Button-1>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-    btn_c.bind("<Enter>", lambda e: btn_c.configure(fg_color="#c8c8c8"))
-    btn_c.bind("<Leave>", lambda e: btn_c.configure(fg_color="#e0e0e0"))
+    btn_c.bind("<Enter>", lambda e: [activar_candado(e), btn_c.configure(fg_color="#c8c8c8")])
+    btn_c.bind("<Leave>", lambda e: [quitar_candado(e), btn_c.configure(fg_color="#e0e0e0")])
 
-    # ⌨️ PLAN B INFALIBLE: Atajos de teclado para Mac (Cmd) y Win (Ctrl)
-    text_widget.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    text_widget.bind("<Command-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-    text_widget.bind("<Control-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    text_widget.bind("<Control-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    inner_text.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
+    inner_text.bind("<Command-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    inner_text.bind("<Control-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
+    inner_text.bind("<Control-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
     
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):
-    txt_widget.tag_configure("bold", font=("Arial", tam, "bold"))
-    txt_widget.tag_configure("color", foreground=COLOR_PRIMARIO)
-    txt_widget.tag_configure("bold_color", font=("Arial", tam, "bold"), foreground=COLOR_PRIMARIO)
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    inner.tag_configure("bold", font=("Arial", tam, "bold"))
+    inner.tag_configure("color", foreground=COLOR_PRIMARIO)
+    inner.tag_configure("bold_color", font=("Arial", tam, "bold"), foreground=COLOR_PRIMARIO)
 
 def insertar_texto_formateado(txt_widget, texto):
-    txt_widget.delete("1.0", tk.END)
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    inner.delete("1.0", tk.END)
     segmentos = parsear_segmentos_formato(texto)
     for frag, neg, col in segmentos:
         tags = tuple()
@@ -205,7 +198,7 @@ def insertar_texto_formateado(txt_widget, texto):
             tags = ("bold",)
         elif col:
             tags = ("color",)
-        txt_widget.insert(tk.END, frag, tags)
+        inner.insert(tk.END, frag, tags)
 
 # =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS
@@ -900,15 +893,17 @@ class VentanaEtapaProveedores:
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
-        # 🟢 FIX: Fondos obligatorios en blanco y texto negro para evitar la mancha negra en Mac
-        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
+        # 🚀 SOLUCIÓN SUPREMA: Reemplazado tk.Text por ctk.CTkTextbox (100% Nativo de CustomTkinter)
+        self.txt_p_notes = ctk.CTkTextbox(f_notas_wrapper, width=480, height=130, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
         self.txt_p_notes.pack(fill="both", expand=True, side="top")
         self.lbl_p_contador = ctk.CTkLabel(self.f_inputs, text="Caracteres restantes: 750", font=("Arial", 10), text_color="#555")
         self.lbl_p_contador.grid(row=7, column=3, sticky="se", padx=10, pady=2)
-        self.txt_p_notes.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(texto_plano_sin_marcado(self.txt_p_notes.get('1.0', 'end-1c'))))}"))
+        
+        # El bind en CTkTextbox se hace al widget interno
+        self.txt_p_notes._textbox.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(texto_plano_sin_marcado(self.txt_p_notes.get('1.0', 'end-1c'))))}"))
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
         f_totales_centro.grid(row=5, column=5, columnspan=2, rowspan=3, sticky="nsew", padx=(15, 15), pady=(5, 12))
@@ -1355,8 +1350,8 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
-        # 🟢 FIX Popup: Colores explícitos también aquí para evitar la sombra negra en Mac
-        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
+        # 🚀 SOLUCIÓN SUPREMA: CTkTextbox también en la ventana de edición emergente
+        txt_m_notas = ctk.CTkTextbox(f_m, width=450, height=80, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
@@ -1413,12 +1408,12 @@ class VentanaEtapaProveedores:
                 for child in self.f_rows_dinamicas.winfo_children():
                     child.configure(fg_color="#ffffff")
                     for sub in child.winfo_children():
-                        if isinstance(sub, tk.Text):
-                            sub.config(bg="#ffffff")
+                        if isinstance(sub, ctk.CTkTextbox):
+                            sub.configure(fg_color="#ffffff")
                 f.configure(fg_color="#cfe2ff")
                 for sub in f.winfo_children():
-                    if isinstance(sub, tk.Text):
-                        sub.config(bg="#cfe2ff")
+                    if isinstance(sub, ctk.CTkTextbox):
+                        sub.configure(fg_color="#cfe2ff")
                 self.fila_matriz_seleccionada = d
 
             f_row.bind("<Button-1>", marcar_seleccion_f)
@@ -1435,13 +1430,17 @@ class VentanaEtapaProveedores:
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
-            # 🟢 FIX Grid: Texto negro explícito aquí también
-            txt_notas = tk.Text(f_row, height=max(3, conteo_lineas), font=("Arial", 10), wrap="word", bg="#ffffff", fg="#000000", bd=0, highlightthickness=0, exportselection=0)
+            # 🚀 SOLUCIÓN SUPREMA: CTkTextbox integrado en la grilla para erradicar las sombras negras
+            txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Arial", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)
             txt_notas.pack(side="left", fill="both", expand=True, padx=10, pady=5)
-            txt_notas.bind("<Button-1>", marcar_seleccion_f)
+            
+            # Hay que hacerle bind también a la caja y a su contenido interno para que reaccione al clic
+            txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
+            txt_notas._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
+            
             f_row.data_pack = data_pack
             self.lista_widgets_filas.append(f_row)
             if id_a_seleccionar == id_real:

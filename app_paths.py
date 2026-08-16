@@ -1,23 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-Rutas absolutas de la aplicación.
-Funciona igual en desarrollo, en macOS y compilado con PyInstaller.
+APP_PATHS.PY - Gestor de Rutas Seguras
+Garantiza que la configuración y los datos locales sobrevivan a las actualizaciones.
 """
-
+import os
 import sys
-from pathlib import Path
 
+APP_NAME = "BlackCube"
 
-def carpeta_aplicacion():
+def obtener_directorio_datos_usuario():
     """
-    Devuelve la carpeta donde está el programa:
-    - Si está compilado (.exe / .app): la carpeta del ejecutable.
-    - Si está en desarrollo: la carpeta del proyecto.
+    Obtiene la ruta segura del sistema operativo para guardar datos de usuario.
+    Esta carpeta NO se borra cuando la aplicación se actualiza.
     """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+    if sys.platform == "win32":
+        # Windows: C:\Users\Usuario\AppData\Roaming\BlackCube
+        base_dir = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif sys.platform == "darwin":
+        # Mac: /Users/Usuario/Library/Application Support/BlackCube
+        base_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
+    else:
+        # Linux / Otros: ~/.config/BlackCube
+        base_dir = os.path.join(os.path.expanduser("~"), ".config")
+    
+    app_dir = os.path.join(base_dir, APP_NAME)
+    
+    # Crear la carpeta de forma silenciosa si no existe
+    os.makedirs(app_dir, exist_ok=True)
+    return app_dir
 
+# --- RUTAS GLOBALES SEGURAS ---
+CONFIG_DIR = obtener_directorio_datos_usuario()
 
-# Ruta absoluta del archivo de configuración local
-CONFIG_FILE = carpeta_aplicacion() / "config_local.json"
+# El archivo de configuración ahora vivirá seguro fuera de la app
+CONFIG_FILE = os.path.join(CONFIG_DIR, "configuracion.json")

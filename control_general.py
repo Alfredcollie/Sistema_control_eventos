@@ -24,7 +24,7 @@ import webbrowser  # 🚀 NUEVO: Para abrir el enlace de la actualización
 from datetime import datetime, timedelta
 
 # 🚀 NUEVO: Definimos la versión actual de tu código
-VERSION_ACTUAL = "v1.6.0"
+VERSION_ACTUAL = "v1.5.5"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:

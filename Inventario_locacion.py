@@ -6,6 +6,8 @@ INVENTARIO_LOCACION.PY (ENTERPRISE EDITION)
 - Caché Inteligente en Combobox de Eventos.
 - Protección del Pool de Conexiones (liberar_conexion).
 - Auto-curación síncrona en segundo plano.
+- 🚀 FIX MAC: Errno 30 resuelto. Las fotos ahora se guardan en la "Caja Fuerte" (Application Support/AppData).
+- 🚀 FIX MAC: Botón de subir fotos corregido (FileDialog sin punto y coma).
 """
 
 import os
@@ -24,6 +26,14 @@ from datetime import datetime
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+
+# 🚀 FIX MAC: Importamos la ruta segura "Caja Fuerte" para guardar las fotos
+try:
+    from app_paths import CONFIG_DIR
+    BASE_IMG_DIR = str(CONFIG_DIR)
+except Exception:
+    # Respaldo de emergencia en caso de que falle app_paths
+    BASE_IMG_DIR = os.path.join(os.path.expanduser("~"), "BlackCube_Seguro")
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -141,8 +151,9 @@ class CatalogoLocacionesTab:
         self.pagina_actual = 1
         self.registros_por_pagina = 50
         
-        self.carpeta_originales = os.path.join("locaciones_img", "fotos_originales")
-        self.carpeta_medidas = os.path.join("locaciones_img", "fotos_medidas")
+        # 🚀 FIX MAC: Guardamos las imágenes en la Caja Fuerte (BASE_IMG_DIR) para evadir el Error 30
+        self.carpeta_originales = os.path.join(BASE_IMG_DIR, "locaciones_img", "fotos_originales")
+        self.carpeta_medidas = os.path.join(BASE_IMG_DIR, "locaciones_img", "fotos_medidas")
         os.makedirs(self.carpeta_originales, exist_ok=True)
         os.makedirs(self.carpeta_medidas, exist_ok=True)
             
@@ -801,7 +812,9 @@ class CatalogoLocacionesTab:
         lbl_img_preview.pack(pady=(0, 15))
 
         def seleccionar_img():
-            ruta = filedialog.askopenfilename(title="Seleccionar Imagen", filetypes=[("Imágenes", "*.png;*.jpg;*.jpeg")])
+            # 🚀 FIX MAC: FileTypes limpios y sin punto y coma
+            tipos_seguros = [("Archivos de Imagen", "*.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta = filedialog.askopenfilename(title="Seleccionar Imagen", filetypes=tipos_seguros)
             if ruta:
                 ruta_temp["path"] = ruta
                 btn_seleccionar.configure(text="✅ Imagen Lista", fg_color="#28a745", hover_color="#218838")

@@ -3,13 +3,13 @@
 =========================================================
 PAUTAS_EVENTO.PY (ENTERPRISE EDITION)
 =========================================================
-- FIX: Renderizado de Logo Borde a Borde en el PDF de Pautas (Estándar Corporativo).
+- FIX: Renderizado de Logo Borde a Borde en el PDF de Pautas.
 - FIX: Auto-curación síncrona segura (Scope global corregido).
 - FIX: Carga 100% Asíncrona de Eventos y Actividades.
-- FIX: El desplegable de 'Nueva Pauta' ahora muestra todas las cotizaciones Aprobadas.
+- FIX: Bóveda segura para configuraciones.
+- FIX: Creación automática de carpeta Pautas_Eventos (Mac/Win).
 - Caché Inteligente para el filtro de Eventos.
-- Uso del Pool de conexiones seguro (liberar_conexion).
-- Tabla de pautas completa (Sin paginación) para mantener secuencia de hora.
+- Uso del Pool de conexiones seguro.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -21,20 +21,21 @@ import threading
 from datetime import datetime
 import io
 from xml.sax.saxutils import escape
+import subprocess # Necesario para abrir el PDF en Mac/Win
 
 # Importación para el manejo de imágenes
 from PIL import Image as PILImage
 
 # Para la generación de PDF
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.utils import ImageReader
 
-# 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
+# 🚀 IMPORTAMOS NUESTRAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 from app_paths import CONFIG_FILE
@@ -53,7 +54,6 @@ class PautasEventoApp:
         self.inicializar_db_pautas()
         self.crear_interfaz()
 
-    # 🚀 FIX: AUTO-CURACIÓN EN SEGUNDO PLANO Y SCOPE GLOBAL RESUELTO
     def inicializar_db_pautas(self):
         global _SCHEMA_PAUTAS_OK
         if _SCHEMA_PAUTAS_OK: return
@@ -202,7 +202,6 @@ class PautasEventoApp:
             self.f_modo_guardada.pack(side="bottom", fill="x", pady=5)
             self.cargar_eventos("guardados")
 
-    # 🚀 FIX: CARGA DE EVENTOS ASÍNCRONA + CACHÉ
     def cargar_eventos(self, filtro):
         clave_cache = f"pautas_filtro_v2_{filtro}"
         datos = cache_sistema.obtener(clave_cache)
@@ -276,7 +275,6 @@ class PautasEventoApp:
             self.cmb_evento.set("No hay eventos para mostrar")
             self.vaciar_lista_silencioso()
 
-    # 🚀 FIX: CARGA DE PAUTAS ASÍNCRONA + CACHÉ
     def al_seleccionar_evento(self, choice):
         if choice not in self.eventos_dict:
             self.vaciar_lista_silencioso()
@@ -371,9 +369,6 @@ class PautasEventoApp:
         for item in self.tree.get_children(): self.tree.delete(item)
         self.limpiar_campos()
 
-    # =======================================================
-    # OPERACIONES DE BASE DE DATOS Y CACHÉ INVALIDATION
-    # =======================================================
     def guardar_y_generar(self):
         seleccion = self.cmb_evento.get()
         if seleccion not in self.eventos_dict:
@@ -390,7 +385,6 @@ class PautasEventoApp:
         try:
             cursor = conn.cursor()
             
-            # Buscamos si ya existía una pauta para este código y la borramos antes de insertar
             cursor.execute("DELETE FROM pautas_eventos WHERE codigo_cotizacion = %s", (cod,))
             
             fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -455,9 +449,7 @@ class PautasEventoApp:
             finally:
                 liberar_conexion(conn)
 
-    # =======================================================
-    # GENERADOR DE PDF PROFESIONAL AUTOMATIZADO CON LOGO BORDE A BORDE
-    # =======================================================
+    # 🚀 FIX: Lectura Segura de Configuración Multiplataforma
     def obtener_configuracion_local(self):
         config = {
             "ruta_logo": "", 
@@ -466,14 +458,18 @@ class PautasEventoApp:
             "ruta_drive": ""
         }
         try:
-            if os.path.exists(str(CONFIG_FILE)):
-                with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
+            ruta_segura = str(CONFIG_FILE)
+            if os.path.exists(ruta_segura):
+                with open(ruta_segura, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     config["ruta_logo"] = data.get("ruta_logo_cotizacion", "")
                     config["color_primario"] = data.get("color_franja", "#1f538d")
                     config["razon_social"] = data.get("razon_social_empresa", "Nuestra Empresa")
                     config["ruta_drive"] = data.get("ruta_drive", "")
-        except Exception: pass
+            else:
+                print(f"⚠️ Aviso: Archivo de configuración no encontrado en la ruta segura: {ruta_segura}")
+        except Exception as e: 
+            print(f"❌ Error al leer la configuración segura: {e}")
         return config
 
     def generar_pdf(self, abrir_auto=False):
@@ -495,21 +491,16 @@ class PautasEventoApp:
         cod_limpio = str(datos_evento['codigo']).replace("/", "-").replace("\\", "-")
         nombre_default = f"Pautas_{cod_limpio}.pdf"
         
+        # 🚀 FIX: Autocreación de carpeta en Mac y Win sin FileDialog
         try:
-            if ruta_base and os.path.exists(ruta_base):
-                carpeta_pautas = os.path.join(ruta_base, "Pautas")
-                if not os.path.exists(carpeta_pautas):
-                    os.makedirs(carpeta_pautas)
-                ruta_guardado = os.path.join(carpeta_pautas, nombre_default)
-            else:
-                ruta_guardado = filedialog.asksaveasfilename(
-                    parent=parent_window,
-                    defaultextension=".pdf",
-                    initialfile=nombre_default,
-                    title="Guardar Pauta en PDF",
-                    filetypes=[("PDF files", "*.pdf")]
-                )
-                if not ruta_guardado: return False
+            if not ruta_base or not os.path.exists(ruta_base):
+                ruta_base = os.path.join(os.path.expanduser("~"), "Desktop")
+                
+            carpeta_pautas = os.path.join(ruta_base, "Pautas_Eventos")
+            os.makedirs(carpeta_pautas, exist_ok=True)
+            
+            ruta_guardado = os.path.join(carpeta_pautas, nombre_default)
+            
         except Exception as e:
             print("Error definiendo la ruta de guardado:", e)
             return False
@@ -530,9 +521,7 @@ class PautasEventoApp:
                 fallbacks = [
                     "LogoCotizacion.png",
                     "LogoCotizacion.jpg",
-                    "Logo_Collie_Software.png",
-                    r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-                    r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
+                    "Logo_Collie_Software.png"
                 ]
                 for fallback in fallbacks:
                     if os.path.exists(fallback):

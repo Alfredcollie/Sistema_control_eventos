@@ -900,7 +900,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
         # Ojo aquí: Le dejamos el exportselection=0 para que todo esté doblemente blindado
-        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0)
+        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
@@ -1355,7 +1355,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
         # 🔧 El exportselection en 0, para mayor seguridad global
-        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0)
+        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")

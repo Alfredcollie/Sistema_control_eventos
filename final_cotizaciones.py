@@ -17,16 +17,19 @@ Mejoras:
 - Penalidad con salto de línea automático.
 - FIX: Removido mask='auto' que crasheaba JPGs y PNGs sin canal alfa.
 - FIX: Normalización de rutas para Windows.
+- 🚀 FIX MAC: Ruta de respaldo segura (Escritorio) + Alerta de GDrive.
 """
 
 import os
 import re
 import json
+import sys
 from datetime import datetime
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
+from tkinter import messagebox  # Importamos la caja de alertas
 
 try:
     from app_paths import CONFIG_FILE
@@ -35,7 +38,7 @@ except Exception:
     RUTA_CONFIG = "config_local.json"
 
 
-_PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])')
+_PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
 
 def hex_to_rgb(hex_color):
@@ -49,13 +52,14 @@ def hex_to_rgb(hex_color):
 def parsear_segmentos_formato(texto):
     resultado, negrita, color_p = [], False, False
     for parte in _PATRON_ETIQUETAS.split(str(texto)):
-        if parte == "[B]":
+        p_up = parte.upper()
+        if p_up == "[B]":
             negrita = True
-        elif parte == "[/B]":
+        elif p_up == "[/B]":
             negrita = False
-        elif parte == "[M]":
+        elif p_up == "[M]":
             color_p = True
-        elif parte == "[/M]":
+        elif p_up == "[/M]":
             color_p = False
         elif parte:
             resultado.append((parte, negrita, color_p))
@@ -147,19 +151,29 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         except Exception:
             conn_shared.rollback()
 
+        # --------------------------------------------------
+        # 🚀 RUTAS DE GUARDADO Y ALERTA DE GDRIVE EN MAC
+        # --------------------------------------------------
         ruta_drive = str(config.get("ruta_drive", "")).strip()
+        usando_escritorio = False
+
         if ruta_drive and os.path.exists(ruta_drive):
             carpeta_destino = os.path.join(ruta_drive, "Cotizaciones")
         else:
             if os.path.exists(r"G:\Mi unidad"):
                 carpeta_destino = r"G:\Mi unidad\Programa de control black Cube\Cotizaciones"
             else:
-                carpeta_destino = os.path.join(os.getcwd(), "Cotizaciones")
+                # Si falla lo anterior, guardamos en el Escritorio del usuario de Mac/Windows
+                escritorio = os.path.join(os.path.expanduser("~"), "Desktop")
+                carpeta_destino = os.path.join(escritorio, "Cotizaciones")
+                usando_escritorio = True
+                
         if not os.path.exists(carpeta_destino):
             try:
                 os.makedirs(carpeta_destino)
             except Exception:
                 pass
+                
         nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
 
         c = canvas.Canvas(nombre_archivo, pagesize=letter)
@@ -173,7 +187,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         if "ruta_logo_cotizacion" in config:
             ruta_conf = str(config.get("ruta_logo_cotizacion", "")).strip()
             if ruta_conf != "":
-                # Normalizamos la ruta para que Windows no tenga conflictos
                 ruta_conf = os.path.normpath(ruta_conf)
                 
             if ruta_conf == "":
@@ -205,7 +218,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 img = ImageReader(ruta_usar)
                 img_w, img_h = img.getSize()
                 
-                # Prevenir divisiones por cero
                 if img_w == 0: img_w = 1
                 if img_h == 0: img_h = 1
                 
@@ -220,7 +232,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 final_h = img_h * ratio
                 y_logo = 792 - 40 - final_h
                 
-                # Se eliminó mask='auto' para garantizar compatibilidad con JPGs y PNGs sin canal alfa
                 c.drawImage(ruta_usar, 40, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
                 
                 techo_textos = 685
@@ -229,7 +240,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 
             except Exception as e:
                 print(f"Error renderizando logo: {e}")
-                # Fallback de emergencia, también sin mask='auto'
                 try:
                     c.drawImage(ruta_usar, 40, 685, width=150, height=80, preserveAspectRatio=True)
                 except Exception:
@@ -492,6 +502,21 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             y_cond_actual -= 12
 
         c.save()
+
+        # --------------------------------------------------
+        # 🚀 AVISO SI SE USÓ EL PLAN DE RESPALDO (ESCRITORIO)
+        # --------------------------------------------------
+        if usando_escritorio:
+            try:
+                messagebox.showwarning(
+                    "Sincronización en la Nube Inactiva", 
+                    "Tu cotización fue guardada localmente en tu Escritorio porque no se detectó Google Drive.\n\n"
+                    "Para Mac: Recuerda instalar la aplicación de Google Drive (Gdrive) "
+                    "y luego seleccionar la ruta correcta desde la 'Configuración General' de Black Cube para enlazar la carpeta."
+                )
+            except Exception:
+                pass
+
         return True, nombre_archivo
     except Exception as e:
         return False, str(e)

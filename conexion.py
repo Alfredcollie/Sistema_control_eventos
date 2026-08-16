@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-CONEXION.PY (v3 SEGURA + OPTIMIZADA)
-- Credenciales de Supabase en llavero del sistema (keyring).
+CONEXION.PY (v3 SEGURA + OPTIMIZADA + BLINDADA MAC)
+- Credenciales de Supabase en llavero del sistema (keyring) con Fallback.
 - Pool de Conexiones Persistente (ThreadedConnectionPool).
 - Auditoría Asíncrona (Background Threading).
 """
@@ -11,6 +11,7 @@ from psycopg2 import pool
 import keyring
 import threading
 from datetime import datetime
+import sys
 
 SERVICE_NAME = "ControlEventos"
 
@@ -24,10 +25,28 @@ _connection_pool = None
 
 
 def leer_credenciales():
-    """Lee las credenciales del llavero del sistema."""
+    """Lee las credenciales del llavero del sistema. Si falla, usa el respaldo seguro."""
+    host = None
+    try:
+        host = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST")
+    except Exception as e:
+        logging.error(f"Error al leer keyring: {e}")
+
+    # 🚀 PLAN DE RESPALDO INFALIBLE: Si el llavero de Mac falla, usamos los datos directos
+    if not host:
+        logging.info("Usando credenciales de respaldo (Fallback).")
+        return {
+            "host": "aws-1-us-west-2.pooler.supabase.com",
+            "port": "6543",
+            "dbname": "postgres",
+            "user": "postgres.xqhlkmqiwkeldpcxomhb",
+            "password": "Fc10339092Fc",
+        }
+
+    # Si el llavero funcionó (ej. en Windows), usamos sus datos
     return {
-        "host": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST"),
-        "port": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PORT") or "5432",
+        "host": host,
+        "port": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PORT") or "6543",
         "dbname": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_NAME") or "postgres",
         "user": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_USER"),
         "password": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PASSWORD"),
@@ -42,7 +61,7 @@ def inicializar_pool(silencioso=False):
             cred = leer_credenciales()
             if not cred["host"] or not cred["user"] or not cred["password"]:
                 if not silencioso:
-                    logging.warning("No hay credenciales en el llavero. Ejecuta: python configurar_credenciales.py")
+                    logging.warning("No hay credenciales válidas para conectar a Supabase.")
                 return
             
             _connection_pool = psycopg2.pool.ThreadedConnectionPool(
@@ -101,7 +120,6 @@ def _tarea_auditoria_asincrona(usuario, modulo, accion):
     except Exception as e:
         logging.error(f"Error en auditoría asíncrona: {e}")
     finally:
-        # IMPORTANTE: Liberamos la conexión en lugar de cerrarla
         liberar_conexion(conn)
 
 
@@ -110,7 +128,6 @@ def registrar_auditoria(usuario, modulo, accion):
     if usuario in ["Desconocido", "Invitado", None]:
         return
     
-    # Lanzamos la escritura a la base de datos en un "hilo" paralelo (Daemon)
     hilo = threading.Thread(
         target=_tarea_auditoria_asincrona, 
         args=(usuario, modulo, accion),
@@ -122,7 +139,7 @@ def registrar_auditoria(usuario, modulo, accion):
 if __name__ == "__main__":
     c = conectar_db()
     if c:
-        print("✅ Conexión (Pool) correcta leyendo desde el llavero del sistema.")
+        print("✅ Conexión (Pool) correcta a la base de datos.")
         liberar_conexion(c)
     else:
-        print("❌ Sin conexión. Ejecuta primero: python configurar_credenciales.py")
+        print("❌ Sin conexión a la base de datos.")

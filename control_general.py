@@ -7,6 +7,7 @@ CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
 - Sincronización Rclone Silenciosa en Segundo Plano.
 - 🚀 FIX: Compatibilidad Mac en FileDialog.
 - 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
+- 🚀 FIX: Consulta de RUC en Configuración con escudo SSL desactivado para Mac.
 """
 import tkinter as tk
 import customtkinter as ctk
@@ -926,6 +927,7 @@ class ControlGeneralEventos:
         f_scroll = ctk.CTkScrollableFrame(v_conf, fg_color="transparent")
         f_scroll.pack(fill="both", expand=True, padx=20, pady=10)
         ctk.CTkLabel(f_scroll, text="Ajustes locales guardados específicamente para este equipo.", font=("Arial", 12, "italic"), text_color="gray").pack(anchor="w", padx=10, pady=(0, 15))
+        
         # ---------- 1. EMPRESA Y TRIBUTACIÓN ----------
         f_empresa = ctk.CTkFrame(f_scroll, corner_radius=10)
         f_empresa.pack(fill="x", padx=10, pady=10, ipady=10)
@@ -996,25 +998,51 @@ class ControlGeneralEventos:
                 ent_igv.insert(0, "18"); ent_retencion.insert(0, "8"); ent_renta_m.insert(0, "1.5"); ent_renta_a.insert(0, "29.5")
         cmb_regimen.configure(command=actualizar_tasas_regimen)
 
+        # 🚀 FIX MAC: Consulta de RUC con Escudo SSL Desactivado y Hilo en Segundo Plano
         def buscar_ruc_empresa(event=None):
             ruc = ent_ruc_empresa.get().strip()
             if len(ruc) != 11 or not ruc.isdigit():
                 messagebox.showwarning("RUC Inválido", "Por favor, ingrese un RUC válido de 11 dígitos.", parent=v_conf)
                 return
-            try:
-                url = f"https://api.apis.net.pe/v1/ruc?numero={ruc}"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    if response.status == 200:
-                        data = json.loads(response.read().decode())
-                        ent_razon_social.delete(0, tk.END)
-                        ent_razon_social.insert(0, data.get("nombre", ""))
-                        messagebox.showinfo("Éxito", "Datos recuperados correctamente.", parent=v_conf)
-                    else:
-                        messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC.", parent=v_conf)
-            except Exception as e:
-                messagebox.showwarning("Error", f"Problema al consultar RUC:\n{e}", parent=v_conf)
+            
+            def tarea():
+                try:
+                    import ssl
+                    import urllib.error
+                    
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    
+                    token = config_actual.get("token_api_ruc", "")
+                    
+                    url = f"https://api.apis.net.pe/v1/ruc?numero={ruc}"
+                    headers = {'User-Agent': 'Mozilla/5.0'}
+                    if token:
+                        headers['Authorization'] = f'Bearer {token}'
+                        
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, context=ctx, timeout=8) as response:
+                        if response.status == 200:
+                            data = json.loads(response.read().decode())
+                            v_conf.after(0, lambda: _aplicar_datos_empresa(data))
+                        else:
+                            v_conf.after(0, lambda: messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC.", parent=v_conf))
+                except urllib.error.URLError as e:
+                    error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
+                    v_conf.after(0, lambda msg=error_msg: messagebox.showerror("Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {msg}", parent=v_conf))
+                except Exception as e:
+                    v_conf.after(0, lambda err=e: messagebox.showwarning("Error", f"Problema al consultar RUC:\n{err}", parent=v_conf))
+
+            def _aplicar_datos_empresa(data):
+                ent_razon_social.delete(0, tk.END)
+                ent_razon_social.insert(0, data.get("nombre", ""))
+                messagebox.showinfo("Éxito", "Datos de la empresa recuperados correctamente.", parent=v_conf)
+
+            threading.Thread(target=tarea, daemon=True).start()
+            
         ent_ruc_empresa.bind("<Return>", buscar_ruc_empresa)
+        
         # ---------- 2. API SUNAT SIRE ----------
         f_sire = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#f0fdf4", border_width=1, border_color="#bbf7d0")
         f_sire.pack(fill="x", padx=10, pady=10, ipady=10)
@@ -1039,6 +1067,7 @@ class ControlGeneralEventos:
         ent_client_secret = ctk.CTkEntry(f_sire_r2, show="*")
         ent_client_secret.pack(side="left", fill="x", expand=True, padx=5)
         ent_client_secret.insert(0, config_actual.get("client_secret_sire", ""))
+        
         # ---------- 3. FACTURACIÓN ELECTRÓNICA ----------
         f_fe = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#f0f4f8", border_width=1, border_color="#d0d7de")
         f_fe.pack(fill="x", padx=10, pady=10, ipady=10)
@@ -1061,6 +1090,7 @@ class ControlGeneralEventos:
         ent_token_api = ctk.CTkEntry(f_fe_row3, show="*")
         ent_token_api.pack(side="left", fill="x", expand=True, padx=5)
         ent_token_api.insert(0, config_actual.get("token_api_fe", ""))
+        
         # ---------- 4. 2FA ----------
         f_2fa = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#fff3cd", border_width=1, border_color="#ffeeba")
         f_2fa.pack(fill="x", padx=10, pady=10, ipady=10)
@@ -1131,6 +1161,7 @@ class ControlGeneralEventos:
                 f_sms.pack(fill="x", padx=15, pady=5)
         cmb_2fa.configure(command=actualizar_ui_2fa)
         actualizar_ui_2fa(cmb_2fa.get())
+        
         # ---------- 5. PERSONALIZACIÓN VISUAL DE COTIZACIONES ----------
         f_diseno = ctk.CTkFrame(f_scroll, corner_radius=10)
         f_diseno.pack(fill="x", padx=10, pady=10, ipady=10)

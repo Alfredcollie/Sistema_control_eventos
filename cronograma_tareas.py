@@ -9,6 +9,8 @@ CRONOGRAMA_TAREAS.PY (ENTERPRISE EDITION)
 - FIX: Cierre de conexiones seguro en consultas del Calendario.
 - FIX: Auto-curación síncrona para evitar Race Conditions y Caché Fantasma.
 - FIX: Blindaje contra 'NoneType' al leer eventos vacíos.
+- 🚀 FIX MAC: Compatibilidad en FileDialog (Botones Cargar Factura).
+- 🚀 FIX MAC: Fallback dinámico para almacenamiento local sin unidad G:\.
 - Paginación Lazy Loading (50 en 50) para la lista de tareas.
 - Caché Inteligente para el filtro de Eventos.
 - Uso estricto del Pool de conexiones (liberar_conexion).
@@ -1194,10 +1196,13 @@ class CronogramaApp:
                 pass
         import shutil
         ruta_base = obtener_ruta_base_drive()
-        if ruta_base:
+        
+        # 🚀 FIX MAC: Aseguramos que si no hay ruta Drive, se vaya al Escritorio y no a G:\
+        if ruta_base and os.path.exists(ruta_base):
             carpeta_destino = os.path.join(ruta_base, "facturas_recibidas")
         else:
-            carpeta_destino = r"G:\Mi unidad\Programa de control black Cube\facturas_recibidas"
+            carpeta_destino = os.path.join(os.path.expanduser("~"), "Desktop", "facturas_recibidas")
+            
         if not os.path.exists(carpeta_destino):
             try: os.makedirs(carpeta_destino)
             except Exception: pass
@@ -1223,7 +1228,9 @@ class CronogramaApp:
         return ruta_final, total
 
     def adjuntar_pago(self):
-        ruta = filedialog.askopenfilename(title="Seleccionar Factura / Pago", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")])
+        # 🚀 FIX MAC: Cambiados los puntos y comas por espacios en los filetypes
+        tipos_seguros = [("Archivos", "*.pdf *.png *.jpg *.jpeg"), ("PDF", "*.pdf"), ("Imágenes", "*.png *.jpg *.jpeg"), ("Todos", "*.*")]
+        ruta = filedialog.askopenfilename(title="Seleccionar Factura / Pago", filetypes=tipos_seguros)
         if ruta:
             self.ruta_temp_pago = ruta
             self.btn_adjuntar_pago.configure(text="✅ Archivo Listo para Guardar", fg_color="#28a745")
@@ -1290,7 +1297,9 @@ class CronogramaApp:
             btn_archivo_edit.configure(text="✅ Archivo Ya Cargado", fg_color="#28a745")
 
         def adjuntar_edit():
-            ruta = filedialog.askopenfilename(title="Seleccionar Comprobante / Factura", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")], parent=v_edit)
+            # 🚀 FIX MAC: Cambiados los puntos y comas por espacios en los filetypes
+            tipos_seguros = [("Archivos", "*.pdf *.png *.jpg *.jpeg"), ("PDF", "*.pdf"), ("Imágenes", "*.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta = filedialog.askopenfilename(title="Seleccionar Comprobante / Factura", filetypes=tipos_seguros, parent=v_edit)
             if ruta:
                 ruta_temp_edit["path"] = ruta
                 btn_archivo_edit.configure(text="✅ Archivo Listo para Guardar", fg_color="#28a745")

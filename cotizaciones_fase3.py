@@ -74,7 +74,7 @@ def abrir_documento(ruta):
         print(f"No se pudo abrir el documento automáticamente: {e}")
 
 # =========================================================
-# HERRAMIENTAS DE TEXTO ENRIQUECIDO (AHORA ADAPTADO A CTkTextbox)
+# HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG REAL
 # =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
@@ -104,12 +104,26 @@ def parsear_segmentos_formato(texto):
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
+# 🚀 NUEVO: Traductor que lee el formato visual y lo convierte a etiquetas [B]/[M] para la Base de Datos
+def extraer_texto_con_formato(txt_widget):
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    dump = inner.dump("1.0", "end-1c")
+    res = ""
+    for key, value, index in dump:
+        if key == "tagon":
+            if value == "bold": res += "[B]"
+            elif value == "color": res += "[M]"
+        elif key == "tagoff":
+            if value == "bold": res += "[/B]"
+            elif value == "color": res += "[/M]"
+        elif key == "text":
+            res += value
+    return res
+
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
     
-    # CustomTkinter envuelve la caja real dentro de un atributo llamado _textbox
     inner_text = text_widget._textbox if hasattr(text_widget, "_textbox") else text_widget
-    
     inner_text._memoria_blindada = None
     inner_text._memoria_bloqueada = False
 
@@ -132,7 +146,8 @@ def crear_barra_formato(parent, text_widget):
     f_barra.bind("<Enter>", activar_candado, add="+")
     f_barra.bind("<Leave>", quitar_candado, add="+")
 
-    def insertar_etiqueta(tag_abrir, tag_cerrar):
+    # 🚀 NUEVO: Ahora aplicamos el formato REAL en lugar de insertar corchetes de texto
+    def alternar_formato(tag_name):
         s, e = None, None
         try:
             if inner_text.tag_ranges(tk.SEL):
@@ -146,37 +161,42 @@ def crear_barra_formato(parent, text_widget):
 
         if s and e:
             try:
-                texto = inner_text.get(s, e)
-                inner_text.delete(s, e)
-                inner_text.insert(s, f"{tag_abrir}{texto}{tag_cerrar}")
+                # Comprobar si la primera letra seleccionada ya tiene el formato
+                current_tags = inner_text.tag_names(s)
+                if tag_name in current_tags:
+                    # Si ya lo tiene, se lo quitamos (Efecto Toggle)
+                    inner_text.tag_remove(tag_name, s, e)
+                else:
+                    # Si no lo tiene, se lo agregamos visualmente
+                    inner_text.tag_add(tag_name, s, e)
+                
                 inner_text._memoria_blindada = None
                 inner_text.tag_remove(tk.SEL, "1.0", tk.END)
             except Exception:
                 pass
-        else:
-            inner_text.insert(tk.INSERT, f"{tag_abrir}{tag_cerrar}")
-            retroceso = f"insert-{len(tag_cerrar)}c"
-            inner_text.mark_set(tk.INSERT, retroceso)
-
+                
         inner_text.focus_set()
         return "break"
 
     btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
     btn_b.pack(side="left", padx=2)
-    btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))
+    btn_b.bind("<Button-1>", lambda e: alternar_formato("bold"))
     btn_b.bind("<Enter>", lambda e: [activar_candado(e), btn_b.configure(fg_color="#c8c8c8")])
     btn_b.bind("<Leave>", lambda e: [quitar_candado(e), btn_b.configure(fg_color="#e0e0e0")])
     
     btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
     btn_c.pack(side="left", padx=2)
-    btn_c.bind("<Button-1>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    btn_c.bind("<Button-1>", lambda e: alternar_formato("color"))
     btn_c.bind("<Enter>", lambda e: [activar_candado(e), btn_c.configure(fg_color="#c8c8c8")])
     btn_c.bind("<Leave>", lambda e: [quitar_candado(e), btn_c.configure(fg_color="#e0e0e0")])
 
-    inner_text.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    inner_text.bind("<Command-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-    inner_text.bind("<Control-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
-    inner_text.bind("<Control-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    inner_text.bind("<Command-b>", lambda e: alternar_formato("bold"))
+    inner_text.bind("<Command-m>", lambda e: alternar_formato("color"))
+    inner_text.bind("<Control-b>", lambda e: alternar_formato("bold"))
+    inner_text.bind("<Control-m>", lambda e: alternar_formato("color"))
+    
+    # Aseguramos que la caja nueva reconozca las reglas visuales
+    configurar_tags_formato(text_widget, tam=11)
     
     return f_barra
 
@@ -184,21 +204,21 @@ def configurar_tags_formato(txt_widget, tam=10):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     inner.tag_configure("bold", font=("Arial", tam, "bold"))
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
-    inner.tag_configure("bold_color", font=("Arial", tam, "bold"), foreground=COLOR_PRIMARIO)
+    # Ya no hace falta "bold_color", el sistema suma "bold" y "color" de forma nativa.
 
 def insertar_texto_formateado(txt_widget, texto):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     inner.delete("1.0", tk.END)
     segmentos = parsear_segmentos_formato(texto)
     for frag, neg, col in segmentos:
-        tags = tuple()
-        if neg and col:
-            tags = ("bold_color",)
-        elif neg:
-            tags = ("bold",)
-        elif col:
-            tags = ("color",)
-        inner.insert(tk.END, frag, tags)
+        tags = []
+        if neg: tags.append("bold")
+        if col: tags.append("color")
+        
+        if tags:
+            inner.insert(tk.END, frag, tuple(tags))
+        else:
+            inner.insert(tk.END, frag)
 
 # =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS
@@ -893,7 +913,6 @@ class VentanaEtapaProveedores:
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
-        # 🚀 SOLUCIÓN SUPREMA: Reemplazado tk.Text por ctk.CTkTextbox (100% Nativo de CustomTkinter)
         self.txt_p_notes = ctk.CTkTextbox(f_notas_wrapper, width=480, height=130, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
@@ -902,8 +921,8 @@ class VentanaEtapaProveedores:
         self.lbl_p_contador = ctk.CTkLabel(self.f_inputs, text="Caracteres restantes: 750", font=("Arial", 10), text_color="#555")
         self.lbl_p_contador.grid(row=7, column=3, sticky="se", padx=10, pady=2)
         
-        # El bind en CTkTextbox se hace al widget interno
-        self.txt_p_notes._textbox.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(texto_plano_sin_marcado(self.txt_p_notes.get('1.0', 'end-1c'))))}"))
+        # 🚀 NUEVO: El contador ya no necesita buscar etiquetas ocultas, WYSIWYG las elimina.
+        self.txt_p_notes._textbox.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(self.txt_p_notes.get('1.0', 'end-1c')))}"))
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
         f_totales_centro.grid(row=5, column=5, columnspan=2, rowspan=3, sticky="nsew", padx=(15, 15), pady=(5, 12))
@@ -1257,7 +1276,10 @@ class VentanaEtapaProveedores:
         p_unid = pl + vg if self.cmb_tipo_ganancia.get() == "Monto Fijo" else pl * (1 + (vg / 100.0))
         p_final_venta = p_unid * cant
         t_ganancia_db = "Monto Fijo" if self.cmb_tipo_ganancia.get() == "Monto Fijo" else "Porcentaje"
-        notes = self.txt_p_notes.get("1.0", "end-1c").strip()
+        
+        # 🚀 NUEVO: Extraemos el texto con las etiquetas ocultas que le pusimos al texto
+        notes = extraer_texto_con_formato(self.txt_p_notes).strip()
+        
         c = self.conn.cursor()
         
         try:
@@ -1350,13 +1372,14 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
-        # 🚀 SOLUCIÓN SUPREMA: CTkTextbox también en la ventana de edición emergente
         txt_m_notas = ctk.CTkTextbox(f_m, width=450, height=80, font=("Arial", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
         txt_m_notas.pack(fill="x", padx=10, pady=2)
-        txt_m_notas.insert("1.0", str(datos[4]) if datos[4] else "")
+        
+        # 🚀 NUEVO: Insertamos el texto de la base de datos convirtiéndolo visualmente de inmediato
+        insertar_texto_formateado(txt_m_notas, str(datos[4]) if datos[4] else "")
 
         def ejecutar_update_matriz():
             try:
@@ -1368,8 +1391,12 @@ class VentanaEtapaProveedores:
                 return
             p_unid = ml + mv if cmb_m_tipo.get() == "Monto Fijo" else ml * (1 + (mv / 100))
             p_final = p_unid * mc
+            
+            # 🚀 NUEVO: Extraemos el texto visual de la caja y lo guardamos como [B] y [M]
+            notes_update = extraer_texto_con_formato(txt_m_notas).strip()
+            
             c_upd = self.conn.cursor()
-            c_upd.execute("UPDATE cotizacion_proveedores SET precio_lista=%s, precio_descuento=%s, tipo_ganancia=%s, valor_ganancia=%s, precio_final_venta=%s, notes_negociacion=%s, cantidad=%s, dias_credito=%s WHERE id=%s", (ml, md, cmb_m_tipo.get(), mv, p_final, txt_m_notas.get("1.0", "end-1c").strip(), mc, m_dcred, id_mat))
+            c_upd.execute("UPDATE cotizacion_proveedores SET precio_lista=%s, precio_descuento=%s, tipo_ganancia=%s, valor_ganancia=%s, precio_final_venta=%s, notes_negociacion=%s, cantidad=%s, dias_credito=%s WHERE id=%s", (ml, md, cmb_m_tipo.get(), mv, p_final, notes_update, mc, m_dcred, id_mat))
             self.conn.commit()
             cache_sistema.invalidar()
             registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Modificó márgenes en ítem de Cotización N° {self.codigo_cot}")
@@ -1430,14 +1457,12 @@ class VentanaEtapaProveedores:
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
-            # 🚀 SOLUCIÓN SUPREMA: CTkTextbox integrado en la grilla para erradicar las sombras negras
             txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Arial", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)
             txt_notas.pack(side="left", fill="both", expand=True, padx=10, pady=5)
             
-            # Hay que hacerle bind también a la caja y a su contenido interno para que reaccione al clic
             txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
             txt_notas._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
             

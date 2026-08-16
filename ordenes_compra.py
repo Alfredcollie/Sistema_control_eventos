@@ -8,8 +8,6 @@ ORDENES_COMPRA.PY (ENTERPRISE EDITION)
 - FIX: Eliminación de conn.close() en favor de liberar_conexion(conn).
 - FIX: Renderizado de Banner PDF idéntico al de Cotizaciones.
 - FIX: Ajuste de márgenes y truncado en Coordenadas Logísticas para evitar solapamiento.
-- 🚀 FIX: Fallo silencioso de locacion_evento resuelto (ahora cargan los proveedores).
-- 🚀 FIX: Se eliminó el filtro de fechas pasadas para que carguen todos los eventos aprobados.
 - Paginación Lazy Loading (50 en 50) para el Historial.
 - Carga 100% Asíncrona (Cero congelamientos).
 - Caché Inteligente en consultas cruzadas.
@@ -485,7 +483,153 @@ class OrdenesCompraApp:
         else:
             self.cargar_cotizaciones_aprobadas()
 
-    # 🚀 FIX: REPARACIÓN DE LA CARGA DE EVENTOS
+    def cargar_historial_ordenes(self, reset_pagina=False):
+        if reset_pagina:
+            self.pagina_actual = 1
+            
+        self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
+
+        for item in self.tree_historial.get_children():
+            self.tree_historial.delete(item)
+            
+        filtro = ""
+        if hasattr(self, 'ent_buscar_historial'):
+            filtro = self.ent_buscar_historial.get().strip().lower()
+
+        offset = (self.pagina_actual - 1) * self.registros_por_pagina
+
+        clave_cache = f"ordenes_generadas_{filtro}_pag_{self.pagina_actual}"
+        datos = cache_sistema.obtener(clave_cache)
+
+        if datos is not None:
+            self._pintar_historial(datos)
+        else:
+            self.tree_historial.insert("", tk.END, values=("", "Cargando datos...", "", "", "", "", ""))
+            def tarea():
+                rows = []
+                conn = conectar_db(silencioso=True)
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        if filtro == "":
+                            query = """
+                                SELECT o.id, o.numero_orden, o.version, o.codigo_cotizacion, c.nombre_evento, o.proveedor, o.fecha_emision, o.total_orden 
+                                FROM ordenes_compra o 
+                                LEFT JOIN cotizaciones c ON o.codigo_cotizacion = c.codigo_cotizacion 
+                                WHERE o.estado != 'Anulada' OR o.estado IS NULL
+                                ORDER BY o.id DESC LIMIT %s OFFSET %s
+                            """
+                            cursor.execute(query, (self.registros_por_pagina, offset))
+                        else:
+                            val = f"%{filtro}%"
+                            query = """
+                                SELECT o.id, o.numero_orden, o.version, o.codigo_cotizacion, c.nombre_evento, o.proveedor, o.fecha_emision, o.total_orden 
+                                FROM ordenes_compra o 
+                                LEFT JOIN cotizaciones c ON o.codigo_cotizacion = c.codigo_cotizacion 
+                                WHERE (o.estado != 'Anulada' OR o.estado IS NULL)
+                                AND (o.numero_orden ILIKE %s OR o.codigo_cotizacion ILIKE %s OR c.nombre_evento ILIKE %s OR o.proveedor ILIKE %s)
+                                ORDER BY o.id DESC LIMIT %s OFFSET %s
+                            """
+                            cursor.execute(query, (val, val, val, val, self.registros_por_pagina, offset))
+                            
+                        for r in cursor.fetchall():
+                            num_base = r[1] if r[1] else f"OC-{r[3]}-P{r[0]}"
+                            ver = r[2] or 0
+                            n_imprimir = num_base if ver == 0 else f"{num_base}-{ver}"
+                            ev_nombre = r[4] if r[4] else "Evento no registrado"
+                            rows.append((r[0], n_imprimir, r[3], ev_nombre, r[5], r[6], f"{r[7]:,.2f}"))
+                            
+                        cache_sistema.guardar(clave_cache, rows)
+                    except Exception as e:
+                        print("Error al cargar historial OC:", e)
+                    finally:
+                        liberar_conexion(conn)
+                self.parent_frame.after(0, lambda: self._pintar_historial(rows))
+
+            threading.Thread(target=tarea, daemon=True).start()
+
+    def _pintar_historial(self, rows):
+        for item in self.tree_historial.get_children():
+            self.tree_historial.delete(item)
+            
+        for row_vals in rows:
+            self.tree_historial.insert("", tk.END, values=row_vals)
+            
+        if self.pagina_actual > 1:
+            self.btn_ant.configure(state="normal")
+        else:
+            self.btn_ant.configure(state="disabled")
+            
+        if len(rows) == self.registros_por_pagina:
+            self.btn_sig.configure(state="normal")
+        else:
+            self.btn_sig.configure(state="disabled")
+
+    def ver_pdf_historial(self):
+        sel = self.tree_historial.selection()
+        if not sel:
+            return messagebox.showwarning("Aviso", "Seleccione una orden del historial.")
+        id_orden = self.tree_historial.item(sel[0], "values")[0]
+        conn = conectar_db(silencioso=True)
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT pdf_ruta FROM ordenes_compra WHERE id = %s", (id_orden,))
+                ruta = cursor.fetchone()
+                if ruta and ruta[0] and os.path.exists(ruta[0]):
+                    abrir_documento(ruta[0])
+                else:
+                    messagebox.showerror("Error", "El archivo PDF no se encuentra en la ruta especificada.")
+            except Exception:
+                pass
+            finally:
+                liberar_conexion(conn)
+
+    def eliminar_orden_historial(self):
+        sel = self.tree_historial.selection()
+        if not sel:
+            return messagebox.showwarning("Aviso", "Seleccione una orden del historial para anular.")
+        id_orden = self.tree_historial.item(sel[0], "values")[0]
+        cod_cot = self.tree_historial.item(sel[0], "values")[2]
+        prov = self.tree_historial.item(sel[0], "values")[4]
+        msg = f"¿Estás seguro de que deseas anular y archivar la orden de {prov} (Cot: {cod_cot})?\n\nLa orden pasará a la carpeta de 'Anuladas' y el proveedor volverá a aparecer como pendiente."
+        if messagebox.askyesno("Confirmar Anulación", msg):
+            conn = conectar_db()
+            if not conn:
+                messagebox.showwarning("Modo Lectura", "Estás sin conexión a internet.\nNo se pueden anular órdenes en Modo Lectura.")
+                return
+            try:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE ordenes_compra SET estado = 'Anulada' WHERE id=%s", (id_orden,))
+                conn.commit()
+                
+                cache_sistema.invalidar()
+                
+                carpeta = "ordenes_generadas"
+                carpeta_anuladas = "ordenes_anuladas"
+                if not os.path.exists(carpeta_anuladas):
+                    os.makedirs(carpeta_anuladas)
+                if os.path.exists(carpeta):
+                    prov_limpio = prov.replace(' ', '_')
+                    for archivo in os.listdir(carpeta):
+                        if cod_cot in archivo and prov_limpio in archivo:
+                            ruta_archivo = os.path.join(carpeta, archivo)
+                            nueva_ruta = os.path.join(carpeta_anuladas, archivo)
+                            try:
+                                shutil.move(ruta_archivo, nueva_ruta)
+                            except Exception as e:
+                                print(f"No se pudo archivar {ruta_archivo}: {e}")
+                                
+                registrar_auditoria(self.usuario_activo, "Órdenes de Compra", f"Anuló la O/C de {prov} (Cot: {cod_cot})")
+                messagebox.showinfo("Éxito", "Orden anulada y archivada correctamente.")
+                self.cargar_historial_ordenes(reset_pagina=True)
+                if self.cmb_cotizacion.get().startswith(cod_cot):
+                    self.al_seleccionar_cotizacion(self.cmb_cotizacion.get())
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+            finally:
+                liberar_conexion(conn)
+
     def cargar_cotizaciones_aprobadas(self):
         clave_cache = "lista_eventos_aprobados"
         cotizaciones = cache_sistema.obtener(clave_cache)
@@ -500,12 +644,23 @@ class OrdenesCompraApp:
                 if conn:
                     try:
                         cursor = conn.cursor()
-                        # 🚀 Se eliminó el filtro de fecha para que aparezcan TODAS las cotizaciones aprobadas
-                        cursor.execute("SELECT codigo_cotizacion, nombre_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
-                        cots = [f"{r[0]} | {r[1]}" for r in cursor.fetchall()]
+                        cursor.execute("SELECT codigo_cotizacion, nombre_evento, fecha_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
+                        hoy = datetime.now().date()
+                        for r in cursor.fetchall():
+                            cod_cot, nom_ev, fec_str = r[0], r[1], r[2]
+                            incluir = True
+                            if fec_str:
+                                try:
+                                    f_dt = datetime.strptime(fec_str, "%Y-%m-%d").date() if "-" in fec_str else datetime.strptime(fec_str, "%d/%m/%Y").date()
+                                    if f_dt < hoy:
+                                        incluir = False
+                                except Exception:
+                                    pass
+                            if incluir:
+                                cots.append(f"{cod_cot} | {nom_ev}")
                         cache_sistema.guardar(clave_cache, cots)
-                    except Exception as e:
-                        print("Error cargando cotizaciones en OC:", e)
+                    except Exception:
+                        pass
                     finally:
                         liberar_conexion(conn)
                 self.parent_frame.after(0, lambda: self._aplicar_cotizaciones_combo(cots))
@@ -522,63 +677,41 @@ class OrdenesCompraApp:
         self.cmb_proveedor.configure(values=["-"])
         self.cmb_proveedor.set("-")
 
-    # 🚀 FIX: BLINDAJE DE LA SELECCIÓN PARA PREVENIR EL FALLO SILENCIOSO
     def al_seleccionar_cotizacion(self, choice):
         if "Seleccione" in choice or "No hay" in choice or "Cargando" in choice:
             return
-            
         codigo_cot = choice.split(" | ")[0].strip()
-        
-        # Limpiamos interfaz
-        for item in self.tabla_servicios.get_children():
-            self.tabla_servicios.delete(item)
-        self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
-        self.txt_detalles.delete("1.0", tk.END)
-        
         conn = conectar_db(silencioso=True)
-        if not conn: return
-        
+        if not conn:
+            return
         try:
             cursor = conn.cursor()
-            
-            # 🚀 FIX: Try-Except Anidado para evitar el cierre por falta de columna
-            try:
-                cursor.execute("SELECT locacion_evento FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cot,))
-                loc = cursor.fetchone()
-                loc_val = loc[0] if loc and loc[0] else "Por definir"
-            except Exception:
-                conn.rollback()
-                loc_val = "Por definir"
-                
+            cursor.execute("SELECT locacion_evento FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cot,))
+            loc = cursor.fetchone()
             self.ent_locacion.delete(0, tk.END)
-            self.ent_locacion.insert(0, loc_val)
-            
-            # Consultamos proveedores
+            self.ent_locacion.insert(0, loc[0] if loc and loc[0] else "Por definir")
             cursor.execute("SELECT DISTINCT proveedor_nombre FROM cotizacion_proveedores WHERE codigo_cotizacion = %s AND proveedor_nombre IS NOT NULL AND proveedor_nombre != ''", (codigo_cot,))
             provs_totales = [str(r[0]) for r in cursor.fetchall()]
-            
             cursor.execute("SELECT proveedor FROM ordenes_compra WHERE codigo_cotizacion = %s AND (estado != 'Anulada' OR estado IS NULL)", (codigo_cot,))
             provs_listos = [str(r[0]) for r in cursor.fetchall()]
-            
             provs_pendientes = [p for p in provs_totales if p not in provs_listos]
-            
             if provs_pendientes:
                 self.cmb_proveedor.configure(values=provs_pendientes)
                 self.cmb_proveedor.set("Seleccione proveedor...")
-            elif not provs_totales:
-                self.cmb_proveedor.configure(values=["⚠️ No hay proveedores en la cotización"])
-                self.cmb_proveedor.set("⚠️ No hay proveedores en la cotización")
             else:
                 self.cmb_proveedor.configure(values=["✅ Todas las órdenes generadas"])
                 self.cmb_proveedor.set("✅ Todas las órdenes generadas")
-                
-        except Exception as e:
-            print("Error al seleccionar cotización:", e)
+            for item in self.tabla_servicios.get_children():
+                self.tabla_servicios.delete(item)
+            self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
+            self.txt_detalles.delete("1.0", tk.END)
+        except Exception:
+            pass
         finally:
             liberar_conexion(conn)
 
     def al_seleccionar_proveedor(self, choice):
-        if "Seleccione" in choice or "Todas las" in choice or "Sin proveedores" in choice or "⚠️" in choice:
+        if "Seleccione" in choice or "Todas las" in choice or "Sin proveedores" in choice:
             return
         codigo_cot = self.cmb_cotizacion.get().split(" | ")[0].strip()
         proveedor = choice.strip()
@@ -617,6 +750,7 @@ class OrdenesCompraApp:
         finally:
             liberar_conexion(conn)
 
+    # 🚀 FIX: DIBUJADO DE LOGO Y DIMENSIONES PROPORCIONALES
     def fabricar_pdf(self, cod_cot, evento, prov, locacion, inst, desm, detalles, fecha, items_servicios, total_orden, num_orden_imprimir):
         total_orden = float(total_orden)
         carpeta_destino = "ordenes_generadas"
@@ -767,7 +901,7 @@ class OrdenesCompraApp:
         inst = self.ent_instalacion.get().strip()
         desm = self.ent_desmontaje.get().strip()
         detalles = self.txt_detalles.get("1.0", "end-1c").strip()
-        if "Seleccione" in cot_str or "Seleccione" in prov or "Todas" in prov or "⚠️" in prov:
+        if "Seleccione" in cot_str or "Seleccione" in prov or "Todas" in prov:
             return messagebox.showwarning("Incompleto", "Seleccione una cotización y un proveedor válido.")
         if not REPORTLAB_DISPONIBLE:
             return messagebox.showerror("Librería", "Falta ReportLab.")

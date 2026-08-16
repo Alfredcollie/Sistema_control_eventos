@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 VENTAS.PY (ENTERPRISE EDITION - RENDIMIENTO EXTREMO)
-- FIX STARTUP: Inicialización de formulario 100% asíncrona (Elimina el congelamiento al abrir el módulo).
+- FIX STARTUP: Inicialización de formulario 100% asíncrona.
 - Paginación Lazy Loading (50 en 50) para Facturas, Cobros y Notas de Crédito.
 - Búsqueda Asíncrona en las 3 pestañas.
 - Protección del Pool de Conexiones (liberar_conexion).
-- Auto-curación síncrona en segundo plano (Scope Global corregido).
+- Auto-curación síncrona en segundo plano.
+- 🚀 FIX: Caché inteligente para Combobox de Clientes y Eventos.
+- 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma).
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -396,7 +398,6 @@ class FacturasEmitidasTab:
     def abrir_calendario(self, entry_objetivo):
         CalendarioNativo(self.main_root.winfo_toplevel(), entry_objetivo)
 
-    # 🚀 FIX STARTUP: SUGERIR CORRELATIVO 100% ASÍNCRONO
     def sugerir_correlativo(self):
         if not hasattr(self, 'combo_tipo') or not hasattr(self, 'ent_nro_doc'):
             return
@@ -823,8 +824,9 @@ class FacturasEmitidasTab:
             if self.combo_evento.get() not in eventos_cliente:
                 self.combo_evento.set("GENERAL / NO ASIGNADO")
 
+    # 🚀 FIX STARTUP: Carga Asíncrona Inteligente
     def cargar_clientes_bd(self):
-        clis = getattr(cache_sistema, 'clientes_nombres', [])
+        clis = cache_sistema.obtener('lista_clientes_combobox')
         if clis:
             self._aplicar_clientes(clis)
         else:
@@ -836,8 +838,8 @@ class FacturasEmitidasTab:
                         cursor = conn.cursor()
                         cursor.execute("SELECT nombre_empresa FROM clientes ORDER BY nombre_empresa ASC")
                         res_clis = [str(r[0]).strip() for r in cursor.fetchall() if r[0]]
-                        cache_sistema.guardar('clientes_nombres', res_clis)
-                    except: pass
+                        cache_sistema.guardar('lista_clientes_combobox', res_clis)
+                    except Exception: pass
                     finally: liberar_conexion(conn)
                 self.main_root.after(0, lambda: self._aplicar_clientes(res_clis))
             threading.Thread(target=tarea, daemon=True).start()
@@ -854,13 +856,36 @@ class FacturasEmitidasTab:
             self.combo_cliente.configure(values=["--- Seleccione Cliente ---"])
             self.combo_cliente.set("--- Seleccione Cliente ---")
 
+    # 🚀 FIX STARTUP: Carga Asíncrona Inteligente
     def cargar_eventos_aprobados(self):
-        evs = getattr(cache_sistema, 'eventos_aprobados', [])
-        lista_evs = ["GENERAL / NO ASIGNADO"] + (evs if evs else [])
-        if hasattr(self, 'combo_evento'):
-            self.combo_evento.configure(values=lista_evs)
-            if self.combo_evento.get() not in lista_evs:
-                self.combo_evento.set("GENERAL / NO ASIGNADO")
+        evs = cache_sistema.obtener('lista_eventos_aprobados')
+        if evs:
+            self._aplicar_eventos(evs)
+        else:
+            def tarea():
+                cots = []
+                conn = conectar_db(silencioso=True)
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT codigo_cotizacion, nombre_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
+                        cots = [f"{r[0]} | {r[1]}" for r in cursor.fetchall()]
+                        cache_sistema.guardar('lista_eventos_aprobados', cots)
+                    except Exception: pass
+                    finally: liberar_conexion(conn)
+                self.main_root.after(0, lambda: self._aplicar_eventos(cots))
+            threading.Thread(target=tarea, daemon=True).start()
+
+    def _aplicar_eventos(self, evs):
+        if not hasattr(self, 'combo_evento'): return
+        lista_evs = ["GENERAL / NO ASIGNADO"]
+        if evs:
+            lista_limpia = [e for e in evs if "OFICINA" not in e]
+            lista_evs.extend(lista_limpia)
+            
+        self.combo_evento.configure(values=lista_evs)
+        if self.combo_evento.get() not in lista_evs:
+            self.combo_evento.set("GENERAL / NO ASIGNADO")
 
     def actualizar_totales(self, *args):
         if not hasattr(self, 'combo_tipo') or not hasattr(self, 'ent_subtotal') or not hasattr(self, 'ent_detraccion'):
@@ -1925,7 +1950,9 @@ class CuentasPorCobrarTab:
 
             v_cobro.destroy()
 
-            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte de Ingreso", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")])
+            # 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma)
+            tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte de Ingreso", filetypes=tipos_seguros)
             ruta_destino = ""
             if ruta_origen:
                 try:
@@ -2106,7 +2133,10 @@ class CuentasPorCobrarTab:
             sub_sel = sub_tabla.selection()
             if not sub_sel: return
             id_pago = sub_tabla.item(sub_sel[0], "values")[0]
-            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")], parent=v_edit)
+            
+            # 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma)
+            tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte", filetypes=tipos_seguros, parent=v_edit)
             if ruta_origen:
                 try:
                     carpeta_comprobantes = os.path.join(ruta_base, "comprobantes_ingresos")
@@ -2646,7 +2676,7 @@ class NotasCreditoTab:
                     webbrowser.open("https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias")
             else:
                 messagebox.showinfo("Aviso", "Este registro no se encuentra disponible.")
-        except Exception as e:
+        except Exception:
             pass
         finally:
             liberar_conexion(conn)

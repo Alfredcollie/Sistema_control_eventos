@@ -2,6 +2,7 @@
 
 import psycopg2
 import tkinter as tk
+import urllib.request
 from tkinter import ttk, messagebox
 import customtkinter as ctk
 from datetime import datetime

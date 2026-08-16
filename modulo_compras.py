@@ -6,6 +6,8 @@ COMPRAS.PY (ENTERPRISE EDITION - RENDIMIENTO EXTREMO)
 - Protección del Pool de Conexiones (liberar_conexion).
 - Auto-curación síncrona en segundo plano (Scope Global corregido).
 - Inicialización de formulario 100% asíncrona.
+- 🚀 FIX: Caché inteligente para Combobox de Proveedores y Eventos.
+- 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma).
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
@@ -773,8 +775,28 @@ class FacturasRecibidasTab:
         except Exception: pass
         finally: liberar_conexion(conn)
 
+    # 🚀 FIX STARTUP: Carga Asíncrona Inteligente
     def cargar_proveedores_bd(self):
-        provs = getattr(cache_sistema, 'proveedores_nombres', [])
+        provs = cache_sistema.obtener('lista_proveedores_combobox')
+        if provs:
+            self._aplicar_proveedores(provs)
+        else:
+            def tarea():
+                conn = conectar_db(silencioso=True)
+                res_provs = []
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT nombre FROM proveedores ORDER BY nombre ASC")
+                        res_provs = [str(r[0]).strip() for r in cursor.fetchall() if r[0]]
+                        cache_sistema.guardar('lista_proveedores_combobox', res_provs)
+                    except Exception: pass
+                    finally: liberar_conexion(conn)
+                self.main_root.after(0, lambda: self._aplicar_proveedores(res_provs))
+            threading.Thread(target=tarea, daemon=True).start()
+
+    def _aplicar_proveedores(self, provs):
+        if not hasattr(self, 'combo_proveedor'): return
         if provs:
             self.combo_proveedor.configure(values=provs)
             if self.combo_proveedor.get() not in provs:
@@ -784,9 +806,33 @@ class FacturasRecibidasTab:
             self.combo_proveedor.configure(values=["Sin proveedores registrados"])
             self.combo_proveedor.set("")
 
+    # 🚀 FIX STARTUP: Carga Asíncrona Inteligente
     def cargar_eventos_aprobados(self):
-        evs = getattr(cache_sistema, 'eventos_aprobados', [])
-        lista_evs = ["GENERAL / NO ASIGNADO"] + (evs if evs else [])
+        evs = cache_sistema.obtener('lista_eventos_aprobados')
+        if evs:
+            self._aplicar_eventos(evs)
+        else:
+            def tarea():
+                cots = []
+                conn = conectar_db(silencioso=True)
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT codigo_cotizacion, nombre_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
+                        cots = [f"{r[0]} | {r[1]}" for r in cursor.fetchall()]
+                        cache_sistema.guardar('lista_eventos_aprobados', cots)
+                    except Exception: pass
+                    finally: liberar_conexion(conn)
+                self.main_root.after(0, lambda: self._aplicar_eventos(cots))
+            threading.Thread(target=tarea, daemon=True).start()
+
+    def _aplicar_eventos(self, evs):
+        if not hasattr(self, 'combo_evento'): return
+        lista_evs = ["GENERAL / NO ASIGNADO"]
+        if evs:
+            lista_limpia = [e for e in evs if "OFICINA" not in e]
+            lista_evs.extend(lista_limpia)
+            
         self.combo_evento.configure(values=lista_evs)
         if self.combo_evento.get() not in lista_evs:
             self.combo_evento.set("GENERAL / NO ASIGNADO")
@@ -819,7 +865,9 @@ class FacturasRecibidasTab:
         except ValueError: pass
 
     def seleccionar_archivo(self):
-        ruta = filedialog.askopenfilename(title="Seleccionar Documento", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg;*.xml")])
+        # 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma)
+        tipos_seguros = [("Archivos", "*.pdf *.png *.jpg *.jpeg *.xml"), ("Todos", "*.*")]
+        ruta = filedialog.askopenfilename(title="Seleccionar Documento", filetypes=tipos_seguros)
         if ruta:
             self.ruta_archivo_temp = ruta
             self.btn_archivo.configure(text="✅ Archivo Manual Listo", fg_color="#28a745", hover_color="#218838")
@@ -1515,7 +1563,9 @@ class CuentasPorPagarTab:
 
             v_pago.destroy()
 
-            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte de Egreso", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")])
+            # 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma)
+            tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte de Egreso", filetypes=tipos_seguros)
             ruta_destino = ""
             if ruta_origen:
                 try:
@@ -1690,7 +1740,10 @@ class CuentasPorPagarTab:
             sub_sel = sub_tabla.selection()
             if not sub_sel: return
             id_pago = sub_tabla.item(sub_sel[0], "values")[0]
-            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")], parent=v_edit)
+            
+            # 🚀 FIX MAC: Compatibilidad de FileDialog (sin punto y coma)
+            tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
+            ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte", filetypes=tipos_seguros, parent=v_edit)
             if ruta_origen:
                 try:
                     carpeta_comprobantes = os.path.join(ruta_base, "comprobantes_egresos")

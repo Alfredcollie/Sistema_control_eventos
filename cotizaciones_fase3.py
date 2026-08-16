@@ -169,15 +169,17 @@ def crear_barra_formato(parent, text_widget):
         return "break" # Evita comportamientos raros de teclado
 
     # Botones
-    btn_b = ctk.CTkButton(f_barra, text="B", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
+    btn_b = ctk.CTkLabel(f_barra, text=" B ", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
     btn_b.pack(side="left", padx=2)
-    btn_b.bind("<Enter>", activar_candado, add="+")
-    btn_b.bind("<Leave>", quitar_candado, add="+")
+    btn_b.bind("<Button-1>", lambda e: insertar_etiqueta("[B]", "[/B]"))
+    btn_b.bind("<Enter>", lambda e: btn_b.configure(fg_color="#c8c8c8"))
+    btn_b.bind("<Leave>", lambda e: btn_b.configure(fg_color="#e0e0e0"))
     
-    btn_c = ctk.CTkButton(f_barra, text="Color", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
+    btn_c = ctk.CTkLabel(f_barra, text=" Color ", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, corner_radius=5, cursor="hand2")
     btn_c.pack(side="left", padx=2)
-    btn_c.bind("<Enter>", activar_candado, add="+")
-    btn_c.bind("<Leave>", quitar_candado, add="+")
+    btn_c.bind("<Button-1>", lambda e: insertar_etiqueta("[M]", "[/M]"))
+    btn_c.bind("<Enter>", lambda e: btn_c.configure(fg_color="#c8c8c8"))
+    btn_c.bind("<Leave>", lambda e: btn_c.configure(fg_color="#e0e0e0"))
 
     # ⌨️ PLAN B INFALIBLE: Atajos de teclado para Mac (Cmd) y Win (Ctrl)
     text_widget.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
@@ -898,8 +900,8 @@ class VentanaEtapaProveedores:
         f_header_notas.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
-        # Ojo aquí: Le dejamos el exportselection=0 para que todo esté doblemente blindado
-        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0)
+        # 🟢 FIX: Fondos obligatorios en blanco y texto negro para evitar la mancha negra en Mac
+        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
@@ -1353,8 +1355,8 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
-        # 🔧 El exportselection en 0, para mayor seguridad global
-        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0)
+        # 🟢 FIX Popup: Colores explícitos también aquí para evitar la sombra negra en Mac
+        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
@@ -1433,7 +1435,8 @@ class VentanaEtapaProveedores:
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
-            txt_notas = tk.Text(f_row, height=max(3, conteo_lineas), font=("Arial", 10), wrap="word", bg="#ffffff", bd=0, highlightthickness=0, exportselection=0)
+            # 🟢 FIX Grid: Texto negro explícito aquí también
+            txt_notas = tk.Text(f_row, height=max(3, conteo_lineas), font=("Arial", 10), wrap="word", bg="#ffffff", fg="#000000", bd=0, highlightthickness=0, exportselection=0)
             
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)

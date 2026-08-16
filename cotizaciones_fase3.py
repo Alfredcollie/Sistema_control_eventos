@@ -14,7 +14,6 @@ import re
 import json
 import threading
 import importlib
-import urllib.request
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
@@ -107,52 +106,50 @@ def texto_plano_sin_marcado(texto):
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
-
-    # 🛡️ Captura inmediata de selección (Anti-Mac): en vez de sondear cada
-    # 50ms (lo que podía atrapar el instante en que el clic ya había
-    # colapsado la selección), guardamos la selección apenas el usuario
-    # termina de seleccionarla, sin demora de por medio.
+    
+    # 🛡️ TRUCO MAESTRO V5: Bloqueo por Acercamiento (Hover-Lock) Anti-Mac
     text_widget._memoria_blindada = None
+    text_widget._memoria_bloqueada = False
 
-    def capturar_seleccion(event=None):
+    def rastreador_mac():
         try:
+            if not text_widget.winfo_exists():
+                return
+            # Si el usuario tiene seleccionado texto, lo actualizamos siempre
             if text_widget.tag_ranges(tk.SEL):
-                s_cap = text_widget.index(tk.SEL_FIRST)
-                e_cap = text_widget.index(tk.SEL_LAST)
-                if s_cap != e_cap:
-                    text_widget._memoria_blindada = (s_cap, e_cap)
+                text_widget._memoria_blindada = (text_widget.index(tk.SEL_FIRST), text_widget.index(tk.SEL_LAST))
+            # Si no hay selección, SOLO borramos la memoria si NO estamos encima de los botones
+            elif not text_widget._memoria_bloqueada:
+                text_widget._memoria_blindada = None
         except Exception:
             pass
+        text_widget.after(50, rastreador_mac)
 
-    # Eventos que marcan el fin de una selección real del usuario
-    text_widget.bind("<ButtonRelease-1>", capturar_seleccion, add="+")
-    text_widget.bind("<Double-Button-1>", capturar_seleccion, add="+")
-    text_widget.bind("<Triple-Button-1>", capturar_seleccion, add="+")
-    text_widget.bind("<Shift-Left>", capturar_seleccion, add="+")
-    text_widget.bind("<Shift-Right>", capturar_seleccion, add="+")
-    text_widget.bind("<Shift-Up>", capturar_seleccion, add="+")
-    text_widget.bind("<Shift-Down>", capturar_seleccion, add="+")
-    text_widget.bind("<<Selection>>", capturar_seleccion, add="+")
+    rastreador_mac()
+
+    def activar_candado(e): text_widget._memoria_bloqueada = True
+    def quitar_candado(e): text_widget._memoria_bloqueada = False
+
+    f_barra.bind("<Enter>", activar_candado, add="+")
+    f_barra.bind("<Leave>", quitar_candado, add="+")
 
     def insertar_etiqueta(tag_abrir, tag_cerrar):
         s, e = None, None
-
-        # 1. Intento normal (Windows y atajos de teclado, donde el foco no se pierde)
+        
+        # 1. Intento normal (Windows y atajos de teclado)
         try:
             if text_widget.tag_ranges(tk.SEL):
-                s_dir = text_widget.index(tk.SEL_FIRST)
-                e_dir = text_widget.index(tk.SEL_LAST)
-                if s_dir != e_dir:
-                    s, e = s_dir, e_dir
+                s = text_widget.index(tk.SEL_FIRST)
+                e = text_widget.index(tk.SEL_LAST)
         except Exception:
             pass
 
-        # 2. Rescate con la última selección real capturada (para el clic en Mac)
-        if (not s or not e) and text_widget._memoria_blindada:
+        # 2. Rescate con memoria blindada (Para el clic en Mac)
+        if not s and text_widget._memoria_blindada:
             s, e = text_widget._memoria_blindada
 
-        # 3. Aplicar los corchetes envolviendo el texto (nunca en un solo punto)
-        if s and e and s != e:
+        # 3. Aplicar los corchetes
+        if s and e:
             try:
                 texto = text_widget.get(s, e)
                 text_widget.delete(s, e)
@@ -174,16 +171,20 @@ def crear_barra_formato(parent, text_widget):
     # Botones
     btn_b = ctk.CTkButton(f_barra, text="B", width=30, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[B]", "[/B]"))
     btn_b.pack(side="left", padx=2)
-
+    btn_b.bind("<Enter>", activar_candado, add="+")
+    btn_b.bind("<Leave>", quitar_candado, add="+")
+    
     btn_c = ctk.CTkButton(f_barra, text="Color", width=45, height=25, font=("Arial", 12, "bold"), fg_color="#e0e0e0", text_color=COLOR_PRIMARIO, hover_color="#c8c8c8", command=lambda: insertar_etiqueta("[M]", "[/M]"))
     btn_c.pack(side="left", padx=2)
+    btn_c.bind("<Enter>", activar_candado, add="+")
+    btn_c.bind("<Leave>", quitar_candado, add="+")
 
     # ⌨️ PLAN B INFALIBLE: Atajos de teclado para Mac (Cmd) y Win (Ctrl)
     text_widget.bind("<Command-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
     text_widget.bind("<Command-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
     text_widget.bind("<Control-b>", lambda e: insertar_etiqueta("[B]", "[/B]"))
     text_widget.bind("<Control-m>", lambda e: insertar_etiqueta("[M]", "[/M]"))
-
+    
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):
@@ -898,7 +899,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
         
         # Ojo aquí: Le dejamos el exportselection=0 para que todo esté doblemente blindado
-        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
+        self.txt_p_notes = tk.Text(f_notas_wrapper, width=54, height=7, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", highlightcolor="#1f538d", exportselection=0)
         
         f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
@@ -1353,7 +1354,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
         
         # 🔧 El exportselection en 0, para mayor seguridad global
-        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0, bg="#ffffff", fg="#000000", insertbackground="#000000")
+        txt_m_notas = tk.Text(f_m, width=50, height=4, font=("Arial", 11), wrap="word", relief="solid", bd=1, highlightthickness=1, highlightbackground="#ccc", exportselection=0)
         
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")

@@ -31,10 +31,17 @@ jobs:
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install psycopg2-binary customtkinter reportlab keyring
 
+    - name: ☁️ Descargar Rclone (Motor de Nube para Mac)
+      run: |
+        echo "Descargando el binario oficial de Rclone para Mac..."
+        brew install rclone
+        cp $(which rclone) .
+        chmod +x rclone
+
     - name: 🏗️ Compilar la Aplicación (Black Cube)
       run: |
-        # 🚀 FIX: Forzamos a PyInstaller a incluir el motor del Llavero de Mac
-        pyinstaller --windowed --name "ControlEventos" --hidden-import keyring.backends.macOS --add-data ".:." control_general.py
+        # 🚀 FIX: Empaquetamos Rclone dentro de la app con --add-binary
+        pyinstaller --windowed --name "ControlEventos" --hidden-import keyring.backends.macOS --add-binary "rclone:." --add-data ".:." control_general.py
         
         echo "Forzando Modo Claro en Info.plist..."
         defaults write "$PWD/dist/ControlEventos.app/Contents/Info.plist" NSRequiresAquaSystemAppearance -bool YES
@@ -56,7 +63,9 @@ jobs:
         body: |
           🚀 **Nueva actualización de Black Cube para Mac**
           - 🔌 FIX: Conexión segura a Supabase reparada.
+          - ☁️ FIX: Motor de sincronización Rclone integrado nativamente.
+          - 🔄 FIX: Sistema de Auto-Actualizaciones incorporado.
         files: Instalador.Black.Cube.dmg
         draft: false
         prerelease: false
-        make_latest: true # 🚀 Garantiza que sea marcado como Latest
+        make_latest: true

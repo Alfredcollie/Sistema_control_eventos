@@ -4,16 +4,16 @@
 =========================================================
 CRONOGRAMA_TAREAS.PY (ENTERPRISE EDITION)
 =========================================================
-- FIX: Restauración de funciones de agendado manual perdidas (soluciona pantalla en blanco).
-- FIX: Inyección del "Día del Evento Principal" directamente en el calendario.
-- FIX: Cierre de conexiones seguro en consultas del Calendario.
-- FIX: Auto-curación síncrona para evitar Race Conditions y Caché Fantasma.
-- FIX: Blindaje contra 'NoneType' al leer eventos vacíos.
+- FIX: Restauración de funciones de agendado manual perdidas.
+- FIX: Inyección del "Día del Evento Principal".
+- FIX: Cierre de conexiones seguro.
+- FIX: Auto-curación síncrona.
 - 🚀 FIX MAC: Compatibilidad en FileDialog (Botones Cargar Factura).
 - 🚀 FIX MAC: Fallback dinámico para almacenamiento local sin unidad G:\.
-- Paginación Lazy Loading (50 en 50) para la lista de tareas.
+- 🚀 FIX MAC: Secuestro de clics (modal grab) en detalles de tarea resuelto.
+- Paginación Lazy Loading (50 en 50).
 - Caché Inteligente para el filtro de Eventos.
-- Uso estricto del Pool de conexiones (liberar_conexion).
+- Uso estricto del Pool de conexiones.
 """
 
 import os
@@ -563,21 +563,27 @@ class CalendarioDashboard(ctk.CTkToplevel):
         det_resp = td['responsable']
         det_est = td['estado']
         det_notas = td['notas']
+        
+        # 🚀 FIX MAC: Destruir la ventana anterior si existe para evitar bugs de capas en Mac
         if self.pop_detalle is not None and self.pop_detalle.winfo_exists():
-            for widget in self.pop_detalle.winfo_children():
-                widget.destroy()
-            pop = self.pop_detalle
-        else:
-            pop = ctk.CTkToplevel(self)
-            self.pop_detalle = pop
-            pop.title("Detalles de la Tarea")
-            pop.geometry("480x550")
-            pop.resizable(False, False)
-            pop.transient(self)
-            pop.update_idletasks()
-            x = self.winfo_rootx() + (self.winfo_width() // 2) - (480 // 2)
-            y = self.winfo_rooty() + (self.winfo_height() // 2) - (550 // 2)
-            pop.geometry(f"+{x}+{y}")
+            self.pop_detalle.destroy()
+            
+        pop = ctk.CTkToplevel(self)
+        self.pop_detalle = pop
+        pop.title("Detalles de la Tarea")
+        pop.geometry("480x550")
+        pop.resizable(False, False)
+        pop.transient(self)
+        
+        # 🚀 FIX MAC: Trasladar el "Secuestro de Clics" (Grab) a esta nueva ventana
+        pop.grab_set()
+        pop.focus_force()
+        
+        pop.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() // 2) - (480 // 2)
+        y = self.winfo_rooty() + (self.winfo_height() // 2) - (550 // 2)
+        pop.geometry(f"+{x}+{y}")
+        
         f_top = ctk.CTkFrame(pop, fg_color="transparent")
         f_top.pack(fill="x", padx=15, pady=(15, 5))
         ctk.CTkLabel(f_top, text="🔍 DETALLES DE LA TAREA", font=("Arial", 16, "bold"), text_color="#1f538d").pack(side="left", expand=True, anchor="w", padx=(5, 0))

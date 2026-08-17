@@ -8,6 +8,10 @@ ORDENES_COMPRA.PY (ENTERPRISE EDITION)
 - FIX: Eliminación de conn.close() en favor de liberar_conexion(conn).
 - FIX: Renderizado de Banner PDF idéntico al de Cotizaciones.
 - FIX: Ajuste de márgenes y truncado en Coordenadas Logísticas para evitar solapamiento.
+- 🚀 FIX: Fallo silencioso de locacion_evento resuelto (ahora cargan los proveedores).
+- 🚀 FIX: Se eliminó el filtro de fechas pasadas para que carguen todos los eventos aprobados.
+- 🚀 FIX MAC: Errno 30 resuelto. Las carpetas de PDF ahora apuntan a la "Caja Fuerte" (Application Support).
+- 🚀 FIX: Solucionado el error silencioso de RUTA_CONFIG al buscar el logo en fabricar_pdf.
 - Paginación Lazy Loading (50 en 50) para el Historial.
 - Carga 100% Asíncrona (Cero congelamientos).
 - Caché Inteligente en consultas cruzadas.
@@ -17,7 +21,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import customtkinter as ctk
 from datetime import datetime
-from app_paths import CONFIG_FILE
 import sys
 import os
 import subprocess
@@ -32,6 +35,14 @@ import threading
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+
+# 🚀 FIX MAC: Usamos la "Caja Fuerte" para guardar los PDFs y leemos el CONFIG_FILE correcto
+try:
+    from app_paths import CONFIG_FILE, CONFIG_DIR
+    BASE_DIR_APP = str(CONFIG_DIR)
+except Exception:
+    CONFIG_FILE = "config_local.json"
+    BASE_DIR_APP = os.path.join(os.path.expanduser("~"), "BlackCube_Seguro")
 
 try:
     from reportlab.pdfgen import canvas
@@ -313,7 +324,8 @@ class OrdenesCompraApp:
         CalendarioNativo(parent if parent else self.parent_frame.winfo_toplevel(), entry_objetivo)
 
     def abrir_carpeta_anuladas(self):
-        carpeta = "ordenes_anuladas"
+        # 🚀 FIX MAC: Apuntar a la caja fuerte
+        carpeta = os.path.join(BASE_DIR_APP, "ordenes_anuladas")
         if not os.path.exists(carpeta):
             os.makedirs(carpeta)
         abrir_documento(carpeta)
@@ -605,8 +617,9 @@ class OrdenesCompraApp:
                 
                 cache_sistema.invalidar()
                 
-                carpeta = "ordenes_generadas"
-                carpeta_anuladas = "ordenes_anuladas"
+                # 🚀 FIX MAC: Apuntar a la caja fuerte
+                carpeta = os.path.join(BASE_DIR_APP, "ordenes_generadas")
+                carpeta_anuladas = os.path.join(BASE_DIR_APP, "ordenes_anuladas")
                 if not os.path.exists(carpeta_anuladas):
                     os.makedirs(carpeta_anuladas)
                 if os.path.exists(carpeta):
@@ -630,6 +643,7 @@ class OrdenesCompraApp:
             finally:
                 liberar_conexion(conn)
 
+    # 🚀 FIX: REPARACIÓN DE LA CARGA DE EVENTOS
     def cargar_cotizaciones_aprobadas(self):
         clave_cache = "lista_eventos_aprobados"
         cotizaciones = cache_sistema.obtener(clave_cache)
@@ -644,23 +658,12 @@ class OrdenesCompraApp:
                 if conn:
                     try:
                         cursor = conn.cursor()
-                        cursor.execute("SELECT codigo_cotizacion, nombre_evento, fecha_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
-                        hoy = datetime.now().date()
-                        for r in cursor.fetchall():
-                            cod_cot, nom_ev, fec_str = r[0], r[1], r[2]
-                            incluir = True
-                            if fec_str:
-                                try:
-                                    f_dt = datetime.strptime(fec_str, "%Y-%m-%d").date() if "-" in fec_str else datetime.strptime(fec_str, "%d/%m/%Y").date()
-                                    if f_dt < hoy:
-                                        incluir = False
-                                except Exception:
-                                    pass
-                            if incluir:
-                                cots.append(f"{cod_cot} | {nom_ev}")
+                        # 🚀 Se eliminó el filtro de fecha para que aparezcan TODAS las cotizaciones aprobadas
+                        cursor.execute("SELECT codigo_cotizacion, nombre_evento FROM cotizaciones WHERE status = 'Aprobada' ORDER BY id DESC")
+                        cots = [f"{r[0]} | {r[1]}" for r in cursor.fetchall()]
                         cache_sistema.guardar(clave_cache, cots)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print("Error cargando cotizaciones en OC:", e)
                     finally:
                         liberar_conexion(conn)
                 self.parent_frame.after(0, lambda: self._aplicar_cotizaciones_combo(cots))
@@ -677,41 +680,63 @@ class OrdenesCompraApp:
         self.cmb_proveedor.configure(values=["-"])
         self.cmb_proveedor.set("-")
 
+    # 🚀 FIX: BLINDAJE DE LA SELECCIÓN PARA PREVENIR EL FALLO SILENCIOSO
     def al_seleccionar_cotizacion(self, choice):
         if "Seleccione" in choice or "No hay" in choice or "Cargando" in choice:
             return
+            
         codigo_cot = choice.split(" | ")[0].strip()
+        
+        # Limpiamos interfaz
+        for item in self.tabla_servicios.get_children():
+            self.tabla_servicios.delete(item)
+        self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
+        self.txt_detalles.delete("1.0", tk.END)
+        
         conn = conectar_db(silencioso=True)
-        if not conn:
-            return
+        if not conn: return
+        
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT locacion_evento FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cot,))
-            loc = cursor.fetchone()
+            
+            # 🚀 FIX: Try-Except Anidado para evitar el cierre por falta de columna
+            try:
+                cursor.execute("SELECT locacion_evento FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cot,))
+                loc = cursor.fetchone()
+                loc_val = loc[0] if loc and loc[0] else "Por definir"
+            except Exception:
+                conn.rollback()
+                loc_val = "Por definir"
+                
             self.ent_locacion.delete(0, tk.END)
-            self.ent_locacion.insert(0, loc[0] if loc and loc[0] else "Por definir")
+            self.ent_locacion.insert(0, loc_val)
+            
+            # Consultamos proveedores
             cursor.execute("SELECT DISTINCT proveedor_nombre FROM cotizacion_proveedores WHERE codigo_cotizacion = %s AND proveedor_nombre IS NOT NULL AND proveedor_nombre != ''", (codigo_cot,))
             provs_totales = [str(r[0]) for r in cursor.fetchall()]
+            
             cursor.execute("SELECT proveedor FROM ordenes_compra WHERE codigo_cotizacion = %s AND (estado != 'Anulada' OR estado IS NULL)", (codigo_cot,))
             provs_listos = [str(r[0]) for r in cursor.fetchall()]
+            
             provs_pendientes = [p for p in provs_totales if p not in provs_listos]
+            
             if provs_pendientes:
                 self.cmb_proveedor.configure(values=provs_pendientes)
                 self.cmb_proveedor.set("Seleccione proveedor...")
+            elif not provs_totales:
+                self.cmb_proveedor.configure(values=["⚠️ No hay proveedores en la cotización"])
+                self.cmb_proveedor.set("⚠️ No hay proveedores en la cotización")
             else:
                 self.cmb_proveedor.configure(values=["✅ Todas las órdenes generadas"])
                 self.cmb_proveedor.set("✅ Todas las órdenes generadas")
-            for item in self.tabla_servicios.get_children():
-                self.tabla_servicios.delete(item)
-            self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
-            self.txt_detalles.delete("1.0", tk.END)
-        except Exception:
-            pass
+                
+        except Exception as e:
+            print("Error al seleccionar cotización:", e)
         finally:
             liberar_conexion(conn)
 
     def al_seleccionar_proveedor(self, choice):
-        if "Seleccione" in choice or "Todas las" in choice or "Sin proveedores" in choice:
+        if "Seleccione" in choice or "Todas las" in choice or "Sin proveedores" in choice or "⚠️" in choice:
             return
         codigo_cot = self.cmb_cotizacion.get().split(" | ")[0].strip()
         proveedor = choice.strip()
@@ -750,10 +775,11 @@ class OrdenesCompraApp:
         finally:
             liberar_conexion(conn)
 
-    # 🚀 FIX: DIBUJADO DE LOGO Y DIMENSIONES PROPORCIONALES
+    # 🚀 FIX MAC: Uso de BASE_DIR_APP para carpetas dinámicas de creación
     def fabricar_pdf(self, cod_cot, evento, prov, locacion, inst, desm, detalles, fecha, items_servicios, total_orden, num_orden_imprimir):
         total_orden = float(total_orden)
-        carpeta_destino = "ordenes_generadas"
+        # 🚀 FIX MAC: Apuntar a la caja fuerte
+        carpeta_destino = os.path.join(BASE_DIR_APP, "ordenes_generadas")
         if not os.path.exists(carpeta_destino):
             os.makedirs(carpeta_destino)
         marca_tiempo = datetime.now().strftime("%H%M%S")
@@ -764,8 +790,9 @@ class OrdenesCompraApp:
         
         config = {}
         try:
-            if os.path.exists(RUTA_CONFIG):
-                with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
+            # 🚀 FIX NameError: Usamos str(CONFIG_FILE)
+            if os.path.exists(str(CONFIG_FILE)):
+                with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
                     config = json.load(f)
         except Exception: pass
         
@@ -901,7 +928,7 @@ class OrdenesCompraApp:
         inst = self.ent_instalacion.get().strip()
         desm = self.ent_desmontaje.get().strip()
         detalles = self.txt_detalles.get("1.0", "end-1c").strip()
-        if "Seleccione" in cot_str or "Seleccione" in prov or "Todas" in prov:
+        if "Seleccione" in cot_str or "Seleccione" in prov or "Todas" in prov or "⚠️" in prov:
             return messagebox.showwarning("Incompleto", "Seleccione una cotización y un proveedor válido.")
         if not REPORTLAB_DISPONIBLE:
             return messagebox.showerror("Librería", "Falta ReportLab.")
@@ -1159,7 +1186,8 @@ class OrdenesCompraApp:
                 return
 
             if ruta_pdf_antigua and os.path.exists(ruta_pdf_antigua):
-                carpeta_anuladas = "ordenes_anuladas"
+                # 🚀 FIX MAC: Apuntar a la caja fuerte
+                carpeta_anuladas = os.path.join(BASE_DIR_APP, "ordenes_anuladas")
                 if not os.path.exists(carpeta_anuladas):
                     os.makedirs(carpeta_anuladas)
                 try:

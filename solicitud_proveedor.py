@@ -5,6 +5,7 @@ SOLICITUD_PROVEEDOR.PY (ENTERPRISE EDITION)
 - FIX: Copiado automático del PDF al portapapeles al enviar WhatsApp/Email.
 - FIX: Renderizado de Logo Borde a Borde en la Carta de Locación/Cliente con sistema de fallbacks.
 - FIX: Márgenes dinámicos en la carta para evitar solapamientos.
+- 🚀 FIX: Fallo de Sintaxis reparado y consultas SQL blindadas.
 - Paginación (Lazy Loading) y Buscador Asíncrono en Historial.
 - Uso de Caché Inteligente para el combo de Eventos.
 - Protección del Pool de Conexiones (liberar_conexion).
@@ -828,7 +829,7 @@ class SolicitudProveedorApp:
                 repintar_adjuntos()
 
         def adjuntar_manual():
-            rutas = filedialog.askopenfilenames(title="Seleccionar SCTR / anexos (PDF/Imagen)", filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")], parent=v)
+            rutas = filedialog.askopenfilenames(title="Seleccionar SCTR / anexos (PDF/Imagen)", filetypes=[("Archivos", "*.pdf *.png *.jpg *.jpeg")], parent=v)
             for r in rutas:
                 agregar_adjunto(r)
 

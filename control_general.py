@@ -9,7 +9,7 @@ CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
 - 🚀 FIX: Compatibilidad Mac en FileDialog.
 - 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
 - 🚀 FIX: Consulta de RUC en Configuración con escudo SSL desactivado para Mac.
-- 🚀 FIX MAC: Bypass de icono .ico nativo en ventanas para evitar crash.
+- 🚀 FIX: Términos y Condiciones personalizables para el PDF de cotizaciones.
 """
 import tkinter as tk
 import customtkinter as ctk
@@ -122,6 +122,7 @@ def cargar_configuracion_general():
         "twi_sid": "", "twi_token": "", "twi_from": "", "twi_to": "",
         "color_menu_fondo": "#1a252c", "color_menu_btn": "#1f538d",
         "color_menu_hover": "#163b65", "color_menu_texto": "white",
+        "terminos_cotizacion": "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos.",
         "orden_operativos": ["clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"],
         "orden_finanzas": ["ventas", "compras", "libro_diario", "libro_mayor", "impuestos", "dashboard"],
         "orden_ajustes": ["configuracion", "usuarios", "bitacora"]
@@ -1281,6 +1282,12 @@ class ControlGeneralEventos:
                 ent_logo.insert(0, ruta)
                 
         ctk.CTkButton(f_ruta_logo, text="📂 Buscar Imagen", width=140, command=buscar_logo_cotizacion).pack(side="right")
+        
+        # 🚀 FIX: Textbox para Términos y Condiciones Globales
+        ctk.CTkLabel(f_diseno, text="📝 Términos y Condiciones (Por defecto en el PDF):", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 2))
+        txt_terminos = ctk.CTkTextbox(f_diseno, height=70, font=("Arial", 11), border_width=1)
+        txt_terminos.pack(fill="x", padx=15, pady=2)
+        txt_terminos.insert("1.0", config_actual.get("terminos_cotizacion", ""))
 
         # ---------- 6. PREFERENCIAS REGIONALES Y RCLONE ----------
         f_region = ctk.CTkFrame(f_scroll, corner_radius=10)
@@ -1557,6 +1564,7 @@ class ControlGeneralEventos:
                 "color_menu_btn": ent_m_btn.get().strip(),
                 "color_menu_hover": ent_m_hov.get().strip(),
                 "color_menu_texto": ent_m_txt.get().strip(),
+                "terminos_cotizacion": txt_terminos.get("1.0", "end-1c").strip(),
                 "orden_operativos": ext_ord(lb_ops),
                 "orden_finanzas": ext_ord(lb_fin),
                 "orden_ajustes": ext_ord(lb_aju)

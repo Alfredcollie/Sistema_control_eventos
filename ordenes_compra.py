@@ -12,6 +12,7 @@ ORDENES_COMPRA.PY (ENTERPRISE EDITION)
 - 🚀 FIX: Se eliminó el filtro de fechas pasadas para que carguen todos los eventos aprobados.
 - 🚀 FIX MAC: Errno 30 resuelto. Las carpetas de PDF ahora apuntan a la "Caja Fuerte" (Application Support).
 - 🚀 FIX: Detección Automática de WhatsApp Desktop / Web Multiplataforma.
+- 🚀 FIX: Extractor Regex Ultra Robusto. Escanea la fila y extrae el primer celular peruano válido, ignorando textos extra o dobles números.
 - Paginación Lazy Loading (50 en 50) para el Historial.
 - Carga 100% Asíncrona (Cero congelamientos).
 - Caché Inteligente en consultas cruzadas.
@@ -141,62 +142,68 @@ def obtener_ruta_logo():
         pass
     return ""
 
-def buscar_fila_proveedor(prov):
+# 🚀 CAZADOR REGEX ULTRA ROBUSTO PARA CONTACTOS
+def obtener_contacto_proveedor(prov, tipo="whatsapp"):
     conn = conectar_db(silencioso=True)
-    if not conn:
-        return None
-    fila_encontrada = None
+    if not conn: return ""
+    contacto_encontrado = ""
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM proveedores")
+        
+        # 1. Búsqueda directa (rápida)
+        cursor.execute("SELECT * FROM proveedores WHERE nombre = %s OR nombre ILIKE %s", (prov, f"%{prov}%"))
         filas = cursor.fetchall()
-        target_limpio = re.sub(r'[^a-zA-Z0-9]', '', prov).upper()
-        target_limpio = target_limpio.replace("SAC", "").replace("SA", "").replace("PERU", "")
+        
+        # 2. Si no lo encuentra, Búsqueda Fuzzy (Maneja "S.A.C.", "EIRL", etc.)
+        if not filas:
+            cursor.execute("SELECT * FROM proveedores")
+            todas = cursor.fetchall()
+            t_limpio = re.sub(r'[^a-zA-Z0-9]', '', prov).upper().replace("SAC", "").replace("SA", "").replace("PERU", "").replace("EIRL", "")
+            if len(t_limpio) >= 3:
+                for f in todas:
+                    f_texto = " ".join([str(v) for v in f if v]).upper()
+                    f_limpio = re.sub(r'[^a-zA-Z0-9]', '', f_texto)
+                    if t_limpio in f_limpio:
+                        filas.append(f)
+                        break
+
+        # 3. Escaneo en modo Francotirador
         for fila in filas:
-            fila_text = " ".join([str(v) for v in fila if v]).upper()
-            fila_limpia = re.sub(r'[^a-zA-Z0-9]', '', fila_text)
-            if target_limpio and target_limpio in fila_limpia:
-                fila_encontrada = fila
+            for campo in fila:
+                if not campo: continue
+                val_str = str(campo).strip()
+                
+                if tipo == "whatsapp":
+                    # Borra todos los espacios y guiones para leer limpio
+                    limpio = re.sub(r'[\s\-\.]', '', val_str)
+                    
+                    # Caza secuencias exactas de 9 dígitos que empiecen con 9 (Incluso si hay letras u otros números al lado)
+                    match_51 = re.search(r'(?:\+?51)?(9\d{8})', limpio)
+                    if match_51:
+                        contacto_encontrado = f"51{match_51.group(1)}"
+                        break
+                        
+                    # Caza números internacionales (Solo si no encontró uno peruano)
+                    match_intl = re.search(r'^\+?(\d{10,14})$', limpio)
+                    if match_intl and not contacto_encontrado:
+                        contacto_encontrado = match_intl.group(1)
+                else:
+                    # Caza correos electrónicos
+                    match_mail = re.search(r'[\w.-]+@[\w.-]+\.\w+', val_str)
+                    if match_mail:
+                        contacto_encontrado = match_mail.group(0)
+                        break
+                        
+            if contacto_encontrado:
                 break
-    except Exception:
-        pass
+                
+    except Exception as e:
+        print(f"Error extrayendo {tipo} de proveedor:", e)
     finally:
         liberar_conexion(conn)
-    return fila_encontrada
+        
+    return contacto_encontrado
 
-def obtener_telefono_proveedor(prov):
-    telefono_proveedor = ""
-    fila = buscar_fila_proveedor(prov)
-    if fila:
-        for campo in fila:
-            if not campo:
-                continue
-            val_raw = str(campo).strip()
-            digits = re.sub(r'\D', '', val_raw)
-            if len(digits) == 9 and digits.startswith("9"):
-                telefono_proveedor = f"51{digits}"
-                break
-            elif len(digits) >= 11 and (digits.startswith("519") or digits.startswith("589")):
-                telefono_proveedor = digits
-                break
-            elif val_raw.startswith("+") and len(digits) >= 10:
-                telefono_proveedor = digits
-                break
-    return telefono_proveedor
-
-def obtener_email_proveedor(prov):
-    email_proveedor = ""
-    fila = buscar_fila_proveedor(prov)
-    if fila:
-        for campo in fila:
-            if not campo:
-                continue
-            val_str = str(campo).strip()
-            match = re.search(r'[\w.-]+@[\w.-]+\.\w+', val_str)
-            if match:
-                email_proveedor = match.group(0)
-                break
-    return email_proveedor
 
 # =========================================================
 # CLASE: SELECTOR DE HORA Y CALENDARIO
@@ -1057,12 +1064,20 @@ class OrdenesCompraApp:
         desm = datos_mod["desm"]
         evento_nombre = datos_mod["evento"]
         ruta_pdf = datos_mod["ruta_pdf"]
-        telefono_proveedor = obtener_telefono_proveedor(prov)
+        
+        # 🚀 USAMOS LA NUEVA FUNCIÓN CAZADORA DE NÚMEROS
+        telefono_proveedor = obtener_contacto_proveedor(prov, "whatsapp")
+        
         if not telefono_proveedor:
             tel_manual = simpledialog.askstring("Celular no detectado", f"No se detectó automáticamente el celular de:\n{prov}\n\nIngresa su número para enviar el mensaje (ej: 987654321):", parent=self.parent_frame.winfo_toplevel())
             if tel_manual:
-                digits = re.sub(r'\D', '', tel_manual)
-                telefono_proveedor = f"51{digits}" if len(digits) == 9 and digits.startswith("9") else digits
+                limpio = re.sub(r'[\s\-\.]', '', str(tel_manual))
+                match_51 = re.search(r'(?:\+?51)?(9\d{8})', limpio)
+                if match_51:
+                    telefono_proveedor = f"51{match_51.group(1)}"
+                else:
+                    telefono_proveedor = re.sub(r'\D', '', limpio)
+                    
         if es_modificacion:
             mensaje = (
                 f"Hola {prov},\n\n"
@@ -1134,7 +1149,10 @@ class OrdenesCompraApp:
         desm = datos_mod["desm"]
         evento_nombre = datos_mod["evento"]
         ruta_pdf = datos_mod["ruta_pdf"]
-        email_prov = obtener_email_proveedor(prov)
+        
+        # 🚀 USAMOS LA NUEVA FUNCIÓN CAZADORA DE CORREOS
+        email_prov = obtener_contacto_proveedor(prov, "email")
+        
         if not email_prov:
             email_prov = simpledialog.askstring("Correo no detectado", f"No se detectó automáticamente el correo de:\n{prov}\n\nIngresa su correo electrónico:", parent=self.parent_frame.winfo_toplevel())
             if not email_prov:

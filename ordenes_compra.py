@@ -11,7 +11,7 @@ ORDENES_COMPRA.PY (ENTERPRISE EDITION)
 - 🚀 FIX: Fallo silencioso de locacion_evento resuelto (ahora cargan los proveedores).
 - 🚀 FIX: Se eliminó el filtro de fechas pasadas para que carguen todos los eventos aprobados.
 - 🚀 FIX MAC: Errno 30 resuelto. Las carpetas de PDF ahora apuntan a la "Caja Fuerte" (Application Support).
-- 🚀 FIX: Solucionado el error silencioso de RUTA_CONFIG al buscar el logo en fabricar_pdf.
+- 🚀 FIX: Detección Automática de WhatsApp Desktop / Web Multiplataforma.
 - Paginación Lazy Loading (50 en 50) para el Historial.
 - Carga 100% Asíncrona (Cero congelamientos).
 - Caché Inteligente en consultas cruzadas.
@@ -79,6 +79,42 @@ def copiar_archivo_portapapeles(ruta):
             os.system(f'powershell -command "Set-Clipboard -Path \'{ruta_absoluta}\'"')
     except Exception as e:
         print("Error copiando al portapapeles:", e)
+
+# 🚀 NUEVO: Detector Inteligente de WhatsApp Desktop
+def tiene_whatsapp_desktop() -> bool:
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "whatsapp", 0, winreg.KEY_READ)
+            winreg.CloseKey(key)
+            return True
+        except Exception:
+            pass
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", "")
+        rutas_posibles_win = [
+            os.path.join(local_appdata, "WhatsApp", "WhatsApp.exe"),
+            os.path.join(local_appdata, "Microsoft", "WindowsApps", "WhatsApp.exe"),
+            os.path.join(program_files, "WhatsApp", "WhatsApp.exe")
+        ]
+        for ruta in rutas_posibles_win:
+            if os.path.exists(ruta): return True
+    elif sys.platform == "darwin":
+        try:
+            res = subprocess.run(
+                ["mdfind", "kMDItemCFBundleIdentifier == 'net.whatsapp.WhatsApp' || kMDItemCFBundleIdentifier == 'com.whatsapp.desktop'"],
+                capture_output=True, text=True
+            )
+            if res.stdout.strip(): return True
+        except Exception:
+            pass
+        rutas_posibles_mac = [
+            "/Applications/WhatsApp.app",
+            os.path.expanduser("~/Applications/WhatsApp.app")
+        ]
+        for ruta in rutas_posibles_mac:
+            if os.path.exists(ruta): return True
+    return False
 
 def maximizar_ventana(ventana):
     try:
@@ -1048,20 +1084,48 @@ class OrdenesCompraApp:
                 f"Por favor, revisa el archivo PDF adjunto con las especificaciones técnicas completas.\n"
                 f"¡Quedamos atentos a tu confirmación!"
             )
-        mensaje_codificado = urllib.parse.quote(mensaje)
-        respuesta = messagebox.askyesnocancel("WhatsApp", "¿Abrir WhatsApp de Escritorio?\n\n[Sí] = App de Escritorio\n[No] = WhatsApp Web\n[Cancelar] = Cancelar")
-        if respuesta is None:
-            return
-        if telefono_proveedor:
-            url_whatsapp = f"{'whatsapp://send' if respuesta else 'https://api.whatsapp.com/send'}?phone={telefono_proveedor}&text={mensaje_codificado}"
+
+        def ejecutar_apertura(url_final):
+            try:
+                copiar_archivo_portapapeles(ruta_pdf)
+                messagebox.showinfo("¡Listo!", f"PDF copiado al portapapeles.\n\nAbriendo el chat de WhatsApp...\nHaz clic en la caja de mensaje y presiona Pegar (Ctrl+V / Cmd+V) para enviar la orden.")
+                webbrowser.open(url_final)
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+        numero_limpio = "".join(filter(str.isdigit, str(telefono_proveedor))) if telefono_proveedor else ""
+        mensaje_enc = urllib.parse.quote(mensaje)
+        url_desktop = f"whatsapp://send?phone={numero_limpio}&text={mensaje_enc}" if numero_limpio else f"whatsapp://send?text={mensaje_enc}"
+        url_web = f"https://web.whatsapp.com/send?phone={numero_limpio}&text={mensaje_enc}" if numero_limpio else f"https://web.whatsapp.com/send?text={mensaje_enc}"
+
+        if tiene_whatsapp_desktop():
+            v_opcion = ctk.CTkToplevel(self.parent_frame.winfo_toplevel())
+            v_opcion.title("Seleccionar canal de WhatsApp")
+            v_opcion.geometry("380x180")
+            v_opcion.grab_set()
+            v_opcion.resizable(False, False)
+            v_opcion.update_idletasks()
+            x = self.parent_frame.winfo_rootx() + (self.parent_frame.winfo_width() // 2) - 190
+            y = self.parent_frame.winfo_rooty() + (self.parent_frame.winfo_height() // 2) - 90
+            v_opcion.geometry(f"+{x}+{y}")
+
+            ctk.CTkLabel(v_opcion, text="📱 ¿Dónde deseas abrir el chat?", font=("Arial", 14, "bold")).pack(pady=(20, 15))
+            f_btns = ctk.CTkFrame(v_opcion, fg_color="transparent")
+            f_btns.pack(fill="x", padx=20, pady=10)
+
+            def abrir_desktop():
+                v_opcion.destroy()
+                ejecutar_apertura(url_desktop)
+
+            def abrir_web():
+                v_opcion.destroy()
+                ejecutar_apertura(url_web)
+
+            ctk.CTkButton(f_btns, text="💻 App Escritorio", fg_color="#1f538d", hover_color="#163b65", command=abrir_desktop).pack(side="left", expand=True, padx=5)
+            ctk.CTkButton(f_btns, text="🌐 WhatsApp Web", fg_color="#27ae60", hover_color="#1e8449", command=abrir_web).pack(side="right", expand=True, padx=5)
         else:
-            url_whatsapp = f"{'whatsapp://send' if respuesta else 'https://web.whatsapp.com/send'}?text={mensaje_codificado}"
-        try:
-            copiar_archivo_portapapeles(ruta_pdf)
-            messagebox.showinfo("¡Listo!", f"PDF copiado al portapapeles.\n\nAbriendo el chat de {prov}...\nHaz clic en la caja de mensaje y presiona Pegar (Ctrl+V / Cmd+V).")
-            webbrowser.open(url_whatsapp)
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
+            ejecutar_apertura(url_web)
+
 
     def ejecutar_envio_email(self, datos_mod, es_modificacion=False):
         prov = datos_mod["prov"]

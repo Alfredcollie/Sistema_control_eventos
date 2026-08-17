@@ -4,6 +4,11 @@
 =========================================================
 FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 =========================================================
+- FIX: Ajuste dinámico de la posición del bloque de totales. 
+  Si sobran más de 205 puntos, el subtotal se dibujará fijo al pie de la página,
+  garantizando que siempre quede en la parte inferior (estilo carta formal).
+- FIX: Logo adaptado al ancho de la hoja (borde a borde), respetando 
+  estrictamente los márgenes laterales[cite: 10].
 """
 
 import os
@@ -131,7 +136,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         ruta_drive = str(config.get("ruta_drive", "")).strip()
         usando_respaldo = False
 
-        # Si por error el usuario seleccionó la raíz del disco de Mac (/), lo ignoramos.
         if ruta_drive == "/" or ruta_drive == "\\":
             ruta_drive = ""
 
@@ -145,7 +149,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 carpeta_destino = os.path.join(escritorio, "Cotizaciones")
                 usando_respaldo = True
                 
-        # Intentamos crear la carpeta. Si Mac lo bloquea, usamos Descargas.
         try:
             if not os.path.exists(carpeta_destino):
                 os.makedirs(carpeta_destino)
@@ -161,6 +164,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
 
         c = canvas.Canvas(nombre_archivo, pagesize=letter)
+        ancho_hoja = letter[0]
+        margen_izq = 40
+        margen_der = 40
+        ancho_util = ancho_hoja - margen_izq - margen_der
 
         ruta_usar = None
         mostrar_logo = True
@@ -202,18 +209,13 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 if img_w == 0: img_w = 1
                 if img_h == 0: img_h = 1
                 
-                max_w = 530
-                max_h = 135
-                ratio = min(max_w / float(img_w), max_h / float(img_h))
+                ratio = ancho_util / float(img_w)
                 
-                if ratio > 1.0:
-                    ratio = 1.0
-                    
-                final_w = img_w * ratio
+                final_w = ancho_util
                 final_h = img_h * ratio
                 y_logo = 792 - 40 - final_h
                 
-                c.drawImage(ruta_usar, 40, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
+                c.drawImage(ruta_usar, margen_izq, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
                 
                 techo_textos = 685
                 margen_inferior_logo = y_logo - 25
@@ -429,11 +431,17 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         except Exception as e:
             return False, f"Error al compilar las filas dinámicas de la matriz: {str(e)}"
 
-        if y_pos < 205:
-            c.showPage()
-            y_pos = Y_INICIO_PAGINA_CONTINUACION
+        # 🚀 FIX: Si hay muy pocos ítems y sobra mucho espacio (y_pos > 205),
+        # forzamos el bloque de totales al fondo de la hoja (140)
+        if y_pos > 205:
+            y_totales = 140
+        else:
+            # Si hay poco espacio o es justo, saltamos página
+            if y_pos < 170:
+                c.showPage()
+                y_pos = Y_INICIO_PAGINA_CONTINUACION
+            y_totales = y_pos - 65
 
-        y_totales = y_pos - 65
         fee_produccion = subtotal_acumulado * 0.15
         total_general_soles = subtotal_acumulado + fee_produccion
         total_general_dolares = total_general_soles / tipo_cambio_pdf

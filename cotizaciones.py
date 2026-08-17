@@ -95,6 +95,123 @@ def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
 # =========================================================
+# 🚀 CLASES NATIVAS PARA EL CALENDARIO Y HORA
+# =========================================================
+class SelectorHoraNativo(ctk.CTkToplevel):
+    def __init__(self, parent, target_entry, fecha_str):
+        super().__init__(parent)
+        self.target_entry = target_entry
+        self.fecha_str = fecha_str
+        self.title("Hora")
+        self.geometry("260x160")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (260 // 2)
+        y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (160 // 2)
+        self.geometry(f"+{x}+{y}")
+        ctk.CTkLabel(self, text="Seleccione la Hora:", font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(15, 5))
+        f_cont = ctk.CTkFrame(self, fg_color="transparent")
+        f_cont.pack(pady=5)
+        self.cmb_hora = ctk.CTkComboBox(f_cont, values=[f"{i:02d}" for i in range(1, 13)], width=65, state="readonly")
+        self.cmb_hora.pack(side="left", padx=2)
+        self.cmb_hora.set("08")
+        ctk.CTkLabel(f_cont, text=":", font=("Arial", 14, "bold")).pack(side="left")
+        self.cmb_min = ctk.CTkComboBox(f_cont, values=[f"{i:02d}" for i in range(0, 60, 5)], width=65, state="readonly")
+        self.cmb_min.pack(side="left", padx=2)
+        self.cmb_min.set("00")
+        self.cmb_ampm = ctk.CTkComboBox(f_cont, values=["AM", "PM"], width=65, state="readonly")
+        self.cmb_ampm.pack(side="left", padx=2)
+        self.cmb_ampm.set("AM")
+        ctk.CTkButton(self, text="Confirmar Logística", fg_color="#27ae60", hover_color="#1e8449", command=self.confirmar).pack(pady=(10, 15))
+
+    def confirmar(self):
+        hora_final = f"{self.fecha_str} - {self.cmb_hora.get()}:{self.cmb_min.get()} {self.cmb_ampm.get()}"
+        self.target_entry.delete(0, tk.END)
+        self.target_entry.insert(0, hora_final)
+        self.destroy()
+
+
+class CalendarioNativo(ctk.CTkToplevel):
+    def __init__(self, parent, target_entry, selector_hora=False):
+        super().__init__(parent)
+        self.target_entry = target_entry
+        self.selector_hora = selector_hora
+        self.title("Fecha")
+        self.geometry("280x320")
+        self.resizable(False, False)
+        
+        # 🚀 FIX MAC: Aseguramos que la ventana flote por encima del sistema siempre.
+        self.transient(parent)
+        self.grab_set()
+        
+        # Centrar la ventana
+        self.update_idletasks()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (280 // 2)
+            y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
+            self.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        self.current_year = datetime.now().year
+        self.current_month = datetime.now().month
+        self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
+        self.header_frame.pack(fill="x")
+        ctk.CTkButton(self.header_frame, text="<", width=30, fg_color="transparent", command=self.prev_month).pack(side="left", padx=10, pady=10)
+        self.lbl_month_year = ctk.CTkLabel(self.header_frame, text="", font=("Arial", 14, "bold"), text_color="white")
+        self.lbl_month_year.pack(side="left", expand=True)
+        ctk.CTkButton(self.header_frame, text=">", width=30, fg_color="transparent", command=self.next_month).pack(side="right", padx=10, pady=10)
+        self.days_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.days_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        for i, day in enumerate(["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]):
+            ctk.CTkLabel(self.days_frame, text=day, font=("Arial", 11, "bold"), text_color="#1f538d").grid(row=0, column=i, padx=4, pady=5)
+        self.update_calendar()
+
+    def update_calendar(self):
+        for w in self.days_frame.winfo_children():
+            if int(w.grid_info()["row"]) > 0:
+                w.destroy()
+        meses = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        self.lbl_month_year.configure(text=f"{meses[self.current_month]} {self.current_year}")
+        hoy = datetime.now()
+        for r_idx, week in enumerate(calendar.monthcalendar(self.current_year, self.current_month), start=1):
+            for c_idx, day in enumerate(week):
+                if day != 0:
+                    b_col, t_col = ("#d4edda", "#155724") if day == hoy.day and self.current_month == hoy.month and self.current_year == hoy.year else ("transparent", "black")
+                    btn = ctk.CTkButton(self.days_frame, text=str(day), width=30, height=30, fg_color=b_col, text_color=t_col, font=("Arial", 11))
+                    btn.configure(command=lambda d=day: self.select_date(d))
+                    btn.grid(row=r_idx, column=c_idx, padx=2, pady=2)
+
+    def prev_month(self):
+        self.current_month -= 1
+        if self.current_month < 1:
+            self.current_month = 12
+            self.current_year -= 1
+        self.update_calendar()
+
+    def next_month(self):
+        self.current_month += 1
+        if self.current_month > 12:
+            self.current_month = 1
+            self.current_year += 1
+        self.update_calendar()
+
+    def select_date(self, day):
+        fecha_sel = f"{day:02d}/{self.current_month:02d}/{self.current_year}"
+        v_padre = self.master
+        e_dest = self.target_entry
+        req_hora = self.selector_hora
+        self.destroy()
+        if req_hora:
+            SelectorHoraNativo(v_padre, e_dest, fecha_sel)
+        else:
+            e_dest.delete(0, tk.END)
+            e_dest.insert(0, fecha_sel)
+
+
+# =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS
 # =========================================================
 def generar_nuevo_codigo_cotizacion(conn):
@@ -565,8 +682,8 @@ class VentanaCotizaciones:
         self.crear_interfaz()
 
     def abrir_calendario(self, entry_objetivo, ventana_padre=None):
-        padre_final = ventana_padre if ventana_padre else self.root
-        CalendarioNativo(padre_final, entry_objetivo)
+        padre_final = ventana_padre if ventana_padre else self.root.winfo_toplevel()
+        CalendarioNativo(padre_final, entry_objetivo, selector_hora=False)
 
     def crear_interfaz(self):
         style = ttk.Style()
@@ -982,7 +1099,7 @@ class VentanaCotizaciones:
         finally:
             liberar_conexion(conn)
 
-        v_edit = ctk.CTkToplevel(self.root)
+        v_edit = ctk.CTkToplevel(self.root.winfo_toplevel())
         v_edit.title(f"Configuración de Cotización - {codigo_cot}")
         v_edit.after(100, lambda: maximizar_ventana(v_edit))
         v_edit.grab_set()
@@ -1192,7 +1309,7 @@ class VentanaCotizaciones:
             try:
                 import cotizaciones_fase3
                 importlib.reload(cotizaciones_fase3)
-                cotizaciones_fase3.VentanaEtapaProveedores(self, codigo_cot, empresa_val, evento_val, callback_on_close=lambda: self.cargar_cotizaciones_tabla(reset_pagina=True))
+                cotizaciones_fase3.VentanaEtapaProveedores(self.root.winfo_toplevel(), codigo_cot, empresa_val, evento_val, callback_on_close=lambda: self.cargar_cotizaciones_tabla(reset_pagina=True))
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo llamar a la Etapa 3:\n{str(e)}")
 

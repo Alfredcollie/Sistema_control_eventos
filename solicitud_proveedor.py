@@ -5,7 +5,9 @@ SOLICITUD_PROVEEDOR.PY (ENTERPRISE EDITION)
 - FIX: Copiado automático del PDF al portapapeles al enviar WhatsApp/Email.
 - FIX: Renderizado de Logo Borde a Borde en la Carta de Locación/Cliente con sistema de fallbacks.
 - FIX: Márgenes dinámicos en la carta para evitar solapamientos.
-- 🚀 FIX: Fallo de Sintaxis reparado y consultas SQL blindadas.
+- 🚀 FIX: Búsqueda Inteligente (Fuzzy Match + Regex) para extraer celulares/emails sin fallos.
+- 🚀 FIX MAC: Errno 30 resuelto. Uso de la Caja Fuerte (BASE_DIR_APP) para guardar cartas y SCTR.
+- 🚀 FIX: Detección Automática de WhatsApp Desktop / Web Multiplataforma.
 - Paginación (Lazy Loading) y Buscador Asíncrono en Historial.
 - Uso de Caché Inteligente para el combo de Eventos.
 - Protección del Pool de Conexiones (liberar_conexion).
@@ -29,11 +31,14 @@ from datetime import datetime
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 
+# 🚀 FIX MAC: Usamos la "Caja Fuerte" para guardar los PDFs
 try:
-    from app_paths import CONFIG_FILE
+    from app_paths import CONFIG_FILE, CONFIG_DIR
     RUTA_CONFIG = str(CONFIG_FILE)
+    BASE_DIR_APP = str(CONFIG_DIR)
 except Exception:
     RUTA_CONFIG = "config_local.json"
+    BASE_DIR_APP = os.path.join(os.path.expanduser("~"), "BlackCube_Seguro")
 
 try:
     import pdfplumber
@@ -71,10 +76,44 @@ def copiar_archivo_portapapeles(ruta):
     except Exception as e:
         print("Error copiando al portapapeles:", e)
 
+# 🚀 NUEVO: Detector Inteligente de WhatsApp Desktop
+def tiene_whatsapp_desktop() -> bool:
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "whatsapp", 0, winreg.KEY_READ)
+            winreg.CloseKey(key)
+            return True
+        except Exception:
+            pass
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", "")
+        rutas_posibles_win = [
+            os.path.join(local_appdata, "WhatsApp", "WhatsApp.exe"),
+            os.path.join(local_appdata, "Microsoft", "WindowsApps", "WhatsApp.exe"),
+            os.path.join(program_files, "WhatsApp", "WhatsApp.exe")
+        ]
+        for ruta in rutas_posibles_win:
+            if os.path.exists(ruta): return True
+    elif sys.platform == "darwin":
+        try:
+            res = subprocess.run(
+                ["mdfind", "kMDItemCFBundleIdentifier == 'net.whatsapp.WhatsApp' || kMDItemCFBundleIdentifier == 'com.whatsapp.desktop'"],
+                capture_output=True, text=True
+            )
+            if res.stdout.strip(): return True
+        except Exception:
+            pass
+        rutas_posibles_mac = [
+            "/Applications/WhatsApp.app",
+            os.path.expanduser("~/Applications/WhatsApp.app")
+        ]
+        for ruta in rutas_posibles_mac:
+            if os.path.exists(ruta): return True
+    return False
 
 def limpiar_nombre(nombre):
     return str(nombre).strip().strip("() '\" ,")
-
 
 def abrir_documento(ruta):
     try:
@@ -87,7 +126,6 @@ def abrir_documento(ruta):
             subprocess.call(["xdg-open", ruta_abs])
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
-
 
 # =======================================================
 # EXTRACCIÓN DE DATOS DEL FORMULARIO PDF RELLENADO
@@ -130,7 +168,6 @@ def extraer_datos_formulario_pdf(ruta_pdf):
     return datos, None
 
 
-# Variable global definida al más alto nivel
 _SCHEMA_SOL_OK = False
 
 class SolicitudProveedorApp:
@@ -139,19 +176,14 @@ class SolicitudProveedorApp:
         self.usuario_activo = usuario_activo
         self.evento_data = None
         
-        # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
         self.registros_por_pagina = 50
         
         self.inicializar_bd()
         self.crear_interfaz()
         
-        # Retraso ligero para que la interfaz se dibuje antes de consultar
         self.parent_frame.after(150, self.cargar_eventos)
 
-    # =======================================================
-    # SCHEMA + COLUMNAS EXTRA (EN SEGUNDO PLANO)
-    # =======================================================
     def inicializar_bd(self):
         global _SCHEMA_SOL_OK
         if _SCHEMA_SOL_OK:
@@ -204,9 +236,6 @@ class SolicitudProveedorApp:
 
         threading.Thread(target=tarea_init, daemon=True).start()
 
-    # =======================================================
-    # INTERFAZ CON 2 PESTAÑAS
-    # =======================================================
     def crear_interfaz(self):
         self.frame_main = ctk.CTkFrame(self.parent_frame, fg_color="transparent")
         self.frame_main.pack(fill="both", expand=True, padx=15, pady=15)
@@ -223,9 +252,6 @@ class SolicitudProveedorApp:
         if self.tabview.get() == " 📋 Solicitudes Elaboradas ":
             self.cargar_solicitudes_tab(reset_pagina=True)
 
-    # -------------------------------------------------------
-    # PESTAÑA 1: SOLICITUD / REGISTRO
-    # -------------------------------------------------------
     def crear_tab_nueva(self):
         f_top = ctk.CTkFrame(self.tab_nueva, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0", corner_radius=8)
         f_top.pack(fill="x", pady=(0, 10), ipadx=10, ipady=8)
@@ -269,11 +295,7 @@ class SolicitudProveedorApp:
         self.tabla.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         scroll_y.pack(side="right", fill="y", padx=(0, 10), pady=10)
 
-    # -------------------------------------------------------
-    # PESTAÑA 2: SOLICITUDES ELABORADAS (CON PAGINACIÓN)
-    # -------------------------------------------------------
     def crear_tab_hist(self):
-        # 🚀 BUSCADOR ASÍNCRONO
         f_busqueda = ctk.CTkFrame(self.tab_hist, fg_color="transparent")
         f_busqueda.pack(fill="x", pady=(5, 5))
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
@@ -320,7 +342,6 @@ class SolicitudProveedorApp:
         self.tabla_hist.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
         scroll_h.pack(side="right", fill="y", padx=(0, 10), pady=10)
         
-        # 🚀 BOTONES DE PAGINACIÓN
         f_paginacion = ctk.CTkFrame(self.tab_hist, fg_color="transparent")
         f_paginacion.pack(fill="x", padx=15, pady=(5, 5))
         self.btn_ant = ctk.CTkButton(f_paginacion, text="◀ Ant", width=60, command=self.pagina_anterior)
@@ -347,9 +368,6 @@ class SolicitudProveedorApp:
             except: pass
         self._busqueda_job = self.parent_frame.after(350, lambda: self.cargar_solicitudes_tab(reset_pagina=True))
 
-    # =======================================================
-    # CARGA DE EVENTOS CON CACHÉ (ASÍNCRONO)
-    # =======================================================
     def cargar_eventos(self):
         clave_cache = "lista_eventos_aprobados"
         eventos = cache_sistema.obtener(clave_cache)
@@ -481,9 +499,6 @@ class SolicitudProveedorApp:
             return None
         return self.tabla.item(sel[0], "values")[0]
 
-    # =======================================================
-    # PESTAÑA 2: CARGA LAZY LOADING Y CACHÉ
-    # =======================================================
     def cargar_solicitudes_tab(self, reset_pagina=False):
         if reset_pagina:
             self.pagina_actual = 1
@@ -605,34 +620,53 @@ class SolicitudProveedorApp:
         finally:
             liberar_conexion(conn)
 
-    # =======================================================
-    # ENVIAR SOLICITUDES Y GENERAR FORMULARIO PDF
-    # =======================================================
     def obtener_contacto_proveedor(self, proveedor, tipo_contacto="whatsapp"):
         conn = conectar_db(silencioso=True)
         if not conn: return ""
+        contacto_encontrado = ""
         try:
             cursor = conn.cursor()
-            if tipo_contacto == "whatsapp":
-                cursor.execute("SELECT whatsapp FROM proveedores WHERE nombre = %s", (proveedor,))
-            else:
-                cursor.execute("SELECT correo FROM proveedores WHERE nombre = %s", (proveedor,))
+            cursor.execute("SELECT * FROM proveedores")
+            filas = cursor.fetchall()
             
-            res = cursor.fetchone()
-            if res and res[0]:
-                dato = str(res[0]).strip()
-                if tipo_contacto == "whatsapp":
-                    digits = re.sub(r'\D', '', dato)
-                    if len(digits) == 9 and digits.startswith("9"):
-                        return f"51{digits}"
-                    elif len(digits) >= 11:
-                        return digits
-                return dato
+            target_limpio = re.sub(r'[^a-zA-Z0-9]', '', proveedor).upper()
+            target_limpio = target_limpio.replace("SAC", "").replace("SA", "").replace("PERU", "")
+            
+            fila_encontrada = None
+            for fila in filas:
+                fila_text = " ".join([str(v) for v in fila if v]).upper()
+                fila_limpia = re.sub(r'[^a-zA-Z0-9]', '', fila_text)
+                if target_limpio and target_limpio in fila_limpia:
+                    fila_encontrada = fila
+                    break
+            
+            if fila_encontrada:
+                for campo in fila_encontrada:
+                    if not campo: continue
+                    val_str = str(campo).strip()
+                    
+                    if tipo_contacto == "whatsapp":
+                        digits = re.sub(r'\D', '', val_str)
+                        if len(digits) == 9 and digits.startswith("9"):
+                            contacto_encontrado = f"51{digits}"
+                            break
+                        elif len(digits) >= 11 and (digits.startswith("519") or digits.startswith("589")):
+                            contacto_encontrado = digits
+                            break
+                        elif val_str.startswith("+") and len(digits) >= 10:
+                            contacto_encontrado = digits
+                            break
+                    else:
+                        match = re.search(r'[\w.-]+@[\w.-]+\.\w+', val_str)
+                        if match:
+                            contacto_encontrado = match.group(0)
+                            break
         except Exception as e:
             print("Error buscando contacto:", e)
         finally:
             liberar_conexion(conn)
-        return ""
+            
+        return contacto_encontrado
 
     def guardar_registro_envio(self, proveedor):
         ev = self.evento_data
@@ -675,13 +709,12 @@ class SolicitudProveedorApp:
 
         contacto = self.obtener_contacto_proveedor(prov, canal)
         if not contacto:
-            contacto = simpledialog.askstring("Contacto faltante", f"No se encontró el {'número' if canal=='whatsapp' else 'correo'} de {prov}.\n\nPor favor, ingrésalo manualmente:", parent=self.parent_frame.winfo_toplevel())
+            contacto = simpledialog.askstring("Contacto faltante", f"No se detectó automáticamente el {'número' if canal=='whatsapp' else 'correo'} de {prov}.\n\nPor favor, ingrésalo manualmente:", parent=self.parent_frame.winfo_toplevel())
             if not contacto: return
             if canal == "whatsapp":
                 digits = re.sub(r'\D', '', contacto)
                 contacto = f"51{digits}" if len(digits) == 9 and digits.startswith("9") else digits
 
-        # 🚀 GENERAR EL PDF DEL FORMULARIO SCTR INTERACTIVO
         try:
             ruta_pdf = generar_formulario_sctr(ev["codigo"], ev["nombre"], ev["fecha"], ev["locacion"], prov)
         except Exception as e:
@@ -698,27 +731,57 @@ class SolicitudProveedorApp:
             f"Quedamos atentos a su respuesta. ¡Gracias!"
         )
 
+        def ejecutar_apertura(url_final):
+            try:
+                copiar_archivo_portapapeles(ruta_pdf)
+                self.guardar_registro_envio(prov)
+                if canal == "whatsapp":
+                    messagebox.showinfo("¡Listo!", f"El Formulario SCTR interactivo ha sido generado y COPIADO AL PORTAPAPELES.\n\nAbriendo el chat de WhatsApp...\n\nHaz clic en la caja de mensaje y presiona Pegar (Ctrl+V o Cmd+V) para adjuntar el PDF.")
+                else:
+                    messagebox.showinfo("¡Listo para enviar!", f"El PDF fue copiado al portapapeles.\n\nSe abrirá tu gestor de correos.\n\n1. Presiona Pegar (Ctrl+V) para adjuntar el PDF.\n2. Haz clic en Enviar.")
+                webbrowser.open(url_final)
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo abrir la aplicación:\n{e}")
+
         if canal == "whatsapp":
+            numero_limpio = "".join(filter(str.isdigit, str(contacto)))
             msj_enc = urllib.parse.quote(msj)
-            respuesta = messagebox.askyesnocancel("WhatsApp", "¿Abrir WhatsApp de Escritorio?\n\n[Sí] = App de Escritorio\n[No] = WhatsApp Web\n[Cancelar] = Cancelar")
-            if respuesta is None: return
-            url = f"{'whatsapp://send' if respuesta else 'https://api.whatsapp.com/send'}?phone={contacto}&text={msj_enc}"
-        else: 
+            url_desktop = f"whatsapp://send?phone={numero_limpio}&text={msj_enc}"
+            url_web = f"https://web.whatsapp.com/send?phone={numero_limpio}&text={msj_enc}"
+
+            if tiene_whatsapp_desktop():
+                v_opcion = ctk.CTkToplevel(self.parent_frame.winfo_toplevel())
+                v_opcion.title("Seleccionar canal de WhatsApp")
+                v_opcion.geometry("380x180")
+                v_opcion.grab_set()
+                v_opcion.resizable(False, False)
+                v_opcion.update_idletasks()
+                x = self.parent_frame.winfo_rootx() + (self.parent_frame.winfo_width() // 2) - 190
+                y = self.parent_frame.winfo_rooty() + (self.parent_frame.winfo_height() // 2) - 90
+                v_opcion.geometry(f"+{x}+{y}")
+
+                ctk.CTkLabel(v_opcion, text="📱 ¿Dónde deseas abrir el chat?", font=("Arial", 14, "bold")).pack(pady=(20, 15))
+                f_btns = ctk.CTkFrame(v_opcion, fg_color="transparent")
+                f_btns.pack(fill="x", padx=20, pady=10)
+
+                def abrir_desktop():
+                    v_opcion.destroy()
+                    ejecutar_apertura(url_desktop)
+
+                def abrir_web():
+                    v_opcion.destroy()
+                    ejecutar_apertura(url_web)
+
+                ctk.CTkButton(f_btns, text="💻 App Escritorio", fg_color="#1f538d", hover_color="#163b65", command=abrir_desktop).pack(side="left", expand=True, padx=5)
+                ctk.CTkButton(f_btns, text="🌐 WhatsApp Web", fg_color="#27ae60", hover_color="#1e8449", command=abrir_web).pack(side="right", expand=True, padx=5)
+            else:
+                ejecutar_apertura(url_web)
+        else:
             asunto = urllib.parse.quote(f"Solicitud SCTR y Personal - Evento {ev['nombre']}")
             msj_enc = urllib.parse.quote(msj.replace("*", ""))
-            url = f"mailto:{contacto}?subject={asunto}&body={msj_enc}"
+            url_email = f"mailto:{contacto}?subject={asunto}&body={msj_enc}"
+            ejecutar_apertura(url_email)
 
-        try:
-            copiar_archivo_portapapeles(ruta_pdf)
-            self.guardar_registro_envio(prov)
-            messagebox.showinfo("¡Listo!", f"El Formulario SCTR interactivo ha sido generado y COPIADO AL PORTAPAPELES.\n\nAbriendo {'el chat de WhatsApp' if canal=='whatsapp' else 'el correo'}...\n\nHaz clic en la caja de mensaje y presiona Pegar (Ctrl+V o Cmd+V) para adjuntar el PDF.")
-            webbrowser.open(url)
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo abrir la aplicación:\n{e}")
-
-    # =======================================================
-    # REGISTRAR INFORMACIÓN RECIBIDA
-    # =======================================================
     def registrar_recepcion(self):
         prov = self._proveedor_seleccionado()
         if not prov:
@@ -755,7 +818,7 @@ class SolicitudProveedorApp:
         
         f_tipo = ctk.CTkFrame(f_top_info, fg_color="transparent")
         f_tipo.pack(fill="x", pady=2)
-        ctk.CTkLabel(f_tipo, text="Tipo de documentación recibida:", font=("Arial", 10, "bold")).pack(side="left")
+        ctk.CTkLabel(f_tipo, text="Tipo de documentation recibida:", font=("Arial", 10, "bold")).pack(side="left")
         cmb_tipo = ctk.CTkComboBox(f_tipo, values=["SCTR", "Lista de Personal", "SCTR + Lista"], state="readonly", width=170, height=24)
         cmb_tipo.pack(side="left", padx=10)
         cmb_tipo.set("SCTR + Lista")
@@ -940,7 +1003,7 @@ class SolicitudProveedorApp:
             
             cfg = cargar_config()
             ruta_base_cfg = str(cfg.get("ruta_drive", "")).strip()
-            carpeta_sol = os.path.join(ruta_base_cfg, "solicitudes_sctr") if ruta_base_cfg and os.path.exists(ruta_base_cfg) else "solicitudes_sctr"
+            carpeta_sol = os.path.join(ruta_base_cfg, "solicitudes_sctr") if ruta_base_cfg and os.path.exists(ruta_base_cfg) else os.path.join(BASE_DIR_APP, "solicitudes_sctr")
             if not os.path.exists(carpeta_sol):
                 try:
                     os.makedirs(carpeta_sol)
@@ -1005,9 +1068,6 @@ class SolicitudProveedorApp:
             finally:
                 liberar_conexion(conn)
 
-    # =======================================================
-    # CARTA EN PDF (LOCACIÓN O CLIENTE) + ANEXOS
-    # =======================================================
     def generar_carta(self):
         ev = self.evento_data
         if not ev:
@@ -1040,7 +1100,6 @@ class SolicitudProveedorApp:
                 except Exception:
                     pass
                 
-                # Formatear el título del proveedor truncando si excede los 40 caracteres para evitar solapamiento
                 titulo_prov_raw = f"{prov}" + (f" (RUC: {ruc_prov})" if ruc_prov else "")
                 titulo_prov_trunc = titulo_prov_raw[:60] + "..." if len(titulo_prov_raw) > 63 else titulo_prov_raw
                 
@@ -1088,7 +1147,8 @@ class SolicitudProveedorApp:
         if ruta_base and os.path.exists(ruta_base):
             carpeta = os.path.join(ruta_base, "cartas_eventos")
         else:
-            carpeta = "cartas_eventos"
+            carpeta = os.path.join(BASE_DIR_APP, "cartas_eventos")
+            
         if not os.path.exists(carpeta):
             try:
                 os.makedirs(carpeta)
@@ -1098,7 +1158,6 @@ class SolicitudProveedorApp:
         nombre_pdf = os.path.join(carpeta, f"Carta_{ev['codigo']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
         ruta_base_pdf = nombre_pdf.replace(".pdf", "_base.pdf")
         
-        # 🚀 CÁLCULO PROPORCIONAL DEL LOGO BORDE A BORDE CON FALLBACK
         ancho_hoja = letter[0]
         alto_hoja = letter[1]
         

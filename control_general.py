@@ -5,6 +5,7 @@ CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
 - Pool de Conexiones Activo y Liberación Correcta.
 - Dashboard de Bienvenida (Alertas) asíncrono y acelerado.
 - Sincronización Rclone Silenciosa en Segundo Plano.
+- 🚀 FIX: Sincronización de Configuración Global en Supabase para Múltiples Estaciones.
 - 🚀 FIX: Compatibilidad Mac en FileDialog.
 - 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
 - 🚀 FIX: Consulta de RUC en Configuración con escudo SSL desactivado para Mac.
@@ -22,7 +23,7 @@ import urllib.request
 import bcrypt
 import subprocess
 import threading
-import webbrowser  # 🚀 NUEVO: Para abrir el enlace de la actualización
+import webbrowser
 from datetime import datetime, timedelta
 
 # 🚀 NUEVO: Definimos la versión actual de tu código
@@ -103,6 +104,7 @@ def obtener_comando_rclone():
                 return r
     return "rclone"
 
+# 🚀 CARGA HÍBRIDA (NUBE -> LOCAL)
 def cargar_configuracion_general():
     config = {
         "ruta_drive": "", "rclone_remote": "gdrive:", "rclone_ruta_nube": "BlackCube",
@@ -124,12 +126,44 @@ def cargar_configuracion_general():
         "orden_finanzas": ["ventas", "compras", "libro_diario", "libro_mayor", "impuestos", "dashboard"],
         "orden_ajustes": ["configuracion", "usuarios", "bitacora"]
     }
+    
+    # 1. Cargamos el local por defecto
     try:
         if os.path.exists(str(CONFIG_FILE)):
             with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
                 config.update(json.load(f))
     except Exception:
         pass
+        
+    # 2. Intentamos jalar la configuración global desde Supabase
+    conn = conectar_db(silencioso=True)
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT data FROM configuracion_sistema WHERE id = 1")
+            res = cursor.fetchone()
+            if res and res[0]:
+                config_nube = res[0]
+                
+                # Protegemos variables estrictamente locales para no sobreescribirlas
+                impresora_local = config.get("impresora", "")
+                ruta_drive_local = config.get("ruta_drive", "")
+                rclone_remote_local = config.get("rclone_remote", "gdrive:")
+                
+                config.update(config_nube)
+                
+                if impresora_local: config["impresora"] = impresora_local
+                if ruta_drive_local: config["ruta_drive"] = ruta_drive_local
+                if rclone_remote_local != "gdrive:": config["rclone_remote"] = rclone_remote_local
+                
+                # Guardamos la sincronización de la nube en el disco local
+                with open(str(CONFIG_FILE), "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=4)
+        except Exception as e:
+            print("No se pudo sincronizar config desde la nube:", e)
+        finally:
+            liberar_conexion(conn)
+            
     return config
 
 def ejecutar_sincronizacion_silenciosa():
@@ -169,6 +203,17 @@ def inicializar_seguridad_db():
         if not conn: return
         try:
             cursor = conn.cursor()
+            
+            # 🚀 NUEVA TABLA: Configuración Global en la Nube
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS configuracion_sistema (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                data JSONB NOT NULL,
+                actualizado_el TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT unica_config CHECK (id = 1)
+            )
+            """)
+            
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -1516,15 +1561,35 @@ class ControlGeneralEventos:
                 "orden_finanzas": ext_ord(lb_fin),
                 "orden_ajustes": ext_ord(lb_aju)
             })
+            
             try:
+                # 1. Guardar Local
                 with open(archivo_config, "w", encoding="utf-8") as f:
                     json.dump(nueva_config, f, indent=4)
-                messagebox.showinfo("Éxito", "Las configuraciones del sistema se guardaron correctamente.\n\nLos cambios en el diseño se aplicarán inmediatamente.", parent=v_conf)
+                
+                # 2. 🚀 GUARDAR EN LA NUBE (Sincronización Multi-Estación)
+                conn = conectar_db(silencioso=True)
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                        INSERT INTO configuracion_sistema (id, data, actualizado_el)
+                        VALUES (1, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, actualizado_el = CURRENT_TIMESTAMP
+                        """, (json.dumps(nueva_config),))
+                        conn.commit()
+                    except Exception as e:
+                        print("Error respaldando config en la nube:", e)
+                    finally:
+                        liberar_conexion(conn)
+
+                messagebox.showinfo("Éxito", "Las configuraciones del sistema se guardaron correctamente en la Nube y en este equipo.\n\nLos cambios visuales se aplicarán inmediatamente.", parent=v_conf)
                 lanzar_sync_background()
                 v_conf.destroy()
                 self.construir_dashboard_spa()
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo guardar la configuración:\n{e}", parent=v_conf)
+                
         ctk.CTkButton(f_scroll, text="💾 Guardar Todos los Cambios", font=("Arial", 14, "bold"), height=45, fg_color="#1f538d", hover_color="#163b65", command=guardar_configuracion).pack(pady=25)
 
     # =======================================================

@@ -8,7 +8,8 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
   Si sobran más de 205 puntos, el subtotal se dibujará fijo al pie de la página,
   garantizando que siempre quede en la parte inferior (estilo carta formal).
 - FIX: Logo adaptado al ancho de la hoja (borde a borde), respetando 
-  estrictamente los márgenes laterales[cite: 10].
+  estrictamente los márgenes laterales.
+- FIX: Términos y Condiciones cargados desde Configuración Global.
 """
 
 import os
@@ -431,12 +432,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         except Exception as e:
             return False, f"Error al compilar las filas dinámicas de la matriz: {str(e)}"
 
-        # 🚀 FIX: Si hay muy pocos ítems y sobra mucho espacio (y_pos > 205),
-        # forzamos el bloque de totales al fondo de la hoja (140)
         if y_pos > 205:
             y_totales = 140
         else:
-            # Si hay poco espacio o es justo, saltamos página
             if y_pos < 170:
                 c.showPage()
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
@@ -473,20 +471,26 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColorRGB(*rgb_primario)
         c.drawString(40, y_totales - 55, "TÉRMINOS Y CONDICIONES:")
+        
         c.setFont("Helvetica", 8)
         c.setFillColorRGB(0.3, 0.3, 0.3)
-        c.drawString(40, y_totales - 68, "Precios no incluyen IGV.")
-        c.drawString(40, y_totales - 80, "Cotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.")
-        y_cond_actual = y_totales - 92
+        y_cond_actual = y_totales - 68
+        
+        # 🚀 IMPRIMIR FORMA DE PAGO PRIMERO (DINÁMICO POR EVENTO)
         c.drawString(40, y_cond_actual, "Forma de pago: ")
         x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
         for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
             c.drawString(x_pago, y_cond_actual, linea)
             y_cond_actual -= 12
-        penalidad_texto = "Penalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
-        for linea in wrap_text(penalidad_texto, "Helvetica", 8, 530):
-            c.drawString(40, y_cond_actual, linea)
-            y_cond_actual -= 12
+
+        # 🚀 IMPRIMIR TÉRMINOS Y CONDICIONES EDITABLES
+        terminos_default = "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
+        terminos_config = str(config.get("terminos_cotizacion", terminos_default)).strip()
+        
+        if terminos_config:
+            for linea in wrap_text(terminos_config, "Helvetica", 8, 530):
+                c.drawString(40, y_cond_actual, linea)
+                y_cond_actual -= 12
 
         c.save()
 

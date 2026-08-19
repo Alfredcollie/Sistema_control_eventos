@@ -387,29 +387,33 @@ class VentanaEtapaProveedores:
         self.lista_widgets_filas = []
         self.matriz_expandida = False
 
+        # 🚀 FIX: CURACIÓN DE BASE DE DATOS EN SEGUNDO PLANO PARA NO CONGELAR
         global _SCHEMA_F3_OK
         if not _SCHEMA_F3_OK:
-            c_conn = conectar_db(silencioso=True)
-            if c_conn:
-                try:
-                    c_alt = c_conn.cursor()
-                    alters = [
-                        "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
-                        "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
-                        "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
-                        "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
-                        "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
-                    ]
-                    for sql in alters:
-                        try:
-                            c_alt.execute(sql)
-                            c_conn.commit()
-                        except: c_conn.rollback()
-                    _SCHEMA_F3_OK = True
-                except Exception: 
-                    pass
-                finally: 
-                    liberar_conexion(c_conn)
+            def tarea_init():
+                global _SCHEMA_F3_OK
+                c_conn = conectar_db(silencioso=True)
+                if c_conn:
+                    try:
+                        c_alt = c_conn.cursor()
+                        alters = [
+                            "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
+                            "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
+                            "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
+                            "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
+                            "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
+                        ]
+                        for sql in alters:
+                            try:
+                                c_alt.execute(sql)
+                                c_conn.commit()
+                            except: c_conn.rollback()
+                        _SCHEMA_F3_OK = True
+                    except Exception: 
+                        pass
+                    finally: 
+                        liberar_conexion(c_conn)
+            threading.Thread(target=tarea_init, daemon=True).start()
 
         self.f_info = ctk.CTkFrame(self.v_prov, corner_radius=10, fg_color="#1f538d")
         self.f_info.pack(fill="x", padx=15, pady=(15, 5))
@@ -1002,55 +1006,40 @@ class VentanaEtapaProveedores:
         except Exception:
             pass
 
-    # 🚀 BUSCADOR INTELIGENTE DE CATEGORÍAS (TILDES, MULTIPLES COLUMNAS, CACHE FRESCA)
+    # 🚀 BUSCADOR INTELIGENTE EN SEGUNDO PLANO (SIN CONGELAR)
     def filtrar_proveedores_por_categoria(self, choice=None):
-        cat_sel = str(self.cmb_cat_e.get()).strip().replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
-        clave_cache = "lista_proveedores_texto_completo_v2" 
-        lista_completa = cache_sistema.obtener(clave_cache)
+        cat_sel = str(self.cmb_cat_e.get()).strip()
+        self.cmb_p_list.set("Cargando...")
         
-        if lista_completa is not None:
-            self._filtrar_y_aplicar(lista_completa, cat_sel)
-        else:
-            self.cmb_p_list.set("Cargando...")
-            def tarea_provs():
-                data = []
+        def proceso_pesado():
+            clave_cache = "lista_proveedores_texto_completo_v2"
+            lista = cache_sistema.obtener(clave_cache)
+            
+            if not lista:
                 conn = conectar_db(silencioso=True)
                 if conn:
                     try:
                         cursor = conn.cursor()
-                        # 🚀 TRUCO POSTGRESQL: t::text convierte TODA la fila en un solo texto.
-                        # Así busca en rubro, categoría, notas, servicios, etc. sin importar cómo se llame la columna.
                         cursor.execute("SELECT nombre, t::text FROM proveedores t ORDER BY nombre ASC")
-                        data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
-                        cache_sistema.guardar(clave_cache, data)
+                        lista = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
+                        cache_sistema.guardar(clave_cache, lista)
                     except: pass
                     finally: liberar_conexion(conn)
-                if hasattr(self, 'root') and self.v_prov.winfo_exists():
-                    self.root.after(0, lambda: self._filtrar_y_aplicar(data, cat_sel))
-            threading.Thread(target=tarea_provs, daemon=True).start()
 
-    def _filtrar_y_aplicar(self, lista_completa, cat_sel):
-        if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return
-        
-        def normalizar(t):
-            if not t: return ""
-            return ''.join(c for c in unicodedata.normalize('NFD', str(t).lower().strip()) if unicodedata.category(c) != 'Mn')
+            if not lista: lista = []
 
-        prov_actual = self.cmb_p_list.get() 
-        if not cat_sel or cat_sel == "No hay categorias disponibles":
-            lista = ["--- Seleccione Proveedor ---"] + [n for n, c in lista_completa]
-        else:
+            def normalizar(t):
+                if not t: return ""
+                return ''.join(c for c in unicodedata.normalize('NFD', str(t).lower().strip()) if unicodedata.category(c) != 'Mn')
+
             cat_norm = normalizar(cat_sel)
-            provs_filtrados = []
-            
-            # Palabras clave de 3 o más letras (ej: "Luz", "Gas", "DJs")
             palabras_clave = [p for p in cat_norm.split() if len(p) >= 3]
-            if not palabras_clave: palabras_clave = [cat_norm] 
-            
-            for n, c in lista_completa:
+            if not palabras_clave: palabras_clave = [cat_norm]
+
+            provs_filtrados = []
+            for n, c in lista:
                 c_norm = normalizar(c)
                 match = False
-                
                 if cat_norm in c_norm:
                     match = True
                 else:
@@ -1058,23 +1047,28 @@ class VentanaEtapaProveedores:
                         if p in c_norm:
                             match = True
                             break
-                            
                 if match:
                     provs_filtrados.append(n)
-            
-            # Eliminar duplicados manteniendo orden
+
             provs_filtrados = list(dict.fromkeys(provs_filtrados))
-            
             if provs_filtrados:
-                lista = ["--- Seleccione Proveedor ---"] + provs_filtrados
+                lista_final = ["--- Seleccione Proveedor ---"] + provs_filtrados
             else:
-                lista = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista_completa]
-                
-        self.cmb_p_list.configure(values=lista)
-        if prov_actual in lista and "Seleccione" not in prov_actual:
+                lista_final = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista]
+
+            if hasattr(self, 'root') and self.v_prov.winfo_exists():
+                self.root.after(0, lambda: self._actualizar_ui_combo(lista_final))
+
+        threading.Thread(target=proceso_pesado, daemon=True).start()
+
+    def _actualizar_ui_combo(self, lista_final):
+        if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return
+        prov_actual = self.cmb_p_list.get()
+        self.cmb_p_list.configure(values=lista_final)
+        if prov_actual in lista_final and "Seleccione" not in prov_actual:
             self.cmb_p_list.set(prov_actual)
         else:
-            self.cmb_p_list.set(lista[0])
+            self.cmb_p_list.set(lista_final[0])
 
     # =======================================================
     # OPERACIONES DE MATRIZ (CON BITÁCORA)

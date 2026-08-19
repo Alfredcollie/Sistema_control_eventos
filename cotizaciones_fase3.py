@@ -15,6 +15,7 @@ import re
 import json
 import threading
 import importlib
+import unicodedata
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
@@ -552,7 +553,7 @@ class VentanaEtapaProveedores:
             try:
                 try:
                     import final_cotizaciones as motor_pdf
-                    importlib.reload(motor_pdf) # 🚀 FIX CACHÉ DE PYTHON
+                    importlib.reload(motor_pdf) 
                 except Exception:
                     import cotizaciones as motor_pdf
                     importlib.reload(motor_pdf)
@@ -1001,6 +1002,7 @@ class VentanaEtapaProveedores:
         except Exception:
             pass
 
+    # 🚀 BUSCADOR INTELIGENTE DE CATEGORÍAS
     def filtrar_proveedores_por_categoria(self, choice=None):
         cat_sel = str(self.cmb_cat_e.get()).strip().replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
         clave_cache = "lista_proveedores_completos_con_cat"
@@ -1017,7 +1019,15 @@ class VentanaEtapaProveedores:
                     try:
                         cursor = conn.cursor()
                         try:
-                            cursor.execute("SELECT nombre, categoria FROM proveedores ORDER BY nombre ASC")
+                            # 🚀 MEGA FILTRO: Buscamos en todas las columnas posibles (categoria, rubro, etc)
+                            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='proveedores' AND column_name IN ('categoria', 'categorias', 'rubro', 'servicios')")
+                            cols = [row[0] for row in cursor.fetchall()]
+                            if cols:
+                                cols_str = ", ".join(cols)
+                                cursor.execute(f"SELECT nombre, CONCAT_WS(', ', {cols_str}) FROM proveedores ORDER BY nombre ASC")
+                            else:
+                                cursor.execute("SELECT nombre, categoria FROM proveedores ORDER BY nombre ASC")
+                                
                             data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
                         except Exception:
                             conn.rollback()
@@ -1028,6 +1038,7 @@ class VentanaEtapaProveedores:
                                 conn.rollback()
                                 cursor.execute("SELECT nombre FROM proveedores ORDER BY nombre ASC")
                                 data = [(str(r[0]).strip(), "") for r in cursor.fetchall() if r[0]]
+                                
                         cache_sistema.guardar(clave_cache, data)
                     except: pass
                     finally: liberar_conexion(conn)
@@ -1037,15 +1048,49 @@ class VentanaEtapaProveedores:
 
     def _filtrar_y_aplicar(self, lista_completa, cat_sel):
         if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return
+        
+        def normalizar(t):
+            if not t: return ""
+            return ''.join(c for c in unicodedata.normalize('NFD', str(t).lower().strip()) if unicodedata.category(c) != 'Mn')
+
         prov_actual = self.cmb_p_list.get() 
         if not cat_sel or cat_sel == "No hay categorias disponibles":
             lista = ["--- Seleccione Proveedor ---"] + [n for n, c in lista_completa]
         else:
-            provs_filtrados = [n for n, c in lista_completa if cat_sel.lower() in c.lower()]
+            cat_norm = normalizar(cat_sel)
+            provs_filtrados = []
+            
+            # Extraemos palabras clave (ej: "Equipos de Audio" -> ["equipos", "audio"])
+            palabras_clave = [p for p in cat_norm.split() if len(p) > 3]
+            
+            for n, c in lista_completa:
+                c_norm = normalizar(c)
+                match = False
+                
+                # 1. Coincidencia exacta o parcial (ej: "audio" in "audio e iluminación")
+                if cat_norm in c_norm:
+                    match = True
+                # 2. Coincidencia inversa (ej: "audio e iluminación" in "audio")
+                elif c_norm and c_norm in cat_norm:
+                    match = True
+                # 3. Coincidencia por palabras clave
+                else:
+                    for p in palabras_clave:
+                        if p in c_norm:
+                            match = True
+                            break
+                            
+                if match:
+                    provs_filtrados.append(n)
+            
+            # Eliminar duplicados manteniendo orden
+            provs_filtrados = list(dict.fromkeys(provs_filtrados))
+            
             if provs_filtrados:
                 lista = ["--- Seleccione Proveedor ---"] + provs_filtrados
             else:
                 lista = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista_completa]
+                
         self.cmb_p_list.configure(values=lista)
         if prov_actual in lista and "Seleccione" not in prov_actual:
             self.cmb_p_list.set(prov_actual)

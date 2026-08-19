@@ -10,6 +10,7 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 - FIX: Logo adaptado al ancho de la hoja (borde a borde), respetando 
   estrictamente los márgenes laterales.
 - FIX: Términos y Condiciones cargados desde Configuración Global.
+- FIX: Exoneración de Fee incorporada dinámicamente.
 """
 
 import os
@@ -68,6 +69,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             for sql in (
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
             ):
                 try:
@@ -82,9 +84,11 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         fecha_actual = datetime.now().strftime("%d/%m/%Y")
         forma_pago_pdf = "50% adelantado, 50% a 30 días de la primera factura."
         moneda, simbolo_moneda, tipo_cambio_pdf = "Soles", "S/", 3.75
+        sin_fee_db = False
 
         try:
-            cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
+            # 🚀 AQUÍ LEEMOS EL VALOR DEL CHECKBOX (SIN_FEE) DESDE LA BASE DE DATOS
+            cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
             res_db = cursor.fetchone()
             if res_db:
                 cliente = str(res_db[0]).replace('{', '').replace('}', '').strip()
@@ -94,6 +98,8 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     tipo_cambio_pdf = float(res_db[3])
                 if len(res_db) > 4 and res_db[4]:
                     forma_pago_pdf = str(res_db[4]).strip()
+                if len(res_db) > 5 and res_db[5] is not None:
+                    sin_fee_db = bool(res_db[5])
             else:
                 return False, f"No se encontró el registro {codigo_cotizacion} en la tabla cotizaciones."
         except Exception:
@@ -440,33 +446,42 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
 
-        fee_produccion = subtotal_acumulado * 0.15
+        # 🚀 LÓGICA DE EXONERACIÓN DE FEE PARA EL PDF
+        fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
         total_general_soles = subtotal_acumulado + fee_produccion
         total_general_dolares = total_general_soles / tipo_cambio_pdf
 
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.85, 0.85, 0.85)
         c.line(40, y_totales + 45, 570, y_totales + 45)
+        
+        y_cursor = y_totales + 25
+        
         c.setFont("Helvetica-Bold", 9.5)
-        c.drawRightString(440, y_totales + 25, "SUB TOTAL (SOLES)")
-        c.drawRightString(440, y_totales + 8, "15% FEE PRODUCCIÓN")
-        c.drawRightString(440, y_totales - 12, "TOTAL (SOLES)")
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        c.drawRightString(440, y_cursor, "SUB TOTAL (SOLES)")
+        c.drawString(490, y_cursor, "S/")
+        c.drawRightString(565, y_cursor, f"{subtotal_acumulado:,.2f}")
+        
+        if not sin_fee_db:
+            y_cursor -= 17
+            c.drawRightString(440, y_cursor, "15% FEE PRODUCCIÓN")
+            c.drawString(490, y_cursor, "S/")
+            c.drawRightString(565, y_cursor, f"{fee_produccion:,.2f}")
+            
+        y_cursor -= 20
+        c.setFont("Helvetica-Bold", 11)
+        c.drawRightString(440, y_cursor, "TOTAL (SOLES)")
+        c.drawString(490, y_cursor, "S/")
+        c.drawRightString(565, y_cursor, f"{total_general_soles:,.2f}")
+        
+        y_cursor -= 20
         c.setFont("Helvetica-Bold", 10.5)
         c.setFillColorRGB(*rgb_primario)
-        c.drawRightString(440, y_totales - 32, "TOTAL EQUIVALENTE (DÓLARES)")
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.setFont("Helvetica-Bold", 9.5)
-        c.drawString(490, y_totales + 25, "S/")
-        c.drawRightString(565, y_totales + 25, f"{subtotal_acumulado:,.2f}")
-        c.drawString(490, y_totales + 8, "S/")
-        c.drawRightString(565, y_totales + 8, f"{fee_produccion:,.2f}")
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(490, y_totales - 12, "S/")
-        c.drawRightString(565, y_totales - 12, f"{total_general_soles:,.2f}")
-        c.setFillColorRGB(*rgb_primario)
+        c.drawRightString(440, y_cursor, "TOTAL EQUIVALENTE (DÓLARES)")
         c.setFont("Helvetica-Bold", 12)
-        c.drawString(475, y_totales - 32, "$")
-        c.drawRightString(565, y_totales - 32, f"{total_general_dolares:,.2f} USD")
+        c.drawString(475, y_cursor, "$")
+        c.drawRightString(565, y_cursor, f"{total_general_dolares:,.2f} USD")
 
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColorRGB(*rgb_primario)

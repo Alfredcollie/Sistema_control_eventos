@@ -388,16 +388,16 @@ class VentanaEtapaProveedores:
 
         global _SCHEMA_F3_OK
         if not _SCHEMA_F3_OK:
-            def tarea_init():
-                global _SCHEMA_F3_OK
-                c_conn = conectar_db(silencioso=True)
-                if not c_conn: return
+            c_conn = conectar_db(silencioso=True)
+            if c_conn:
                 try:
                     c_alt = c_conn.cursor()
                     alters = [
                         "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                         "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
+                        "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
                         "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
+                        "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
                     ]
                     for sql in alters:
                         try:
@@ -405,10 +405,10 @@ class VentanaEtapaProveedores:
                             c_conn.commit()
                         except: c_conn.rollback()
                     _SCHEMA_F3_OK = True
-                except Exception: pass
-                finally: liberar_conexion(c_conn)
-                
-            threading.Thread(target=tarea_init, daemon=True).start()
+                except Exception: 
+                    pass
+                finally: 
+                    liberar_conexion(c_conn)
 
         self.f_info = ctk.CTkFrame(self.v_prov, corner_radius=10, fg_color="#1f538d")
         self.f_info.pack(fill="x", padx=15, pady=(15, 5))
@@ -508,27 +508,34 @@ class VentanaEtapaProveedores:
         self.ent_forma_pago.bind("<Return>", lambda e: self.guardar_ajustes_globales_db())
 
         self.cargando_ventana = False
-        self.cargar_ajustes_globales()
 
         f_notas_wrapper = ctk.CTkFrame(self.f_inputs, fg_color="transparent")
-        f_notas_wrapper.grid(row=4, column=0, columnspan=4, rowspan=4, sticky="nw", pady=(12, 10), padx=15)
-        f_header_notas = ctk.CTkFrame(f_notas_wrapper, fg_color="transparent")
-        f_header_notas.pack(fill="x", side="top", pady=(0, 2))
-        ctk.CTkLabel(f_header_notas, text="Solicitudes al Proveedor (Máx 15 líneas):", font=("Arial", 12, "bold")).pack(side="left", anchor="w")
+        f_notas_wrapper.grid(row=4, column=0, columnspan=5, rowspan=4, sticky="nw", pady=(12, 10), padx=15)
         
-        self.txt_p_notes = ctk.CTkTextbox(f_notas_wrapper, width=480, height=130, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
-        
-        f_estilos = crear_barra_formato(f_header_notas, self.txt_p_notes)
+        f_nc = ctk.CTkFrame(f_notas_wrapper, fg_color="transparent")
+        f_nc.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        f_header_nc = ctk.CTkFrame(f_nc, fg_color="transparent")
+        f_header_nc.pack(fill="x", side="top", pady=(0, 2))
+        ctk.CTkLabel(f_header_nc, text="Notas al Cliente (PDF/Excel):", font=("Arial", 11, "bold")).pack(side="left", anchor="w")
+        self.txt_p_notes = ctk.CTkTextbox(f_nc, width=280, height=100, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
+        f_estilos = crear_barra_formato(f_header_nc, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
         self.txt_p_notes.pack(fill="both", expand=True, side="top")
-        self.lbl_p_contador = ctk.CTkLabel(self.f_inputs, text="Caracteres restantes: 750", font=("Arial", 10), text_color="#555")
-        self.lbl_p_contador.grid(row=7, column=3, sticky="se", padx=10, pady=2)
         
-        self.txt_p_notes._textbox.bind("<KeyRelease>", lambda e: self.lbl_p_contador.configure(text=f"Caracteres restantes: {max(0, 750 - len(self.txt_p_notes.get('1.0', 'end-1c')))}"))
+        f_ni = ctk.CTkFrame(f_notas_wrapper, fg_color="transparent")
+        f_ni.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        ctk.CTkLabel(f_ni, text="Notas Internas (Solo Matriz):", font=("Arial", 11, "bold"), text_color="#D32F2F").pack(anchor="w", pady=(0, 2))
+        self.txt_internal_notes = ctk.CTkTextbox(f_ni, width=280, height=100, font=("Helvetica", 11), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+        self.txt_internal_notes.pack(fill="both", expand=True, side="top")
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
         f_totales_centro.grid(row=5, column=5, columnspan=2, rowspan=3, sticky="nsew", padx=(15, 15), pady=(5, 12))
         ctk.CTkLabel(f_totales_centro, text="Resumen Económico Contable", font=("Arial", 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(10, 5))
+        
+        self.var_sin_fee = tk.BooleanVar(value=False)
+        self.chk_sin_fee = ctk.CTkCheckBox(f_totales_centro, text="Exonerar Fee Producción (15%)", variable=self.var_sin_fee, command=self.evento_toggle_fee, text_color="#D32F2F", fg_color="#D32F2F", hover_color="#B71C1C")
+        self.chk_sin_fee.pack(anchor="w", padx=15, pady=(0, 5))
+
         self.lbl_tot_sub = ctk.CTkLabel(f_totales_centro, text="Total Venta al Cliente: S/ 0.00", font=("Arial", 12, "bold"), text_color="#111111")
         self.lbl_tot_sub.pack(anchor="w", padx=15, pady=2)
         self.lbl_tot_igv = ctk.CTkLabel(f_totales_centro, text="15% Fee Producción: S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
@@ -538,13 +545,17 @@ class VentanaEtapaProveedores:
         self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
         self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(5, 10))
 
+        self.cargar_ajustes_globales()
+
         def disparar_exportacion_pdf_alberto():
             self.guardar_ajustes_globales_db()
             try:
                 try:
                     import final_cotizaciones as motor_pdf
+                    importlib.reload(motor_pdf) # 🚀 FIX CACHÉ DE PYTHON
                 except Exception:
                     import cotizaciones as motor_pdf
+                    importlib.reload(motor_pdf)
                     
                 conn_pdf = conectar_db(silencioso=True)
                 if not conn_pdf: return
@@ -585,19 +596,28 @@ class VentanaEtapaProveedores:
         self.f_grid = ctk.CTkFrame(self.v_prov, corner_radius=10)
         self.f_grid.pack(fill="both", expand=True, padx=15, pady=(5, 10))
         ctk.CTkLabel(self.f_grid, text="Matriz Comparativa y Margen Final de Venta", font=("Arial", 14, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=10)
+        
         f_headers = ctk.CTkFrame(self.f_grid, fg_color="#e0e0e0", corner_radius=5)
         f_headers.pack(fill="x", padx=10, pady=(0, 5))
-        anchos = [("ID", 35), ("Categoría", 160), ("Proveedor", 160), ("Cant.", 55), ("Precio Lista", 90), ("Con Dscto", 90), ("P. Venta Tot.", 110)]
+        anchos = [("ID", 30), ("Categoría", 130), ("Proveedor", 130), ("Cant.", 40), ("P. Lista", 70), ("Dscto", 60), ("P. Venta", 80)]
         for text, w in anchos:
             ctk.CTkLabel(f_headers, text=text, font=("Arial", 11, "bold"), width=w, anchor="center").pack(side="left", padx=2, pady=5)
-        ctk.CTkLabel(f_headers, text="Solicitudes / Notas", font=("Arial", 11, "bold"), anchor="center").pack(side="left", fill="x", expand=True, padx=2, pady=5)
+        
+        f_h_notas = ctk.CTkFrame(f_headers, fg_color="transparent")
+        f_h_notas.pack(side="left", fill="x", expand=True, padx=2)
+        ctk.CTkLabel(f_h_notas, text="Notas Cliente", font=("Arial", 11, "bold"), anchor="center").pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_h_notas, text="Notas Internas", font=("Arial", 11, "bold"), text_color="#D32F2F", anchor="center").pack(side="left", fill="x", expand=True)
+        
         self.f_rows_dinamicas = ctk.CTkScrollableFrame(self.f_grid, fg_color="transparent")
         self.f_rows_dinamicas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.filtrar_proveedores_por_categoria()
         self.cargar_grid_proveedores()
 
-    # 🚀 EXPORTADOR EXCEL INTERACTIVO LIMPIO (CANTIDAD, NOTAS, P.UNIT, SUBTOTAL)
+    def evento_toggle_fee(self):
+        self.guardar_ajustes_globales_db()
+        self._recalcular_con_retraso()
+
     def exportar_matriz_excel_interactivo(self):
         try:
             import openpyxl
@@ -610,7 +630,6 @@ class VentanaEtapaProveedores:
         if not self.conn: return
 
         try:
-            # Intentar obtener el color principal y la ruta del logo desde la configuración
             config_data = {}
             try:
                 with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
@@ -623,6 +642,11 @@ class VentanaEtapaProveedores:
             logo_ruta = config_data.get("ruta_logo_cotizacion", "")
 
             c = self.conn.cursor()
+            
+            c.execute("SELECT sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+            res_fee = c.fetchone()
+            sin_fee_db = bool(res_fee[0]) if res_fee and res_fee[0] is not None else False
+            
             c.execute("SELECT cantidad, notes_negociacion, precio_final_venta FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (self.codigo_cot,))
             registros = c.fetchall()
 
@@ -647,17 +671,13 @@ class VentanaEtapaProveedores:
                                  top=Side(style='thin', color="DDDDDD"), 
                                  bottom=Side(style='thin', color="DDDDDD"))
 
-            # --- INCORPORAR LOGO COMO BANNER SUPERIOR ---
             if logo_ruta and os.path.exists(logo_ruta):
                 try:
                     img = OpenpyxlImage(logo_ruta)
                     aspect_ratio = img.width / img.height
-                    
-                    # Ancho total de columnas A-D es aprox 830 píxeles
                     nuevo_ancho = 830
                     img.width = nuevo_ancho
                     img.height = nuevo_ancho / aspect_ratio
-                    
                     ws.add_image(img, 'A1')
                     ws.row_dimensions[1].height = (img.height * 0.75) + 5
                 except Exception:
@@ -665,7 +685,6 @@ class VentanaEtapaProveedores:
             else:
                 ws.row_dimensions[1].height = 20
 
-            # --- DATOS DE LA COTIZACION JUSTO DEBAJO DEL LOGO ---
             ws.merge_cells('A2:D2')
             ws['A2'] = f"COTIZACIÓN N° {self.codigo_cot}"
             ws['A2'].font = Font(size=14, bold=True, color=color_primario)
@@ -690,9 +709,8 @@ class VentanaEtapaProveedores:
             ws.row_dimensions[3].height = 20
             ws.row_dimensions[4].height = 20
             ws.row_dimensions[5].height = 20
-            ws.row_dimensions[6].height = 10 # Espaciador
+            ws.row_dimensions[6].height = 10 
 
-            # --- ENCABEZADOS DE TABLA (SOLO 4 COLUMNAS) ---
             headers = ["Cantidad", "Notas Adicionales", "P. Unitario", "Subtotal Fila"]
             row_idx = 7
             
@@ -703,7 +721,6 @@ class VentanaEtapaProveedores:
                 cell.alignment = Alignment(horizontal="center", vertical="center")
                 cell.border = border_thin
 
-            # --- FILAS DE DATOS ---
             row_idx = 8
             for r in registros:
                 cant = int(r[0]) if r[0] else 1
@@ -711,19 +728,16 @@ class VentanaEtapaProveedores:
                 precio_tot = float(r[2])
                 p_unit = precio_tot / cant if cant else 0.0
 
-                # 1. Cantidad
                 c_cant = ws.cell(row=row_idx, column=1, value=cant)
                 c_cant.protection = unlocked
                 c_cant.fill = fill_editable
                 c_cant.alignment = Alignment(horizontal="center", vertical="center")
                 c_cant.border = border_thin
 
-                # 2. Notas Adicionales
                 c_notas = ws.cell(row=row_idx, column=2, value=notas)
                 c_notas.alignment = Alignment(wrap_text=True, vertical="center")
                 c_notas.border = border_thin
 
-                # 3. P. Unitario
                 c_price = ws.cell(row=row_idx, column=3, value=p_unit)
                 c_price.protection = unlocked
                 c_price.fill = fill_editable
@@ -731,7 +745,6 @@ class VentanaEtapaProveedores:
                 c_price.alignment = Alignment(vertical="center")
                 c_price.border = border_thin
 
-                # 4. Subtotal Fila
                 c_subtot = ws.cell(row=row_idx, column=4, value=f"=A{row_idx}*C{row_idx}")
                 c_subtot.number_format = '"S/." #,##0.00'
                 c_subtot.font = Font(bold=True)
@@ -740,33 +753,38 @@ class VentanaEtapaProveedores:
 
                 row_idx += 1
 
-            # --- TOTALES ---
             row_idx += 1
+            subtotal_row = row_idx
             ws.cell(row=row_idx, column=3, value="SUBTOTAL:").font = Font(bold=True)
             ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
             ws.cell(row=row_idx, column=4, value=f"=SUM(D8:D{row_idx-2})").number_format = '"S/." #,##0.00'
             ws.cell(row=row_idx, column=4).font = Font(bold=True)
 
-            row_idx += 1
-            ws.cell(row=row_idx, column=3, value="FEE (15%):").font = Font(bold=True)
-            ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
-            ws.cell(row=row_idx, column=4, value=f"=D{row_idx-1}*0.15").number_format = '"S/." #,##0.00'
-            ws.cell(row=row_idx, column=4).font = Font(bold=True)
+            if not sin_fee_db:
+                row_idx += 1
+                fee_row = row_idx
+                ws.cell(row=row_idx, column=3, value="FEE (15%):").font = Font(bold=True)
+                ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+                ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}*0.15").number_format = '"S/." #,##0.00'
+                ws.cell(row=row_idx, column=4).font = Font(bold=True)
 
             row_idx += 1
             ws.cell(row=row_idx, column=3, value="GRAN TOTAL:").font = Font(bold=True, color=color_primario)
             ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
-            c_gran = ws.cell(row=row_idx, column=4, value=f"=D{row_idx-2}+D{row_idx-1}")
+            
+            if not sin_fee_db:
+                c_gran = ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}+D{fee_row}")
+            else:
+                c_gran = ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}")
+                
             c_gran.number_format = '"S/." #,##0.00'
             c_gran.font = Font(bold=True, color=color_primario)
 
-            # --- ANCHOS DE COLUMNAS ---
-            ws.column_dimensions['A'].width = 15  # Cantidad
-            ws.column_dimensions['B'].width = 65  # Notas Adicionales
-            ws.column_dimensions['C'].width = 18  # P. Unitario
-            ws.column_dimensions['D'].width = 20  # Subtotal Fila
+            ws.column_dimensions['A'].width = 15  
+            ws.column_dimensions['B'].width = 65  
+            ws.column_dimensions['C'].width = 18  
+            ws.column_dimensions['D'].width = 20  
 
-            # --- PROTECCIÓN DE HOJA ---
             ws.protection.sheet = True
             ws.protection.password = "blackcube2026" 
 
@@ -782,7 +800,6 @@ class VentanaEtapaProveedores:
             
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar a Excel:\n{str(e)}", parent=self.v_prov)
-
 
     # =======================================================
     # TIPO DE CAMBIO EN VIVO (EN SEGUNDO PLANO, NO CONGELA)
@@ -829,12 +846,14 @@ class VentanaEtapaProveedores:
     def cargar_ajustes_globales(self):
         try:
             c = self.conn.cursor()
-            c.execute("SELECT tipo_cambio, forma_pago FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+            c.execute("SELECT tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
             res = c.fetchone()
-            self.ent_tc.delete(0, tk.END)
-            self.ent_tc.insert(0, str(res[0]) if res and res[0] and float(res[0]) > 0 else "3.750")
-            self.ent_forma_pago.delete(0, tk.END)
-            self.ent_forma_pago.insert(0, str(res[1]) if res and res[1] else "50% adelantado, 50% a 30 días de la primera factura.")
+            if res:
+                self.ent_tc.delete(0, tk.END)
+                self.ent_tc.insert(0, str(res[0]) if res[0] and float(res[0]) > 0 else "3.750")
+                self.ent_forma_pago.delete(0, tk.END)
+                self.ent_forma_pago.insert(0, str(res[1]) if res[1] else "50% adelantado, 50% a 30 días de la primera factura.")
+                self.var_sin_fee.set(bool(res[2]) if res[2] is not None else False)
         except Exception:
             try:
                 self.ent_tc.insert(0, "3.750")
@@ -855,7 +874,8 @@ class VentanaEtapaProveedores:
                 except ValueError:
                     pass
             val_forma_pago = self.ent_forma_pago.get().strip()
-            c.execute("UPDATE cotizaciones SET tipo_cambio = %s, forma_pago = %s WHERE codigo_cotizacion = %s", (val_tc, val_forma_pago, self.codigo_cot))
+            val_sin_fee = self.var_sin_fee.get()
+            c.execute("UPDATE cotizaciones SET tipo_cambio = %s, forma_pago = %s, sin_fee = %s WHERE codigo_cotizacion = %s", (val_tc, val_forma_pago, val_sin_fee, self.codigo_cot))
             self.conn.commit()
         except Exception:
             pass
@@ -902,13 +922,22 @@ class VentanaEtapaProveedores:
                 return
         except Exception:
             return
-        fee = subtotal * 0.15
+            
+        aplica_fee = not self.var_sin_fee.get()
+        fee = subtotal * 0.15 if aplica_fee else 0.0
+        
         try:
             tc_val = float(self.ent_tc.get())
         except Exception:
             tc_val = tc if tc else 3.75
+            
         self.lbl_tot_sub.configure(text=f"Total Venta al Cliente: S/ {subtotal:,.2f}")
-        self.lbl_tot_igv.configure(text=f"15% Fee Producción: S/ {fee:,.2f}")
+        
+        if aplica_fee:
+            self.lbl_tot_igv.configure(text=f"15% Fee Producción: S/ {fee:,.2f}")
+        else:
+            self.lbl_tot_igv.configure(text=f"Fee Producción: S/ 0.00 (Exonerado)")
+            
         self.lbl_tot_gran.configure(text=f"Gran Total: S/ {subtotal + fee:,.2f}")
         self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
 
@@ -1051,13 +1080,15 @@ class VentanaEtapaProveedores:
         t_ganancia_db = "Monto Fijo" if self.cmb_tipo_ganancia.get() == "Monto Fijo" else "Porcentaje"
         
         notes = extraer_texto_con_formato(self.txt_p_notes).strip()
+        internal_notes = self.txt_internal_notes.get("1.0", tk.END).strip()
+        
         c = self.conn.cursor()
         try:
             c.execute("""
                 INSERT INTO cotizacion_proveedores 
-                (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, cantidad, dias_credito) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (self.codigo_cot, cat, prov, pl, pd, t_ganancia_db, vg, p_final_venta, notes, cant, dias_cred))
+                (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (self.codigo_cot, cat, prov, pl, pd, t_ganancia_db, vg, p_final_venta, notes, internal_notes, cant, dias_cred))
             self.conn.commit()
             cache_sistema.invalidar()
             registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Agregó proveedor '{prov}' a Cotización N° {self.codigo_cot}")
@@ -1071,6 +1102,7 @@ class VentanaEtapaProveedores:
             self.ent_val_g.delete(0, tk.END)
             self.ent_val_g.insert(0, "0.00")
             self.txt_p_notes.delete("1.0", tk.END)
+            self.txt_internal_notes.delete("1.0", tk.END)
             self.cargar_grid_proveedores()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo asignar al proveedor:\n{e}", parent=self.v_prov)
@@ -1102,47 +1134,56 @@ class VentanaEtapaProveedores:
             return
         id_mat = self.fila_matriz_seleccionada[0]
         c = self.conn.cursor()
-        c.execute("SELECT precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, notes_negociacion, cantidad FROM cotizacion_proveedores WHERE id=%s", (id_mat,))
+        c.execute("SELECT precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, notes_negociacion, notas_internas, cantidad FROM cotizacion_proveedores WHERE id=%s", (id_mat,))
         datos = c.fetchone()
         if not datos:
             return
         v_m = ctk.CTkToplevel(self.v_prov)
         v_m.title("Modificar Costos")
-        v_m.geometry("480x600")
+        v_m.geometry("550x720")
         v_m.grab_set()
         f_m = ctk.CTkFrame(v_m, corner_radius=10)
         f_m.pack(fill="both", expand=True, padx=15, pady=15)
+        
         ctk.CTkLabel(f_m, text="Cantidad:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_cant = ctk.CTkEntry(f_m, width=100)
         ent_m_cant.pack(anchor="w", padx=10, pady=2)
-        ent_m_cant.insert(0, str(datos[5] if len(datos) > 5 and datos[5] else 1))
+        ent_m_cant.insert(0, str(datos[6] if len(datos) > 6 and datos[6] else 1))
         
         ctk.CTkLabel(f_m, text="Precio Lista (S/.):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_lista = ctk.CTkEntry(f_m, width=200)
         ent_m_lista.pack(anchor="w", padx=10, pady=2)
         ent_m_lista.insert(0, f"{datos[0]:.2f}")
+        
         ctk.CTkLabel(f_m, text="Precio con Descuento (S/.):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_desc = ctk.CTkEntry(f_m, width=200)
         ent_m_desc.pack(anchor="w", padx=10, pady=2)
         ent_m_desc.insert(0, f"{datos[1]:.2f}")
+        
         ctk.CTkLabel(f_m, text="Tipo de Ganancia:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         cmb_m_tipo = ctk.CTkComboBox(f_m, values=["Monto Fijo", "Porcentaje (%)"], state="readonly", width=200)
         cmb_m_tipo.pack(anchor="w", padx=10, pady=2)
         cmb_m_tipo.set(datos[2])
+        
         ctk.CTkLabel(f_m, text="Valor de Ganancia:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_val = ctk.CTkEntry(f_m, width=200)
         ent_m_val.pack(anchor="w", padx=10, pady=2)
         ent_m_val.insert(0, f"{datos[3]:.2f}")
+        
         f_m_header = ctk.CTkFrame(f_m, fg_color="transparent")
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
-        ctk.CTkLabel(f_m_header, text="Solicitudes / Notas:", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(f_m_header, text="Notas al Cliente:", font=("Arial", 12, "bold")).pack(side="left")
         
-        txt_m_notas = ctk.CTkTextbox(f_m, width=450, height=80, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
-        
+        txt_m_notas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
         txt_m_notas.pack(fill="x", padx=10, pady=2)
         insertar_texto_formateado(txt_m_notas, str(datos[4]) if datos[4] else "")
+
+        ctk.CTkLabel(f_m, text="Notas Internas (Solo Matriz):", font=("Arial", 12, "bold"), text_color="#D32F2F").pack(anchor="w", padx=10, pady=(10, 2))
+        txt_m_notas_internas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 11), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+        txt_m_notas_internas.pack(fill="x", padx=10, pady=2)
+        txt_m_notas_internas.insert("1.0", str(datos[5]) if datos[5] else "")
 
         def ejecutar_update_matriz():
             try:
@@ -1155,9 +1196,10 @@ class VentanaEtapaProveedores:
             p_unid = ml + mv if cmb_m_tipo.get() == "Monto Fijo" else ml * (1 + (mv / 100))
             p_final = p_unid * mc
             notes_update = extraer_texto_con_formato(txt_m_notas).strip()
+            internal_notes_update = txt_m_notas_internas.get("1.0", tk.END).strip()
             
             c_upd = self.conn.cursor()
-            c_upd.execute("UPDATE cotizacion_proveedores SET precio_lista=%s, precio_descuento=%s, tipo_ganancia=%s, valor_ganancia=%s, precio_final_venta=%s, notes_negociacion=%s, cantidad=%s, dias_credito=%s WHERE id=%s", (ml, md, cmb_m_tipo.get(), mv, p_final, notes_update, mc, m_dcred, id_mat))
+            c_upd.execute("UPDATE cotizacion_proveedores SET precio_lista=%s, precio_descuento=%s, tipo_ganancia=%s, valor_ganancia=%s, precio_final_venta=%s, notes_negociacion=%s, notas_internas=%s, cantidad=%s, dias_credito=%s WHERE id=%s", (ml, md, cmb_m_tipo.get(), mv, p_final, notes_update, internal_notes_update, mc, m_dcred, id_mat))
             self.conn.commit()
             cache_sistema.invalidar()
             registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Modificó márgenes en ítem de Cotización N° {self.codigo_cot}")
@@ -1177,7 +1219,7 @@ class VentanaEtapaProveedores:
         self.fila_matriz_seleccionada = None
         self.lista_widgets_filas = []
         c = self.conn.cursor()
-        c.execute("SELECT id, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, cantidad FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (self.codigo_cot,))
+        c.execute("SELECT id, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, notas_internas, cantidad FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (self.codigo_cot,))
         registros = c.fetchall()
         if not registros:
             self.actualizar_bloque_totales_pantalla()
@@ -1185,7 +1227,7 @@ class VentanaEtapaProveedores:
             return
         self.actualizar_bloque_totales_pantalla()
         for i, r in enumerate(registros, start=1):
-            id_real, cat_r, prov_r, pl_r, pd_r, pf_r, notas_r, cant_r = r[0], r[1], r[2], r[3], r[4], r[5], r[6], (r[7] if len(r) > 7 and r[7] else 1)
+            id_real, cat_r, prov_r, pl_r, pd_r, pf_r, notas_r, notas_int_r, cant_r = r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], (r[8] if len(r) > 8 and r[8] else 1)
             cat_limpia = str(cat_r).strip("() '\",")
             prov_limpio = str(prov_r).strip("() '\",")
             data_pack = (id_real, cat_limpia, prov_limpio, pl_r, pd_r, pf_r, notas_r, cant_r)
@@ -1197,36 +1239,48 @@ class VentanaEtapaProveedores:
                     child.configure(fg_color="#ffffff")
                     for sub in child.winfo_children():
                         if isinstance(sub, ctk.CTkTextbox):
+                            if "FFFDE7" in sub.cget("fg_color"): continue 
                             sub.configure(fg_color="#ffffff")
                 f.configure(fg_color="#cfe2ff")
                 for sub in f.winfo_children():
                     if isinstance(sub, ctk.CTkTextbox):
+                        if "FFFDE7" in sub.cget("fg_color"): continue 
                         sub.configure(fg_color="#cfe2ff")
                 self.fila_matriz_seleccionada = d
 
             f_row.bind("<Button-1>", marcar_seleccion_f)
-            lbl_id = ctk.CTkLabel(f_row, text=str(i), font=("Arial", 11), width=35, anchor="center")
+            lbl_id = ctk.CTkLabel(f_row, text=str(i), font=("Arial", 11), width=30, anchor="center")
             lbl_id.pack(side="left", padx=2, fill="y")
             lbl_id.bind("<Button-1>", marcar_seleccion_f)
-            anchos = [(cat_limpia, 160, "w"), (prov_limpio, 160, "w"), (str(cant_r), 55, "center"), (f"S/. {pl_r:.2f}", 90, "e"), (f"S/. {pd_r:.2f}", 90, "e"), (f"S/. {pf_r:.2f}", 110, "e")]
+            anchos = [(cat_limpia, 130, "w"), (prov_limpio, 130, "w"), (str(cant_r), 40, "center"), (f"S/. {pl_r:.2f}", 70, "e"), (f"S/. {pd_r:.2f}", 60, "e"), (f"S/. {pf_r:.2f}", 80, "e")]
             for text, w, align in anchos:
                 lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, anchor=align)
                 lbl.pack(side="left", padx=2, fill="y")
                 lbl.bind("<Button-1>", marcar_seleccion_f)
+            
+            # --- NOTAS DEL CLIENTE ---
             texto_nota = str(notas_r) if notas_r else "-"
             conteo_lineas = texto_nota.count('\n') + 1
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
                 
             txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
-            
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)
-            txt_notas.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+            txt_notas.pack(side="left", fill="both", expand=True, padx=2, pady=5)
             
             txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
             txt_notas._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
             
+            # --- NOTAS INTERNAS ---
+            texto_nota_int = str(notas_int_r) if notas_int_r else ""
+            txt_notas_int = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+            txt_notas_int.insert("1.0", texto_nota_int)
+            txt_notas_int.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+            
+            txt_notas_int.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
+            txt_notas_int._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
+
             f_row.data_pack = data_pack
             self.lista_widgets_filas.append(f_row)
             if id_a_seleccionar == id_real:
@@ -1251,12 +1305,12 @@ class VentanaEtapaProveedores:
         id_act, id_dest = widget_sel.data_pack[0], self.lista_widgets_filas[idx_dest].data_pack[0]
         c = self.conn.cursor()
         try:
-            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_act,))
+            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_act,))
             d_act = c.fetchone()
-            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_dest,))
+            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_dest,))
             d_dest = c.fetchone()
             if d_act and d_dest:
-                query = "UPDATE cotizacion_proveedores SET categoria_suministro=%s, proveedor_nombre=%s, precio_lista=%s, precio_descuento=%s, precio_final_venta=%s, notes_negociacion=%s, cantidad=%s, dias_credito=%s WHERE id=%s"
+                query = "UPDATE cotizacion_proveedores SET categoria_suministro=%s, proveedor_nombre=%s, precio_lista=%s, precio_descuento=%s, precio_final_venta=%s, notes_negociacion=%s, notas_internas=%s, cantidad=%s, dias_credito=%s WHERE id=%s"
                 c.execute(query, d_dest + (id_act,))
                 c.execute(query, d_act + (id_dest,))
                 self.conn.commit()

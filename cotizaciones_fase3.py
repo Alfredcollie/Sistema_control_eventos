@@ -1002,10 +1002,10 @@ class VentanaEtapaProveedores:
         except Exception:
             pass
 
-    # 🚀 BUSCADOR INTELIGENTE DE CATEGORÍAS
+    # 🚀 BUSCADOR INTELIGENTE DE CATEGORÍAS (TILDES, MULTIPLES COLUMNAS, CACHE FRESCA)
     def filtrar_proveedores_por_categoria(self, choice=None):
         cat_sel = str(self.cmb_cat_e.get()).strip().replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
-        clave_cache = "lista_proveedores_completos_con_cat"
+        clave_cache = "lista_proveedores_texto_completo_v2" 
         lista_completa = cache_sistema.obtener(clave_cache)
         
         if lista_completa is not None:
@@ -1018,27 +1018,10 @@ class VentanaEtapaProveedores:
                 if conn:
                     try:
                         cursor = conn.cursor()
-                        try:
-                            # 🚀 MEGA FILTRO: Buscamos en todas las columnas posibles (categoria, rubro, etc)
-                            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='proveedores' AND column_name IN ('categoria', 'categorias', 'rubro', 'servicios')")
-                            cols = [row[0] for row in cursor.fetchall()]
-                            if cols:
-                                cols_str = ", ".join(cols)
-                                cursor.execute(f"SELECT nombre, CONCAT_WS(', ', {cols_str}) FROM proveedores ORDER BY nombre ASC")
-                            else:
-                                cursor.execute("SELECT nombre, categoria FROM proveedores ORDER BY nombre ASC")
-                                
-                            data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
-                        except Exception:
-                            conn.rollback()
-                            try:
-                                cursor.execute("SELECT nombre, rubro FROM proveedores ORDER BY nombre ASC")
-                                data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
-                            except Exception:
-                                conn.rollback()
-                                cursor.execute("SELECT nombre FROM proveedores ORDER BY nombre ASC")
-                                data = [(str(r[0]).strip(), "") for r in cursor.fetchall() if r[0]]
-                                
+                        # 🚀 TRUCO POSTGRESQL: t::text convierte TODA la fila en un solo texto.
+                        # Así busca en rubro, categoría, notas, servicios, etc. sin importar cómo se llame la columna.
+                        cursor.execute("SELECT nombre, t::text FROM proveedores t ORDER BY nombre ASC")
+                        data = [(str(r[0]).strip(), str(r[1]).strip() if r[1] else "") for r in cursor.fetchall() if r[0]]
                         cache_sistema.guardar(clave_cache, data)
                     except: pass
                     finally: liberar_conexion(conn)
@@ -1060,20 +1043,16 @@ class VentanaEtapaProveedores:
             cat_norm = normalizar(cat_sel)
             provs_filtrados = []
             
-            # Extraemos palabras clave (ej: "Equipos de Audio" -> ["equipos", "audio"])
-            palabras_clave = [p for p in cat_norm.split() if len(p) > 3]
+            # Palabras clave de 3 o más letras (ej: "Luz", "Gas", "DJs")
+            palabras_clave = [p for p in cat_norm.split() if len(p) >= 3]
+            if not palabras_clave: palabras_clave = [cat_norm] 
             
             for n, c in lista_completa:
                 c_norm = normalizar(c)
                 match = False
                 
-                # 1. Coincidencia exacta o parcial (ej: "audio" in "audio e iluminación")
                 if cat_norm in c_norm:
                     match = True
-                # 2. Coincidencia inversa (ej: "audio e iluminación" in "audio")
-                elif c_norm and c_norm in cat_norm:
-                    match = True
-                # 3. Coincidencia por palabras clave
                 else:
                     for p in palabras_clave:
                         if p in c_norm:

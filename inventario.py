@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-INVENTARIO.PY (ENTERPRISE EDITION)
-- Paginación Lazy Loading (50 en 50) para el Catálogo de Equipos.
-- Búsqueda Asíncrona en las 3 pestañas.
-- Caché Inteligente en Combobox de Eventos.
-- Protección del Pool de Conexiones (liberar_conexion).
-- Auto-curación síncrona en segundo plano (Corregido Scope Global).
+=========================================================
+INVENTARIO.PY (ENTERPRISE EDITION + SMART HYBRID SKU ENGINE)
+=========================================================
+Optimizaciones y Novedades:
+1. 🏷️ Generador de Código Interno Híbrido:
+   - Prefijos inteligentes según categoría (AUD-, MOB-, DEC-, ILUM-, etc.).
+   - Búsqueda de último correlativo numérico libre en BD.
+   - Botón '⚡ Auto' y libertad total para escribir códigos personalizados.
+2. ⚡ Paginación Lazy Loading (50 en 50) para el Catálogo de Equipos.
+3. 🚀 Búsqueda Asíncrona con debounce en las 3 pestañas.
+4. 💾 Caché Inteligente en Combobox de Eventos y Equipos.
+5. 🛡️ Protección de Conexiones (liberar_conexion con pool seguro).
+6. 🌐 100% Cross-Platform (macOS / Windows / Linux).
 """
 
 import os
@@ -16,15 +23,14 @@ import customtkinter as ctk
 import calendar
 import sys
 import threading
+import re
 from datetime import datetime
 import shutil
 import subprocess
 
-# 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 
-# Importamos PIL para manejar las fotos de los productos
 try:
     from PIL import Image, ImageTk
     PIL_DISPONIBLE = True
@@ -34,8 +40,8 @@ except ImportError:
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-# Variable global definida al más alto nivel
 _SCHEMA_INV_OK = False
+
 
 # =========================================================
 # 🚀 MOTOR DE CONFIGURACIÓN REGIONAL Y MULTIPLATAFORMA
@@ -45,9 +51,9 @@ def abrir_documento(ruta):
         if sys.platform == "win32":
             os.startfile(ruta)
         elif sys.platform == "darwin": 
-            subprocess.call(["open", ruta])
+            subprocess.Popen(["open", ruta])
         else: 
-            subprocess.call(["xdg-open", ruta])
+            subprocess.Popen(["xdg-open", ruta])
     except Exception as e:
         messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
 
@@ -92,7 +98,10 @@ def desformatear_numero(valor_str):
 
 def aplicar_estilo_treeview():
     style = ttk.Style()
-    style.theme_use("clam")
+    if sys.platform == "darwin":
+        style.theme_use("clam")
+    else:
+        style.theme_use("clam")
     style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", bordercolor="#e0e0e0", borderwidth=1, rowheight=26, font=("Arial", 10))
     style.map("Treeview", background=[("selected", "#1f538d")], foreground=[("selected", "#ffffff")])
     style.configure("Treeview.Heading", background="#f0f0f0", font=("Arial", 10, "bold"), bordercolor="#e0e0e0", borderwidth=1)
@@ -196,7 +205,7 @@ class CatalogoEquiposTab:
         self.ruta_imagen_actual = ""
         self.imagen_tk = None
         
-        # 🚀 VARIABLES DE PAGINACIÓN (LAZY LOADING)
+        # Paginación
         self.pagina_actual = 1
         self.registros_por_pagina = 50
         
@@ -216,19 +225,36 @@ class CatalogoEquiposTab:
         frame_split = ctk.CTkFrame(self.tab_frame, fg_color="transparent")
         frame_split.pack(fill="both", expand=True)
 
-        self.f_form = ctk.CTkScrollableFrame(frame_split, corner_radius=10, width=330, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0")
+        self.f_form = ctk.CTkScrollableFrame(frame_split, corner_radius=10, width=340, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0")
         self.f_form.pack(side="left", fill="y", padx=(0, 15))
 
-        ctk.CTkLabel(self.f_form, text="📦 Registrar Equipo", font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(15, 15))
+        ctk.CTkLabel(self.f_form, text="📦 Registrar / Editar Equipo", font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(15, 12))
 
-        self.lbl_imagen = ctk.CTkLabel(self.f_form, text="Sin Imagen", width=150, height=150, fg_color="#e0e0e0", corner_radius=10)
-        self.lbl_imagen.pack(pady=(5, 5))
+        self.lbl_imagen = ctk.CTkLabel(self.f_form, text="Sin Imagen", width=140, height=140, fg_color="#e0e0e0", corner_radius=10)
+        self.lbl_imagen.pack(pady=(2, 5))
         
-        ctk.CTkButton(self.f_form, text="📷 Cargar Foto", fg_color="#34495e", hover_color="#2c3e50", command=self.seleccionar_imagen).pack(pady=(0, 15))
+        ctk.CTkButton(self.f_form, text="📷 Cargar Foto", fg_color="#34495e", hover_color="#2c3e50", height=28, command=self.seleccionar_imagen).pack(pady=(0, 12))
 
-        ctk.CTkLabel(self.f_form, text="Código Interno:", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
-        self.ent_codigo = ctk.CTkEntry(self.f_form, placeholder_text="Ej. ILUM-001")
-        self.ent_codigo.pack(fill="x", padx=15, pady=(0, 10))
+        # ========================================================
+        # 🏷️ CAMPO DE CÓDIGO INTERNO CON GENERACIÓN HÍBRIDA
+        # ========================================================
+        ctk.CTkLabel(self.f_form, text="Código Interno (Personalizado o Auto):", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
+        f_codigo = ctk.CTkFrame(self.f_form, fg_color="transparent")
+        f_codigo.pack(fill="x", padx=15, pady=(0, 10))
+        
+        self.ent_codigo = ctk.CTkEntry(f_codigo, placeholder_text="Ej. AUD-0001, ILUM-012, etc.")
+        self.ent_codigo.pack(side="left", fill="x", expand=True)
+        
+        self.btn_auto_codigo = ctk.CTkButton(
+            f_codigo, 
+            text="⚡ Auto", 
+            width=62, 
+            font=("Arial", 11, "bold"), 
+            fg_color="#27ae60", 
+            hover_color="#1e8449",
+            command=self.generar_codigo_automatico_ui
+        )
+        self.btn_auto_codigo.pack(side="right", padx=(5, 0))
 
         ctk.CTkLabel(self.f_form, text="Cantidad Total en Almacén:", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
         self.ent_cantidad = ctk.CTkEntry(self.f_form)
@@ -236,7 +262,7 @@ class CatalogoEquiposTab:
         self.ent_cantidad.insert(0, "1")
 
         ctk.CTkLabel(self.f_form, text="Número(s) Serial(es) (Separe con comas):", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
-        self.txt_serial = ctk.CTkTextbox(self.f_form, height=50, border_width=1, border_color="#aab7c4", fg_color="#ffffff", corner_radius=6)
+        self.txt_serial = ctk.CTkTextbox(self.f_form, height=45, border_width=1, border_color="#aab7c4", fg_color="#ffffff", corner_radius=6)
         self.txt_serial.pack(fill="x", padx=15, pady=(0, 10))
 
         ctk.CTkLabel(self.f_form, text="Nombre del Equipo/Activo:", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
@@ -250,7 +276,7 @@ class CatalogoEquiposTab:
         ctk.CTkLabel(self.f_form, text="Categoría:", font=("Arial", 11, "bold")).pack(anchor="w", padx=15)
         f_cat = ctk.CTkFrame(self.f_form, fg_color="transparent")
         f_cat.pack(fill="x", padx=15, pady=(0, 10))
-        self.cmb_categoria = ctk.CTkComboBox(f_cat, values=["Cargando..."])
+        self.cmb_categoria = ctk.CTkComboBox(f_cat, values=["Cargando..."], command=self.al_cambiar_categoria)
         self.cmb_categoria.pack(side="left", fill="x", expand=True)
         btn_nueva_cat = ctk.CTkButton(f_cat, text="+", font=("Arial", 12, "bold"), width=30, fg_color="#1f538d", hover_color="#163b65", command=self.crear_nueva_categoria)
         btn_nueva_cat.pack(side="right", padx=(5, 0))
@@ -277,6 +303,7 @@ class CatalogoEquiposTab:
         self.btn_limpiar = ctk.CTkButton(self.f_form, text="🧹 Limpiar Campos", font=("Arial", 12, "bold"), fg_color="#7f8c8d", hover_color="#606b6b", command=self.limpiar_formulario)
         self.btn_limpiar.pack(fill="x", padx=15, pady=5)
 
+        # TABLA Y FILTROS
         self.f_derecha = ctk.CTkFrame(frame_split, fg_color="transparent")
         self.f_derecha.pack(side="right", fill="both", expand=True)
 
@@ -286,7 +313,6 @@ class CatalogoEquiposTab:
         self.ent_buscar_catalogo = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por código, nombre, marca, serial...")
         self.ent_buscar_catalogo.pack(side="left", fill="x", expand=True)
         
-        # 🚀 BÚSQUEDA ASÍNCRONA
         self.ent_buscar_catalogo.bind("<KeyRelease>", lambda e: self.buscar_con_retraso())
         self.ent_buscar_catalogo.bind("<Return>", lambda e: self.cargar_tabla(reset_pagina=True))
 
@@ -307,7 +333,7 @@ class CatalogoEquiposTab:
         self.tabla.heading("depreciacion", text="Depr. %")
 
         self.tabla.column("id", width=35, anchor="center")
-        self.tabla.column("codigo", width=80, anchor="center")
+        self.tabla.column("codigo", width=85, anchor="center")
         self.tabla.column("serial", width=120, anchor="center")
         self.tabla.column("nombre", width=180, anchor="w")
         self.tabla.column("marca", width=120, anchor="w")
@@ -330,7 +356,6 @@ class CatalogoEquiposTab:
         f_botones_tabla = ctk.CTkFrame(self.f_derecha, fg_color="transparent")
         f_botones_tabla.pack(fill="x", pady=10)
 
-        # 🚀 BOTONES DE PAGINACIÓN
         f_paginacion = ctk.CTkFrame(f_botones_tabla, fg_color="transparent")
         f_paginacion.pack(side="left", padx=(0, 10))
         
@@ -352,6 +377,94 @@ class CatalogoEquiposTab:
         
         self.cargar_categorias()
         self.main_root.after(100, lambda: self.cargar_tabla(reset_pagina=True))
+
+    # ========================================================
+    # 🧠 MOTOR DE CÁLCULO DE CÓDIGOS CORRELATIVOS POR CATEGORÍA
+    # ========================================================
+    def deducir_prefijo_categoria(self, categoria):
+        """Genera un prefijo de 3-4 letras estándar a partir del nombre de la categoría."""
+        cat_limpia = categoria.strip().upper()
+        
+        prefijos_conocidos = {
+            "EQUIPOS AUDIOVISUALES": "AUD",
+            "AUDIOVISUALES": "AUD",
+            "AUDIO": "AUD",
+            "SONIDO": "SON",
+            "ILUMINACIÓN": "ILUM",
+            "ILUMINACION": "ILUM",
+            "VIDEO": "VID",
+            "PANTALLAS": "LED",
+            "MOBILIARIO Y ESTRUCTURAS": "MOB",
+            "MOBILIARIO": "MOB",
+            "ESTRUCTURAS": "EST",
+            "TRUSS": "TRUSS",
+            "DECORACIÓN": "DEC",
+            "DECORACION": "DEC",
+            "EFECTOS ESPECIALES": "FX",
+            "CABLES Y ACCESORIOS": "CAB",
+            "HERRAMIENTAS": "HERR",
+            "OTROS": "EQ"
+        }
+        
+        for clave, pref in prefijos_conocidos.items():
+            if clave in cat_limpia:
+                return pref
+                
+        # Si es una categoría personalizada nueva:
+        palabras = re.findall(r"[A-Z0-9]+", cat_limpia)
+        if len(palabras) >= 2:
+            return f"{palabras[0][:2]}{palabras[1][:2]}"
+        elif len(palabras) == 1:
+            return palabras[0][:4]
+        return "EQ"
+
+    def al_cambiar_categoria(self, nueva_cat):
+        """Al cambiar de categoría en nuevo registro, sugiere código si el campo está vacío o es un auto-código."""
+        if self.id_edicion is None:
+            codigo_actual = self.ent_codigo.get().strip()
+            if not codigo_actual or re.match(r"^[A-Z0-9]{2,6}-\d{3,6}$", codigo_actual):
+                self.generar_codigo_automatico_ui()
+
+    def generar_codigo_automatico_ui(self):
+        """Lanza la tarea asíncrona para obtener el siguiente correlativo sin congelar la interfaz."""
+        categoria = self.cmb_categoria.get()
+        prefijo = self.deducir_prefijo_categoria(categoria)
+
+        def tarea():
+            codigo_sugerido = f"{prefijo}-0001"
+            conn = conectar_db(silencioso=True)
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    # Busca todos los códigos que comiencen con el prefijo
+                    cursor.execute("""
+                        SELECT codigo FROM inventario_equipos 
+                        WHERE codigo ILIKE %s
+                    """, (f"{prefijo}-%",))
+                    
+                    codigos = [r[0] for r in cursor.fetchall() if r[0]]
+                    max_num = 0
+                    for c in codigos:
+                        m = re.search(r"-(\d+)$", c.strip())
+                        if m:
+                            num = int(m.group(1))
+                            if num > max_num:
+                                max_num = num
+                                
+                    siguiente = max_num + 1
+                    codigo_sugerido = f"{prefijo}-{siguiente:04d}"
+                except Exception as e:
+                    print("Error calculando código sugerido:", e)
+                finally:
+                    liberar_conexion(conn)
+
+            def aplicar():
+                self.ent_codigo.delete(0, tk.END)
+                self.ent_codigo.insert(0, codigo_sugerido)
+                
+            self.main_root.after(0, aplicar)
+
+        threading.Thread(target=tarea, daemon=True).start()
 
     def pagina_anterior(self):
         if self.pagina_actual > 1:
@@ -400,7 +513,7 @@ class CatalogoEquiposTab:
         try:
             if os.path.exists(ruta):
                 img = Image.open(ruta)
-                img.thumbnail((150, 150), Image.Resampling.LANCZOS)
+                img.thumbnail((140, 140), Image.Resampling.LANCZOS)
                 self.imagen_tk = ImageTk.PhotoImage(img)
                 self.lbl_imagen.configure(image=self.imagen_tk, text="")
             else:
@@ -420,6 +533,7 @@ class CatalogoEquiposTab:
                     valores_actuales.sort()
                     self.cmb_categoria.configure(values=valores_actuales)
                 self.cmb_categoria.set(nueva)
+                self.al_cambiar_categoria(nueva)
                 registrar_auditoria(self.app_padre.usuario_activo, "Inventario", f"Creó categoría de equipo '{nueva}'")
 
     def cargar_categorias(self):
@@ -450,6 +564,9 @@ class CatalogoEquiposTab:
         
         self.id_edicion = None
         self.btn_guardar.configure(text="💾 Guardar Equipo", fg_color="#1f538d", hover_color="#163b65")
+        
+        # Generar automáticamente un código fresco para el siguiente registro
+        self.generar_codigo_automatico_ui()
 
     def guardar_equipo(self):
         codigo = self.ent_codigo.get().strip()
@@ -489,7 +606,7 @@ class CatalogoEquiposTab:
                 cursor.execute("SELECT COUNT(*) FROM inventario_equipos WHERE codigo = %s AND id != %s", (codigo, self.id_edicion))
                 if cursor.fetchone()[0] > 0:
                     liberar_conexion(conn)
-                    return messagebox.showwarning("Duplicado", "Ese código ya está en uso.")
+                    return messagebox.showwarning("Código Duplicado", f"El código '{codigo}' ya está en uso por otro equipo.")
                 
                 cursor.execute("""
                     UPDATE inventario_equipos 
@@ -503,7 +620,7 @@ class CatalogoEquiposTab:
                 cursor.execute("SELECT COUNT(*) FROM inventario_equipos WHERE codigo = %s", (codigo,))
                 if cursor.fetchone()[0] > 0:
                     liberar_conexion(conn)
-                    return messagebox.showwarning("Duplicado", "Ese código ya está registrado.")
+                    return messagebox.showwarning("Código Duplicado", f"El código '{codigo}' ya existe en el inventario. Ingrese otro o presione '⚡ Auto'.")
                 
                 cursor.execute("""
                     INSERT INTO inventario_equipos 
@@ -511,7 +628,7 @@ class CatalogoEquiposTab:
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (codigo, serial_final, nombre, marca, categoria, estado, cantidad, costo, depr, ruta_img))
                 registrar_auditoria(self.app_padre.usuario_activo, "Inventario", f"Registró el equipo {codigo} ({estado})")
-                messagebox.showinfo("Éxito", "Equipo registrado correctamente.")
+                messagebox.showinfo("Éxito", f"Equipo con código '{codigo}' registrado correctamente.")
 
             conn.commit()
             
@@ -775,7 +892,6 @@ class ReservasTab:
         self.main_root = main_root
         self.app_padre = app_padre
         
-        # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
         self.registros_por_pagina = 50
         
@@ -883,7 +999,6 @@ class ReservasTab:
         f_btn_tabla = ctk.CTkFrame(self.f_derecha, fg_color="transparent")
         f_btn_tabla.pack(fill="x", pady=10)
         
-        # 🚀 BOTONES PAGINACIÓN
         f_paginacion = ctk.CTkFrame(f_btn_tabla, fg_color="transparent")
         f_paginacion.pack(side="left", padx=(0, 10))
         self.btn_ant = ctk.CTkButton(f_paginacion, text="◀ Ant", width=60, command=self.pagina_anterior)
@@ -923,7 +1038,6 @@ class ReservasTab:
             self.lbl_nota.pack_forget()
             self.txt_nota.pack_forget()
 
-    # 🚀 FIX: COMBO DE EQUIPOS Y EVENTOS CON CACHÉ
     def cargar_combos(self):
         eqs_cache = cache_sistema.obtener('lista_equipos_stock')
         evs_cache = cache_sistema.obtener('lista_eventos_aprobados')
@@ -1016,7 +1130,7 @@ class ReservasTab:
             if res:
                 self.lbl_stock.configure(text=f"Físico: {res[0]} ud(s) | Disp. Ahora: {res[1]} ud(s)")
             liberar_conexion(conn)
-        except Exception as e:
+        except Exception:
             self.lbl_stock.configure(text="Existencia en Almacén: --")
 
     def str_to_date(self, date_str):
@@ -1120,7 +1234,6 @@ class ReservasTab:
         finally:
             liberar_conexion(conn)
 
-    # 🚀 FIX: CARGA LAZY LOADING + CACHÉ
     def cargar_tabla(self, reset_pagina=False):
         if reset_pagina:
             self.pagina_actual = 1
@@ -1229,7 +1342,7 @@ class ReservasTab:
                 liberar_conexion(conn)
 
 # =========================================================
-# 🚀 PESTAÑA 3: RECEPCIÓN Y RETORNOS
+# PESTAÑA 3: RECEPCIÓN Y RETORNOS
 # =========================================================
 class RecepcionEquiposTab:
     def __init__(self, tab_frame, main_root, app_padre):
@@ -1239,7 +1352,6 @@ class RecepcionEquiposTab:
         self.ruta_evidencia_actual = ""
         self.evidencia_tk = None
         
-        # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
         self.registros_por_pagina = 50
         
@@ -1345,7 +1457,6 @@ class RecepcionEquiposTab:
         self.tabla.pack(side="left", fill="both", expand=True)
         scroll_y.pack(side="right", fill="y")
         
-        # 🚀 BOTONES PAGINACIÓN
         f_botones_tabla = ctk.CTkFrame(self.f_derecha, fg_color="transparent")
         f_botones_tabla.pack(fill="x", pady=10)
         f_paginacion = ctk.CTkFrame(f_botones_tabla, fg_color="transparent")
@@ -1432,7 +1543,6 @@ class RecepcionEquiposTab:
             self.ruta_evidencia_actual = ""
             self.lbl_evidencia.configure(image="", text="Sin evidencia")
 
-    # 🚀 FIX: COMBO DE RETORNOS CON CACHÉ Y ASÍNCRONO
     def cargar_combos(self):
         clave_cache = 'lista_equipos_reservados'
         eqs_cache = cache_sistema.obtener(clave_cache)
@@ -1573,7 +1683,6 @@ class RecepcionEquiposTab:
         finally:
             liberar_conexion(conn)
 
-    # 🚀 FIX: CARGA LAZY LOADING + CACHÉ
     def cargar_tabla(self, reset_pagina=False):
         if reset_pagina:
             self.pagina_actual = 1

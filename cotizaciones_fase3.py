@@ -3,7 +3,7 @@
 import psycopg2
 import tkinter as tk
 import urllib.request
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 from datetime import datetime
 import ctypes
@@ -15,10 +15,6 @@ import re
 import json
 import threading
 import importlib
-
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
@@ -63,7 +59,7 @@ def maximizar_ventana(ventana):
             pass
 
 def abrir_documento(ruta):
-    """Abre el PDF generado con el visor predeterminado según el Sistema Operativo"""
+    """Abre el archivo generado con el visor predeterminado según el Sistema Operativo"""
     try:
         if sys.platform == "win32":
             os.startfile(ruta)
@@ -78,13 +74,6 @@ def abrir_documento(ruta):
 # HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG MAC FIX
 # =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
-
-def hex_to_rgb(hex_color):
-    try:
-        hex_color = hex_color.lstrip('#')
-        return tuple(int(hex_color[i:i+2], 16)/255.0 for i in (0, 2, 4))
-    except Exception:
-        return (0.0, 0.0, 0.0)
 
 def parsear_segmentos_formato(texto):
     resultado, negrita, color_p = [], False, False
@@ -160,17 +149,14 @@ def crear_barra_formato(parent, text_widget):
 
         if s and e:
             try:
-                # Revisamos las etiquetas existentes de la primera letra
                 current_tags = inner_text.tag_names(s)
                 if tag_name in current_tags:
                     inner_text.tag_remove(tag_name, s, e)
                 else:
                     inner_text.tag_add(tag_name, s, e)
                 
-                # 🚀 MAC FIX: Elevamos la prioridad justo al crearla
                 inner_text.tag_raise(tag_name)
                 
-                # Restauramos la selección visual y limpiamos memoria
                 inner_text.tag_add(tk.SEL, s, e)
                 inner_text._memoria_blindada = None
             except Exception:
@@ -202,7 +188,6 @@ def crear_barra_formato(parent, text_widget):
 
 def configurar_tags_formato(txt_widget, tam=10):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
-    # 🚀 MAC FIX: Usar Helvetica + Elevar prioridad para que CTkTextbox no lo sobreescriba
     inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
     inner.tag_raise("bold")
@@ -222,7 +207,6 @@ def insertar_texto_formateado(txt_widget, texto):
         else:
             inner.insert(tk.END, frag)
             
-    # Forzar actualización de capas al pintar todo el texto
     inner.tag_raise("bold")
     inner.tag_raise("color")
 
@@ -277,14 +261,8 @@ def generar_nueva_version_evento_existente(conn, codigo_actual):
         print("Error generando versión de cotización:", e)
         return f"{base}-02"
 
-
-_SCHEMA_PDF_OK = False
-
-# La función generar_reporte_cotizacion_pdf NO vive aquí. Ahora se llama desde final_cotizaciones.py 
-# (La importamos y la ejecutamos desde allí, así que esta declaración es meramente un respaldo visual).
-
 # =========================================================
-# CLASE: CALENDARIO NATIVO (MEJORADO CON COMBOBOX)
+# CLASE: CALENDARIO NATIVO
 # =========================================================
 class CalendarioNativo(ctk.CTkToplevel):
     def __init__(self, parent, target_entry):
@@ -420,7 +398,6 @@ class VentanaEtapaProveedores:
                         "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                         "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
                         "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
-                        "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS dias_credito INTEGER DEFAULT 0",
                     ]
                     for sql in alters:
                         try:
@@ -500,11 +477,6 @@ class VentanaEtapaProveedores:
         self.ent_p_lista = ctk.CTkEntry(self.f_inputs, width=100)
         self.ent_p_lista.grid(row=2, column=3, sticky="w", pady=5, padx=2)
         self.ent_p_lista.insert(0, "0.00")
-
-        ctk.CTkLabel(self.f_inputs, text="Días Créd.:", font=("Arial", 12, "bold"), text_color="#1f538d").grid(row=2, column=5, sticky="e", padx=(15, 5), pady=5)
-        self.ent_dias_credito = ctk.CTkEntry(self.f_inputs, width=60)
-        self.ent_dias_credito.grid(row=2, column=6, sticky="w", padx=(5, 15), pady=5)
-        self.ent_dias_credito.insert(0, "0")
 
         ctk.CTkLabel(self.f_inputs, text="P. Dscto (S/.):", font=("Arial", 12, "bold")).grid(row=3, column=0, sticky="w", pady=5, padx=(15, 2))
         self.ent_p_desc = ctk.CTkEntry(self.f_inputs, width=100)
@@ -593,7 +565,10 @@ class VentanaEtapaProveedores:
                 messagebox.showerror("Error de Archivo", f"No se encontró el generador de PDF.\n\nDetalle: {str(e)}", parent=self.v_prov)
 
         btn_pdf = ctk.CTkButton(self.f_inputs, text="[ PDF ] Generar Cotización Oficial", font=("Arial", 14, "bold"), height=40, fg_color=COLOR_PRIMARIO, hover_color="#b71c1c", command=disparar_exportacion_pdf_alberto)
-        btn_pdf.grid(row=8, column=0, columnspan=8, sticky="ew", padx=15, pady=(15, 10))
+        btn_pdf.grid(row=8, column=0, columnspan=4, sticky="ew", padx=(15, 5), pady=(15, 10))
+        
+        btn_excel_int = ctk.CTkButton(self.f_inputs, text="[ EXCEL ] Exportar Matriz Interactiva", font=("Arial", 14, "bold"), height=40, fg_color="#27ae60", hover_color="#1e8449", command=self.exportar_matriz_excel_interactivo)
+        btn_excel_int.grid(row=8, column=4, columnspan=4, sticky="ew", padx=(5, 15), pady=(15, 10))
 
         self.f_b_matriz = ctk.CTkFrame(self.v_prov, fg_color="transparent")
         self.f_b_matriz.pack(fill="x", padx=15, pady=5)
@@ -621,6 +596,193 @@ class VentanaEtapaProveedores:
 
         self.filtrar_proveedores_por_categoria()
         self.cargar_grid_proveedores()
+
+    # 🚀 EXPORTADOR EXCEL INTERACTIVO LIMPIO (CANTIDAD, NOTAS, P.UNIT, SUBTOTAL)
+    def exportar_matriz_excel_interactivo(self):
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment, Protection, Border, Side
+            from openpyxl.drawing.image import Image as OpenpyxlImage
+        except ImportError:
+            messagebox.showerror("Librería faltante", "Falta la librería openpyxl o Pillow.\n\nAbre tu terminal y ejecuta:\npip install openpyxl Pillow", parent=self.v_prov)
+            return
+
+        if not self.conn: return
+
+        try:
+            # Intentar obtener el color principal y la ruta del logo desde la configuración
+            config_data = {}
+            try:
+                with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
+            except Exception:
+                pass
+                
+            color_primario = config_data.get("color_primario", COLOR_PRIMARIO).replace("#", "").upper()
+            if len(color_primario) != 6: color_primario = "EB337A"
+            logo_ruta = config_data.get("ruta_logo_cotizacion", "")
+
+            c = self.conn.cursor()
+            c.execute("SELECT cantidad, notes_negociacion, precio_final_venta FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (self.codigo_cot,))
+            registros = c.fetchall()
+
+            if not registros:
+                messagebox.showwarning("Sin Datos", "No hay costos asignados para exportar.", parent=self.v_prov)
+                return
+
+            ruta = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile=f"Cotizacion_Interactiva_{self.codigo_cot}.xlsx", filetypes=[("Excel", "*.xlsx")], parent=self.v_prov)
+            if not ruta: return
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Cotización"
+            ws.sheet_view.showGridLines = False 
+
+            header_fill = PatternFill(start_color=color_primario, end_color=color_primario, fill_type="solid")
+            header_font = Font(color="FFFFFF", bold=True)
+            unlocked = Protection(locked=False)
+            fill_editable = PatternFill(start_color="E6F2FF", end_color="E6F2FF", fill_type="solid")
+            border_thin = Border(left=Side(style='thin', color="DDDDDD"), 
+                                 right=Side(style='thin', color="DDDDDD"), 
+                                 top=Side(style='thin', color="DDDDDD"), 
+                                 bottom=Side(style='thin', color="DDDDDD"))
+
+            # --- INCORPORAR LOGO COMO BANNER SUPERIOR ---
+            if logo_ruta and os.path.exists(logo_ruta):
+                try:
+                    img = OpenpyxlImage(logo_ruta)
+                    aspect_ratio = img.width / img.height
+                    
+                    # Ancho total de columnas A-D es aprox 830 píxeles
+                    nuevo_ancho = 830
+                    img.width = nuevo_ancho
+                    img.height = nuevo_ancho / aspect_ratio
+                    
+                    ws.add_image(img, 'A1')
+                    ws.row_dimensions[1].height = (img.height * 0.75) + 5
+                except Exception:
+                    ws.row_dimensions[1].height = 20
+            else:
+                ws.row_dimensions[1].height = 20
+
+            # --- DATOS DE LA COTIZACION JUSTO DEBAJO DEL LOGO ---
+            ws.merge_cells('A2:D2')
+            ws['A2'] = f"COTIZACIÓN N° {self.codigo_cot}"
+            ws['A2'].font = Font(size=14, bold=True, color=color_primario)
+            ws['A2'].alignment = Alignment(horizontal="center", vertical="center")
+            
+            ws.merge_cells('A3:D3')
+            ws['A3'] = f"Cliente: {self.empresa}"
+            ws['A3'].font = Font(size=12, bold=True)
+            ws['A3'].alignment = Alignment(horizontal="center", vertical="center")
+            
+            ws.merge_cells('A4:D4')
+            ws['A4'] = f"Evento / Servicio: {self.evento}"
+            ws['A4'].font = Font(size=12)
+            ws['A4'].alignment = Alignment(horizontal="center", vertical="center")
+            
+            ws.merge_cells('A5:D5')
+            ws['A5'] = "Instrucciones: Solo puede modificar las celdas celestes (Cantidad y P. Unitario). Los totales se calcularán automáticamente."
+            ws['A5'].font = Font(italic=True, color="555555")
+            ws['A5'].alignment = Alignment(horizontal="center", vertical="center")
+
+            ws.row_dimensions[2].height = 25
+            ws.row_dimensions[3].height = 20
+            ws.row_dimensions[4].height = 20
+            ws.row_dimensions[5].height = 20
+            ws.row_dimensions[6].height = 10 # Espaciador
+
+            # --- ENCABEZADOS DE TABLA (SOLO 4 COLUMNAS) ---
+            headers = ["Cantidad", "Notas Adicionales", "P. Unitario", "Subtotal Fila"]
+            row_idx = 7
+            
+            for col_num, header in enumerate(headers, 1):
+                cell = ws.cell(row=row_idx, column=col_num, value=header)
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = border_thin
+
+            # --- FILAS DE DATOS ---
+            row_idx = 8
+            for r in registros:
+                cant = int(r[0]) if r[0] else 1
+                notas = texto_plano_sin_marcado(str(r[1])) if r[1] else ""
+                precio_tot = float(r[2])
+                p_unit = precio_tot / cant if cant else 0.0
+
+                # 1. Cantidad
+                c_cant = ws.cell(row=row_idx, column=1, value=cant)
+                c_cant.protection = unlocked
+                c_cant.fill = fill_editable
+                c_cant.alignment = Alignment(horizontal="center", vertical="center")
+                c_cant.border = border_thin
+
+                # 2. Notas Adicionales
+                c_notas = ws.cell(row=row_idx, column=2, value=notas)
+                c_notas.alignment = Alignment(wrap_text=True, vertical="center")
+                c_notas.border = border_thin
+
+                # 3. P. Unitario
+                c_price = ws.cell(row=row_idx, column=3, value=p_unit)
+                c_price.protection = unlocked
+                c_price.fill = fill_editable
+                c_price.number_format = '"S/." #,##0.00'
+                c_price.alignment = Alignment(vertical="center")
+                c_price.border = border_thin
+
+                # 4. Subtotal Fila
+                c_subtot = ws.cell(row=row_idx, column=4, value=f"=A{row_idx}*C{row_idx}")
+                c_subtot.number_format = '"S/." #,##0.00'
+                c_subtot.font = Font(bold=True)
+                c_subtot.alignment = Alignment(vertical="center")
+                c_subtot.border = border_thin
+
+                row_idx += 1
+
+            # --- TOTALES ---
+            row_idx += 1
+            ws.cell(row=row_idx, column=3, value="SUBTOTAL:").font = Font(bold=True)
+            ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+            ws.cell(row=row_idx, column=4, value=f"=SUM(D8:D{row_idx-2})").number_format = '"S/." #,##0.00'
+            ws.cell(row=row_idx, column=4).font = Font(bold=True)
+
+            row_idx += 1
+            ws.cell(row=row_idx, column=3, value="FEE (15%):").font = Font(bold=True)
+            ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+            ws.cell(row=row_idx, column=4, value=f"=D{row_idx-1}*0.15").number_format = '"S/." #,##0.00'
+            ws.cell(row=row_idx, column=4).font = Font(bold=True)
+
+            row_idx += 1
+            ws.cell(row=row_idx, column=3, value="GRAN TOTAL:").font = Font(bold=True, color=color_primario)
+            ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+            c_gran = ws.cell(row=row_idx, column=4, value=f"=D{row_idx-2}+D{row_idx-1}")
+            c_gran.number_format = '"S/." #,##0.00'
+            c_gran.font = Font(bold=True, color=color_primario)
+
+            # --- ANCHOS DE COLUMNAS ---
+            ws.column_dimensions['A'].width = 15  # Cantidad
+            ws.column_dimensions['B'].width = 65  # Notas Adicionales
+            ws.column_dimensions['C'].width = 18  # P. Unitario
+            ws.column_dimensions['D'].width = 20  # Subtotal Fila
+
+            # --- PROTECCIÓN DE HOJA ---
+            ws.protection.sheet = True
+            ws.protection.password = "blackcube2026" 
+
+            try:
+                wb.save(ruta)
+            except PermissionError:
+                messagebox.showwarning("Archivo Abierto", f"No se puede guardar porque el archivo Excel ya está abierto.\n\nPor favor, cierra:\n{os.path.basename(ruta)}\n\ny vuelve a intentarlo.", parent=self.v_prov)
+                return
+
+            messagebox.showinfo("Éxito", f"Excel Interactivo generado en:\n{ruta}\n\nEl archivo tiene diseño corporativo y está protegido.\n\nEl cliente solo podrá modificar las celdas celestes (Cantidades y P. Unitario).", parent=self.v_prov)
+            abrir_documento(ruta)
+            registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Exportó a Excel Interactivo la Matriz Cotización N° {self.codigo_cot}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo exportar a Excel:\n{str(e)}", parent=self.v_prov)
+
 
     # =======================================================
     # TIPO DE CAMBIO EN VIVO (EN SEGUNDO PLANO, NO CONGELA)
@@ -874,10 +1036,10 @@ class VentanaEtapaProveedores:
             
         try:
             cant = int(self.ent_cant.get().strip())
-            dias_cred = int(self.ent_dias_credito.get().strip() or 0)
+            dias_cred = 0 
             pl, pd, vg = float(self.ent_p_lista.get()), float(self.ent_p_desc.get()), float(self.ent_val_g.get())
         except ValueError:
-            messagebox.showwarning("Error numérico", "Importes, días o cantidades inválidas.", parent=self.v_prov)
+            messagebox.showwarning("Error numérico", "Importes o cantidades inválidas.", parent=self.v_prov)
             return
             
         if pd > pl:
@@ -902,8 +1064,6 @@ class VentanaEtapaProveedores:
             self.actualizar_bloque_totales_pantalla()
             self.ent_cant.delete(0, tk.END)
             self.ent_cant.insert(0, "1")
-            self.ent_dias_credito.delete(0, tk.END)
-            self.ent_dias_credito.insert(0, "0")
             self.ent_p_lista.delete(0, tk.END)
             self.ent_p_lista.insert(0, "0.00")
             self.ent_p_desc.delete(0, tk.END)
@@ -942,7 +1102,7 @@ class VentanaEtapaProveedores:
             return
         id_mat = self.fila_matriz_seleccionada[0]
         c = self.conn.cursor()
-        c.execute("SELECT precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, notes_negociacion, cantidad, dias_credito FROM cotizacion_proveedores WHERE id=%s", (id_mat,))
+        c.execute("SELECT precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, notes_negociacion, cantidad FROM cotizacion_proveedores WHERE id=%s", (id_mat,))
         datos = c.fetchone()
         if not datos:
             return
@@ -956,10 +1116,7 @@ class VentanaEtapaProveedores:
         ent_m_cant = ctk.CTkEntry(f_m, width=100)
         ent_m_cant.pack(anchor="w", padx=10, pady=2)
         ent_m_cant.insert(0, str(datos[5] if len(datos) > 5 and datos[5] else 1))
-        ctk.CTkLabel(f_m, text="Días de Crédito:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
-        ent_m_dcred = ctk.CTkEntry(f_m, width=100)
-        ent_m_dcred.pack(anchor="w", padx=10, pady=2)
-        ent_m_dcred.insert(0, str(datos[6] if len(datos) > 6 and datos[6] else 0))
+        
         ctk.CTkLabel(f_m, text="Precio Lista (S/.):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_lista = ctk.CTkEntry(f_m, width=200)
         ent_m_lista.pack(anchor="w", padx=10, pady=2)
@@ -990,7 +1147,7 @@ class VentanaEtapaProveedores:
         def ejecutar_update_matriz():
             try:
                 mc = int(ent_m_cant.get().strip())
-                m_dcred = int(ent_m_dcred.get().strip())
+                m_dcred = 0 
                 ml, md, mv = float(ent_m_lista.get()), float(ent_m_desc.get()), float(ent_m_val.get())
             except ValueError:
                 messagebox.showwarning("Error numérico", "Valores inválidos.", parent=v_m)

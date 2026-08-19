@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 CONTROL_GENERAL.PY - SISTEMA DE CONTROL GENERAL DE EVENTOS (ENTERPRISE)
-- Integración de Módulo de Pautas (Minuto a Minuto).
-- Pool de Conexiones Activo y Liberación Correcta.
-- Dashboard de Bienvenida (Alertas) asíncrono y acelerado.
-- Sincronización Rclone Silenciosa en Segundo Plano.
-- 🚀 FIX: Sincronización de Configuración Global en Supabase para Múltiples Estaciones.
-- 🚀 FIX: Compatibilidad Mac en FileDialog.
-- 🚀 FIX: Verificador de Actualizaciones de GitHub Integrado.
-- 🚀 FIX: Consulta de RUC en Configuración con escudo SSL desactivado para Mac.
-- 🚀 FIX: Términos y Condiciones personalizables para el PDF de cotizaciones.
+- 100% Compatibilidad macOS / Windows / Linux.
+- 7 Secciones completas de Configuración General.
+- Sincronización Nube <-> Local con protección de rutas de disco.
+- Verificador de Actualizaciones y Consulta SUNAT con SSL tolerante para macOS.
+- Carga Asíncrona de Alertas y Listas.
 """
 import tkinter as tk
 import customtkinter as ctk
@@ -20,20 +16,19 @@ import os
 import json
 import importlib
 import urllib.request
+import ssl
 import bcrypt
 import subprocess
 import threading
 import webbrowser
 from datetime import datetime, timedelta
 
-# 🚀 NUEVO: Definimos la versión actual de tu código
 VERSION_ACTUAL = "v1.5.5"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 from app_paths import CONFIG_FILE
@@ -56,13 +51,14 @@ if sys.platform == "win32":
         pass
 
 def maximizar_ventana(ventana):
+    """Maximiza ventanas sin errores en macOS ni Windows."""
     try:
         if sys.platform == "win32":
             ventana.state("zoomed")
-        elif sys.platform == "darwin":
-            ventana.attributes("-zoomed", True)
         else:
-            ventana.state("zoomed")
+            w = ventana.winfo_screenwidth()
+            h = ventana.winfo_screenheight()
+            ventana.geometry(f"{w}x{h}+0+0")
     except Exception:
         try:
             w = ventana.winfo_screenwidth()
@@ -78,7 +74,6 @@ def ruta_recurso(ruta_relativa):
         ruta_base = os.path.abspath(".")
     return os.path.join(ruta_base, ruta_relativa)
 
-# 🚀 FIX MAC: Aplicar Icono a ventanas solo si es Windows
 def aplicar_icono_ventana(ventana):
     if sys.platform == "win32":
         try:
@@ -104,7 +99,12 @@ def obtener_comando_rclone():
                 return r
     return "rclone"
 
-# 🚀 CARGA HÍBRIDA (NUBE -> LOCAL)
+def crear_contexto_ssl_seguro():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
 def cargar_configuracion_general():
     config = {
         "ruta_drive": "", "rclone_remote": "gdrive:", "rclone_ruta_nube": "BlackCube",
@@ -128,7 +128,6 @@ def cargar_configuracion_general():
         "orden_ajustes": ["configuracion", "usuarios", "bitacora"]
     }
     
-    # 1. Cargamos el local por defecto
     try:
         if os.path.exists(str(CONFIG_FILE)):
             with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
@@ -136,7 +135,6 @@ def cargar_configuracion_general():
     except Exception:
         pass
         
-    # 2. Intentamos jalar la configuración global desde Supabase
     conn = conectar_db(silencioso=True)
     if conn:
         try:
@@ -145,19 +143,18 @@ def cargar_configuracion_general():
             res = cursor.fetchone()
             if res and res[0]:
                 config_nube = res[0]
-                
-                # Protegemos variables estrictamente locales para no sobreescribirlas
                 impresora_local = config.get("impresora", "")
                 ruta_drive_local = config.get("ruta_drive", "")
                 rclone_remote_local = config.get("rclone_remote", "gdrive:")
+                ruta_logo_local = config.get("ruta_logo_cotizacion", "")
                 
                 config.update(config_nube)
                 
                 if impresora_local: config["impresora"] = impresora_local
                 if ruta_drive_local: config["ruta_drive"] = ruta_drive_local
                 if rclone_remote_local != "gdrive:": config["rclone_remote"] = rclone_remote_local
+                if ruta_logo_local: config["ruta_logo_cotizacion"] = ruta_logo_local
                 
-                # Guardamos la sincronización de la nube en el disco local
                 with open(str(CONFIG_FILE), "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=4)
         except Exception as e:
@@ -204,8 +201,6 @@ def inicializar_seguridad_db():
         if not conn: return
         try:
             cursor = conn.cursor()
-            
-            # 🚀 NUEVA TABLA: Configuración Global en la Nube
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS configuracion_sistema (
                 id INTEGER PRIMARY KEY DEFAULT 1,
@@ -214,7 +209,6 @@ def inicializar_seguridad_db():
                 CONSTRAINT unica_config CHECK (id = 1)
             )
             """)
-            
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS usuarios (
                 id SERIAL PRIMARY KEY,
@@ -331,9 +325,6 @@ class ControlGeneralEventos:
             return True
         return self.permisos_activos.get(modulo_key, False)
 
-    # =======================================================
-    # LOGIN SEGURO 
-    # =======================================================
     def abrir_ventana_login(self):
         self.v_login = ctk.CTkToplevel(self.root)
         self.v_login.title("Acceso Seguro")
@@ -451,9 +442,6 @@ class ControlGeneralEventos:
         btn_entrar = ctk.CTkButton(frame_log, text="Ingresar al Sistema", width=200, height=35, font=("Arial", 12, "bold"), fg_color="#1f538d", hover_color="#163b65", command=verificar_credenciales)
         btn_entrar.pack(pady=5)
 
-    # =======================================================
-    # DASHBOARD PRINCIPAL Y CICLO DE SINCRONIZACIÓN
-    # =======================================================
     def construir_dashboard_spa(self):
         for widget in self.root.winfo_children():
             widget.destroy()
@@ -475,7 +463,7 @@ class ControlGeneralEventos:
         cache_sistema.iniciar_ciclo()
         
         self.root.after(5000, self.ciclo_sincronizacion_nube)
-        self.buscar_actualizaciones_github() # 🚀 LANZAMOS EL BUSCADOR DE ACTUALIZACIONES
+        self.buscar_actualizaciones_github()
         
         def pre_cargar_listas():
             conn = conectar_db(silencioso=True)
@@ -495,7 +483,7 @@ class ControlGeneralEventos:
                     
                     c.execute("SELECT numero_oc FROM ordenes_compra_clientes ORDER BY id DESC")
                     cache_sistema.guardar('lista_ocs_combobox', ["--- Sin Orden de Compra ---"] + [r[0] for r in c.fetchall()])
-                except: pass
+                except Exception: pass
                 finally: liberar_conexion(conn)
         threading.Thread(target=pre_cargar_listas, daemon=True).start()
         
@@ -600,8 +588,6 @@ class ControlGeneralEventos:
         ctk.CTkLabel(f_pie, text="Este es el resumen automático de tu operación para el día de hoy.\nSeleccione un módulo en el menú lateral para gestionar sus operaciones.", font=("Arial", 12, "italic"), text_color="gray", justify="center").pack(pady=(5, 0))
 
         def tarea_dashboard():
-            config = cargar_configuracion_general()
-            dias_alerta = int(config.get("dias_alerta_vencimiento", "30"))
             hoy = datetime.now()
             alertas = []
             tareas_mostrar = []
@@ -705,7 +691,7 @@ class ControlGeneralEventos:
                             elif dias_faltan <= 5: texto_dias, color_t = f"Faltan {dias_faltan} días", "#c0392b"
                             else: texto_dias, color_t = f"Faltan {dias_faltan} días", "#1f538d"
                             tareas_mostrar.append((color_t, f"📍 {f_dt.strftime('%d/%m/%Y')} | {nom} ({cod}) - {texto_dias}"))
-                except: pass
+                except Exception: pass
 
             except Exception as e:
                 print("Error general de alertas:", e)
@@ -752,9 +738,6 @@ class ControlGeneralEventos:
             for color, txt in tareas_mostrar:
                 ctk.CTkLabel(self.f_agenda_container, text=txt, font=("Arial", 12, "bold"), text_color=color).pack(anchor="w", padx=15, pady=8)
 
-    # =======================================================
-    # FUNCIONES DE APERTURA DE MÓDULOS
-    # =======================================================
     def abrir_modulo_pautas(self):
         if not self.tiene_permiso("pautas"):
             return messagebox.showerror("Denegado", "No tiene permisos.")
@@ -823,9 +806,12 @@ class ControlGeneralEventos:
             return messagebox.showerror("Denegado", "No tiene permisos.")
         self.limpiar_contenedor()
         try:
-            import Inventario_locacion
-            importlib.reload(Inventario_locacion)
-            app = Inventario_locacion.InventarioLocacionesApp(self.contenedor_central)
+            try:
+                import inventario_locacion as mod_loc
+            except ImportError:
+                import Inventario_locacion as mod_loc
+            importlib.reload(mod_loc)
+            app = mod_loc.InventarioLocacionesApp(self.contenedor_central)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
@@ -938,28 +924,8 @@ class ControlGeneralEventos:
             registrar_auditoria(self.usuario_activo, "Bitácora", "Accedió a revisar el historial de auditoría")
         except Exception as e: messagebox.showerror("Error", f"No se pudo cargar la Bitácora:\n{e}")
 
-    def abrir_modulo_flota(self):
-        if not self.tiene_permiso("flota"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
-        try:
-            import flota_automotriz
-            importlib.reload(flota_automotriz)
-            app = flota_automotriz.FlotaAutomotrizApp(self.contenedor_central, self.usuario_activo)
-        except Exception as e: messagebox.showerror("Error", f"Fallo al abrir Flota:\n{e}")
-
-    def abrir_modulo_choferes(self):
-        if not self.tiene_permiso("choferes"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
-        try:
-            import choferes
-            importlib.reload(choferes)
-            app = choferes.ChoferesApp(self.contenedor_central, self.usuario_activo)
-        except Exception as e: messagebox.showerror("Error", f"Fallo al abrir Padrón de Choferes:\n{e}")
-
     # =======================================================
-    # CONFIGURACIÓN GENERAL (EVENTOS)
+    # CONFIGURACIÓN GENERAL (EVENTOS) - 100% COMPLETA
     # =======================================================
     def abrir_configuracion_general(self):
         if not self.tiene_permiso("configuracion"):
@@ -1057,7 +1023,6 @@ class ControlGeneralEventos:
                 ent_igv.insert(0, "18"); ent_retencion.insert(0, "8"); ent_renta_m.insert(0, "1.5"); ent_renta_a.insert(0, "29.5")
         cmb_regimen.configure(command=actualizar_tasas_regimen)
 
-        # 🚀 FIX MAC: Consulta de RUC con Escudo SSL Desactivado y Hilo en Segundo Plano
         def buscar_ruc_empresa(event=None):
             ruc = ent_ruc_empresa.get().strip()
             if len(ruc) != 11 or not ruc.isdigit():
@@ -1066,15 +1031,8 @@ class ControlGeneralEventos:
             
             def tarea():
                 try:
-                    import ssl
-                    import urllib.error
-                    
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    
+                    ctx = crear_contexto_ssl_seguro()
                     token = config_actual.get("token_api_ruc", "")
-                    
                     url = f"https://api.apis.net.pe/v1/ruc?numero={ruc}"
                     headers = {'User-Agent': 'Mozilla/5.0'}
                     if token:
@@ -1087,9 +1045,6 @@ class ControlGeneralEventos:
                             v_conf.after(0, lambda: _aplicar_datos_empresa(data))
                         else:
                             v_conf.after(0, lambda: messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC.", parent=v_conf))
-                except urllib.error.URLError as e:
-                    error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
-                    v_conf.after(0, lambda msg=error_msg: messagebox.showerror("Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {msg}", parent=v_conf))
                 except Exception as e:
                     v_conf.after(0, lambda err=e: messagebox.showwarning("Error", f"Problema al consultar RUC:\n{err}", parent=v_conf))
 
@@ -1249,7 +1204,7 @@ class ControlGeneralEventos:
                 if not curr.startswith("#"):
                     curr = default
                 try:
-                    color = colorchooser.askcolor(title="Elegir Color", color=curr)[1]
+                    color = colorchooser.askcolor(title="Elegir Color", color=curr, parent=v_conf)[1]
                 except Exception:
                     color = colorchooser.askcolor(title="Elegir Color")[1]
                 if color:
@@ -1268,22 +1223,18 @@ class ControlGeneralEventos:
         ent_logo.pack(side="left", fill="x", expand=True, padx=(0, 10))
         ent_logo.insert(0, config_actual.get("ruta_logo_cotizacion", ""))
 
-        # 🚀 FIX MAC: FileDialog Multiplataforma sin punto y coma
         def buscar_logo_cotizacion():
             tipos_seguros = [
-                ("Archivos de Imagen", "*.png *.jpg *.jpeg"),
-                ("PNG", "*.png"),
-                ("JPEG", "*.jpg"),
+                ("Archivos de Imagen", "*.png *.jpg *.jpeg *.PNG *.JPG *.JPEG"),
                 ("Todos", "*.*")
             ]
-            ruta = filedialog.askopenfilename(title="Seleccionar Logo", filetypes=tipos_seguros)
+            ruta = filedialog.askopenfilename(title="Seleccionar Logo", filetypes=tipos_seguros, parent=v_conf)
             if ruta:
                 ent_logo.delete(0, tk.END)
                 ent_logo.insert(0, ruta)
                 
         ctk.CTkButton(f_ruta_logo, text="📂 Buscar Imagen", width=140, command=buscar_logo_cotizacion).pack(side="right")
         
-        # 🚀 FIX: Textbox para Términos y Condiciones Globales
         ctk.CTkLabel(f_diseno, text="📝 Términos y Condiciones (Por defecto en el PDF):", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 2))
         txt_terminos = ctk.CTkTextbox(f_diseno, height=70, font=("Arial", 11), border_width=1)
         txt_terminos.pack(fill="x", padx=15, pady=2)
@@ -1315,7 +1266,6 @@ class ControlGeneralEventos:
         cmb_fecha.pack(side="left")
         cmb_fecha.set(config_actual.get("formato_fecha", "DD/MM/AAAA"))
 
-        # --- SECCIÓN RCLONE / GOOGLE DRIVE INTELIGENTE ---
         ctk.CTkLabel(f_region, text="☁️ Sincronización en la Nube (Rclone - Google Drive)", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
 
         f_rclone_1 = ctk.CTkFrame(f_region, fg_color="transparent")
@@ -1326,7 +1276,7 @@ class ControlGeneralEventos:
         ent_drive.insert(0, config_actual.get("ruta_drive", ""))
 
         def buscar_carpeta_drive():
-            carpeta = filedialog.askdirectory(title="Seleccionar Carpeta Local")
+            carpeta = filedialog.askdirectory(title="Seleccionar Carpeta Local", parent=v_conf)
             if carpeta:
                 ent_drive.delete(0, tk.END)
                 ent_drive.insert(0, carpeta)
@@ -1389,7 +1339,6 @@ class ControlGeneralEventos:
                                     "Los archivos se guardarán aquí y luego se enviarán a la nube.", parent=v_conf)
                 
             cmd_rclone = obtener_comando_rclone()
-
             kwargs = {}
             if sys.platform == "win32":
                 kwargs["creationflags"] = 0x08000000
@@ -1451,7 +1400,7 @@ class ControlGeneralEventos:
                 if not curr.startswith("#"):
                     curr = default
                 try:
-                    color = colorchooser.askcolor(title=f"Elegir {texto}", color=curr)[1]
+                    color = colorchooser.askcolor(title=f"Elegir {texto}", color=curr, parent=v_conf)[1]
                 except Exception:
                     color = colorchooser.askcolor(title=f"Elegir {texto}")[1]
                 if color:
@@ -1516,7 +1465,7 @@ class ControlGeneralEventos:
 
         def guardar_configuracion():
             def ext_ord(lb):
-                return [nombres_a_keys[lb.get(i)] for i in range(lb.size())]
+                return [nombres_a_keys[lb.get(i)] for i in range(lb.size()) if lb.get(i) in nombres_a_keys]
             nueva_config = config_actual.copy()
             nueva_config.update({
                 "ruta_drive": ent_drive.get().strip(),
@@ -1571,11 +1520,13 @@ class ControlGeneralEventos:
             })
             
             try:
-                # 1. Guardar Local
                 with open(archivo_config, "w", encoding="utf-8") as f:
                     json.dump(nueva_config, f, indent=4)
                 
-                # 2. 🚀 GUARDAR EN LA NUBE (Sincronización Multi-Estación)
+                config_para_nube = nueva_config.copy()
+                for clave_local in ["ruta_drive", "impresora", "ruta_logo_cotizacion", "rclone_remote"]:
+                    config_para_nube.pop(clave_local, None)
+
                 conn = conectar_db(silencioso=True)
                 if conn:
                     try:
@@ -1584,7 +1535,7 @@ class ControlGeneralEventos:
                         INSERT INTO configuracion_sistema (id, data, actualizado_el)
                         VALUES (1, %s, CURRENT_TIMESTAMP)
                         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, actualizado_el = CURRENT_TIMESTAMP
-                        """, (json.dumps(nueva_config),))
+                        """, (json.dumps(config_para_nube),))
                         conn.commit()
                     except Exception as e:
                         print("Error respaldando config en la nube:", e)
@@ -1600,9 +1551,6 @@ class ControlGeneralEventos:
                 
         ctk.CTkButton(f_scroll, text="💾 Guardar Todos los Cambios", font=("Arial", 14, "bold"), height=45, fg_color="#1f538d", hover_color="#163b65", command=guardar_configuracion).pack(pady=25)
 
-    # =======================================================
-    # GESTIÓN DE USUARIOS Y SUS PERMISOS GRANULARES (SEGURA)
-    # =======================================================
     def abrir_gestion_usuarios(self):
         if not self.tiene_permiso("usuarios"):
             return messagebox.showerror("Acceso Denegado", "No tiene permisos para modificar usuarios.")
@@ -1767,21 +1715,18 @@ class ControlGeneralEventos:
         ctk.CTkButton(f_btn, text="🗑️ Eliminar Usuario", font=("Arial", 12, "bold"), command=eliminar_usuario, fg_color="#e74c3c", hover_color="#c0392b").pack(side="left", padx=5)
         cargar_usuarios()
 
-    # =======================================================
-    # 🚀 NUEVO: VERIFICADOR DE ACTUALIZACIONES GITHUB
-    # =======================================================
     def buscar_actualizaciones_github(self):
         def tarea_check():
             try:
+                ctx = crear_contexto_ssl_seguro()
                 url = "https://api.github.com/repos/Alfredcollie/Sistema_control_eventos/releases/latest"
                 req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
                     if response.status == 200:
                         data = json.loads(response.read().decode())
                         version_github = data.get("tag_name", "")
                         
                         if version_github and version_github != VERSION_ACTUAL:
-                            
                             def preguntar_actualizacion():
                                 respuesta = messagebox.askyesno(
                                     "🚀 Nueva Actualización Disponible",

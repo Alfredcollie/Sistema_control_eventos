@@ -190,6 +190,10 @@ class SistemaProveedores:
         self.crear_tab_buscar()
         self.crear_tab_incluir()
 
+    def ejecutar_en_ui(self, fn, *args):
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.root.after(0, lambda: fn(*args))
+
     def crear_tab_buscar(self):
         # 🚀 MENSAJE FLASH FLOTANTE PARA ELIMINACIÓN (ROJO) EN LA PARTE INFERIOR
         self.frame_flash_buscar = ctk.CTkFrame(self.tab_buscar, fg_color="#e74c3c", corner_radius=8, border_width=2, border_color="#c0392b")
@@ -328,7 +332,7 @@ class SistemaProveedores:
             def tarea_descarga():
                 conn = conectar_db(silencioso=True)
                 if not conn: 
-                    self.root.after(0, lambda: messagebox.showwarning("Modo Lectura", "Sin conexión."))
+                    self.ejecutar_en_ui(messagebox.showwarning, "Modo Lectura", "Sin conexión.")
                     return
                     
                 try:
@@ -349,7 +353,7 @@ class SistemaProveedores:
                     
                     datos_bd = cursor.fetchall()
                     cache_sistema.guardar(clave_cache, datos_bd)
-                    self.root.after(0, lambda: self._pintar_datos_en_tabla(datos_bd, offset))
+                    self.ejecutar_en_ui(self._pintar_datos_en_tabla, datos_bd, offset)
                 except Exception as e:
                     print(f"Error DB Proveedores: {e}")
                 finally:
@@ -470,6 +474,23 @@ class SistemaProveedores:
         btn_c = ctk.CTkButton(f_btn, text="↗", width=32, height=32, font=("Arial", 12), fg_color="#e0e0e0", hover_color="#c8c8c8", text_color="black", command=lambda: self.portapapeles_copiar(widget, nombre_campo))
         btn_c.pack(side="left", padx=2)
 
+    # 🚀 FIX SCROLL: Velocidad aumentada (delta/6 en Win, +-3 en Linux)
+    def _propagar_scroll_incluir(self, event):
+        try:
+            if sys.platform == 'win32':
+                self.scroll_frame._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
+            elif sys.platform == 'darwin':
+                self.scroll_frame._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
+            else:
+                if event.num == 4: self.scroll_frame._parent_canvas.yview_scroll(-3, "units")
+                elif event.num == 5: self.scroll_frame._parent_canvas.yview_scroll(3, "units")
+        except Exception:
+            pass
+        return "break"
+
+    # =======================================================
+    # ⚡ CONSULTA DE RUC (SUNAT) ASÍNCRONA (BYPASS SSL)
+    # =======================================================
     def consultar_ruc_api(self, ruc_entry, nombre_entry, dir_entry):
         ruc = ruc_entry.get().strip()
         if len(ruc) != 11 or not ruc.isdigit():
@@ -483,9 +504,13 @@ class SistemaProveedores:
                 import urllib.error
                 import os
                 
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+                # 🚀 SUPER FIX SSL: Ignorar certificados defectuosos de la SUNAT
+                try:
+                    ctx = ssl._create_unverified_context()
+                except AttributeError:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
                 
                 token = ""
                 try:
@@ -509,15 +534,22 @@ class SistemaProveedores:
                 with urllib.request.urlopen(req, context=ctx, timeout=8) as response:
                     if response.status == 200:
                         data = json.loads(response.read().decode())
-                        self.root.after(0, lambda: self._aplicar_datos_ruc(data, nombre_entry, dir_entry))
-                    else:
-                        self.root.after(0, lambda: messagebox.showwarning("Sin Resultados", "No se encontró información para este RUC."))
+                        self.ejecutar_en_ui(self._aplicar_datos_ruc, data, nombre_entry, dir_entry)
+            
+            except urllib.error.HTTPError as e:
+                # 🚀 FIX API: Omitir cartel rojo en caso de RUC falso o no encontrado.
+                if e.code in [404, 422]:
+                    self.ejecutar_en_ui(messagebox.showwarning, "RUC Inválido", "El RUC ingresado no existe en SUNAT o no es válido.")
+                elif e.code in [401, 403]:
+                    self.ejecutar_en_ui(messagebox.showwarning, "API Restringida", "Se requiere un Token de API válido o el servicio está bloqueado.")
+                else:
+                    self.ejecutar_en_ui(messagebox.showwarning, "Error de Servidor", f"El servidor de SUNAT devolvió un error (Código {e.code}).")
             
             except urllib.error.URLError as e:
                 error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
-                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {msg}"))
+                self.ejecutar_en_ui(messagebox.showerror, "Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {error_msg}")
             except Exception as e:
-                self.root.after(0, lambda err=e: messagebox.showwarning("Error", f"Ocurrió un problema: {err}"))
+                self.ejecutar_en_ui(messagebox.showwarning, "Error", f"Ocurrió un problema: {e}")
 
         threading.Thread(target=tarea, daemon=True).start()
 
@@ -553,6 +585,7 @@ class SistemaProveedores:
             direccion = "Dirección no pública o no registrada en SUNAT"
         
         dir_entry.insert(0, direccion)
+        # 🚀 SILENCIADO: Autocompleta directo sin MessageBox
 
     def ejecutar_importacion_pdf(self):
         try:
@@ -639,28 +672,21 @@ class SistemaProveedores:
         except Exception as e:
             messagebox.showerror("Error de Lectura", f"No se pudo procesar el PDF:\n\n{str(e)}")
 
-    def _propagar_scroll_incluir(self, event):
-        try:
-            if sys.platform == 'win32':
-                self.scroll_frame._parent_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-            elif sys.platform == 'darwin':
-                self.scroll_frame._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
-            else:
-                if event.num == 4: self.scroll_frame._parent_canvas.yview_scroll(-1, "units")
-                elif event.num == 5: self.scroll_frame._parent_canvas.yview_scroll(1, "units")
-        except Exception:
-            pass
-        return "break"
-
     def crear_tab_incluir(self):
-        # 🚀 MENSAJE FLASH FLOTANTE SEGURO (Nivel Tab) EN LA PARTE INFERIOR
-        self.frame_flash = ctk.CTkFrame(self.tab_incluir, fg_color="#27ae60", corner_radius=8, border_width=2, border_color="#2ecc71")
-        self.lbl_flash = ctk.CTkLabel(self.frame_flash, text="✅ Proveedor guardado correctamente", font=("Arial", 14, "bold"), text_color="white")
-        self.lbl_flash.pack(padx=30, pady=12)
+        familia_fuente = "Helvetica" if sys.platform == "darwin" else "Arial"
         
         self.scroll_frame = ctk.CTkScrollableFrame(self.tab_incluir, fg_color="transparent")
         self.scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
-
+        
+        # 🚀 CONTENEDOR SEGURO Y PERMANENTE PARA EL MENSAJE FLASH
+        self.flash_container = ctk.CTkFrame(self.scroll_frame, fg_color="transparent", height=0)
+        self.flash_container.pack(fill="x", pady=0)
+        
+        self.frame_flash = ctk.CTkFrame(self.flash_container, fg_color="#27ae60", corner_radius=8)
+        self.lbl_flash = ctk.CTkLabel(self.frame_flash, text="✅ Proveedor guardado correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
+        self.lbl_flash.pack(padx=20, pady=10)
+        self.frame_flash.pack_forget() # Oculto por defecto
+        
         f_pdf = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f_pdf.pack(fill="x", padx=10, pady=(0, 10))
         btn_importar_rapido = ctk.CTkButton(f_pdf, text="📄 Importar Datos de Ficha PDF", font=("Arial", 12, "bold"), fg_color="#27ae60", hover_color="#1e8449", command=self.ejecutar_importacion_pdf)
@@ -690,6 +716,17 @@ class SistemaProveedores:
         ctk.CTkLabel(f1, text="Dirección Fiscal:", font=("Arial", 12, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=8)
         self.ent_direccion = ctk.CTkEntry(f1)
         self.ent_direccion.grid(row=2, column=1, columnspan=2, sticky="ew", pady=8)
+        
+        # 🚀 APLICAMOS EL FIX DE SCROLL A TODAS LAS CAJAS BLANCAS (f1, f2, f3)
+        for frame_caja in [f1]:
+            frame_caja.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+
         self.crear_botones_cp(f1, 2, 3, self.ent_direccion, "la Dirección Fiscal")
         
         ctk.CTkLabel(f1, text="Categoría Principal:", font=("Arial", 12, "bold")).grid(row=3, column=0, sticky="w", padx=(20, 5), pady=8)
@@ -753,6 +790,15 @@ class SistemaProveedores:
         f2 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f2.pack(fill="x", padx=10, pady=10, ipady=15)
         
+        for frame_caja in [f2]:
+            frame_caja.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+
         f2.columnconfigure(1, weight=1)
         f2.columnconfigure(4, weight=1)
         
@@ -806,6 +852,15 @@ class SistemaProveedores:
         f3 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)
         
+        for frame_caja in [f3]:
+            frame_caja.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+            frame_caja.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
+                frame_caja._canvas.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
+
         f3.columnconfigure(1, weight=1)
         f3.columnconfigure(4, weight=1)
 
@@ -981,6 +1036,8 @@ class SistemaProveedores:
             
         if not p: return
             
+        familia_fuente = "Helvetica" if sys.platform == "darwin" else "Arial"
+        
         v_edit = ctk.CTkToplevel(self.root)
         v_edit.title(f"Modificar Proveedor Registrado - ID Interno: {id_prov}")
         v_edit.geometry("1100x750")
@@ -990,7 +1047,7 @@ class SistemaProveedores:
         
         # 🚀 MENSAJE FLASH FLOTANTE EN EDICIÓN
         frame_flash_edit = ctk.CTkFrame(v_edit, fg_color="#27ae60", corner_radius=8, border_width=2, border_color="#2ecc71")
-        lbl_flash_edit = ctk.CTkLabel(frame_flash_edit, text="✅ Cambios guardados correctamente", font=("Arial", 14, "bold"), text_color="white")
+        lbl_flash_edit = ctk.CTkLabel(frame_flash_edit, text="✅ Cambios guardados correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
         lbl_flash_edit.pack(padx=30, pady=12)
         
         scroll_frame_e = ctk.CTkScrollableFrame(v_edit, fg_color="transparent")
@@ -1000,12 +1057,12 @@ class SistemaProveedores:
         def _propagar_scroll_editar(event):
             try:
                 if sys.platform == 'win32':
-                    scroll_frame_e._parent_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                    scroll_frame_e._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
                 elif sys.platform == 'darwin':
                     scroll_frame_e._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
                 else:
-                    if event.num == 4: scroll_frame_e._parent_canvas.yview_scroll(-1, "units")
-                    elif event.num == 5: scroll_frame_e._parent_canvas.yview_scroll(1, "units")
+                    if event.num == 4: scroll_frame_e._parent_canvas.yview_scroll(-3, "units")
+                    elif event.num == 5: scroll_frame_e._parent_canvas.yview_scroll(3, "units")
             except Exception:
                 pass
             return "break"
@@ -1016,66 +1073,75 @@ class SistemaProveedores:
         f1.columnconfigure(1, weight=1)
         f1.columnconfigure(4, weight=1)
 
-        ctk.CTkLabel(f1, text="Datos Principales", font=("Arial", 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
+        ctk.CTkLabel(f1, text="Datos Principales", font=(familia_fuente, 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
         
-        ctk.CTkLabel(f1, text="RUC:\n(Presiona Enter para buscar)", font=("Arial", 12, "bold")).grid(row=1, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="RUC:\n(Presiona Enter para buscar)", font=(familia_fuente, 12, "bold")).grid(row=1, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_ruc = ctk.CTkEntry(f1)
         ent_e_ruc.grid(row=1, column=1, sticky="ew", pady=8)
         ent_e_ruc.insert(0, str(p[1]) if p[1] else "")
         
         self.crear_botones_cp(f1, 1, 2, ent_e_ruc, "el RUC")
         
-        ctk.CTkLabel(f1, text="Nombre/Razón Social:", font=("Arial", 12, "bold")).grid(row=1, column=3, sticky="w", padx=(30, 5), pady=8)
+        ctk.CTkLabel(f1, text="Nombre/Razón Social:", font=(familia_fuente, 12, "bold")).grid(row=1, column=3, sticky="w", padx=(30, 5), pady=8)
         ent_e_nombre = ctk.CTkEntry(f1)
         ent_e_nombre.grid(row=1, column=4, sticky="ew", pady=8)
         ent_e_nombre.insert(0, str(p[2]) if p[2] else "")
         self.crear_botones_cp(f1, 1, 5, ent_e_nombre, "la Razón Social")
 
-        ctk.CTkLabel(f1, text="Dirección Fiscal:", font=("Arial", 12, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Dirección Fiscal:", font=(familia_fuente, 12, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_direccion = ctk.CTkEntry(f1)
         ent_e_direccion.grid(row=2, column=1, columnspan=2, sticky="ew", pady=8)
         ent_e_direccion.insert(0, str(p[25]) if len(p)>25 and p[25] else "")
         self.crear_botones_cp(f1, 2, 3, ent_e_direccion, "la Dirección Fiscal")
 
+        for frame_caja in [f1]:
+            frame_caja.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-4>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-5>", _propagar_scroll_editar, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-4>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-5>", _propagar_scroll_editar, add="+")
+
         ent_e_ruc.bind("<Return>", lambda e: self.consultar_ruc_api(ent_e_ruc, ent_e_nombre, ent_e_direccion))
         
-        ctk.CTkLabel(f1, text="Categoría Principal:", font=("Arial", 12, "bold")).grid(row=3, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Categoría Principal:", font=(familia_fuente, 12, "bold")).grid(row=3, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat = tk.StringVar(value=str(p[3]) if p[3] else "No seleccionada")
-        lbl_e_cat = ctk.CTkLabel(f1, textvariable=var_e_cat, font=("Arial", 12, "bold"), text_color="#1F85DE")
+        lbl_e_cat = ctk.CTkLabel(f1, textvariable=var_e_cat, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat.grid(row=3, column=1, sticky="w", pady=8)
         btn_sel_cat = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat))
         btn_sel_cat.grid(row=3, column=3, sticky="w", padx=15, pady=8)
 
-        ctk.CTkLabel(f1, text="Categoría Adicional 2:", font=("Arial", 12, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Categoría Adicional 2:", font=(familia_fuente, 12, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_2 = tk.StringVar(value=str(p[21]) if len(p)>21 and p[21] else "No seleccionada")
-        lbl_e_cat_2 = ctk.CTkLabel(f1, textvariable=var_e_cat_2, font=("Arial", 12, "bold"), text_color="#1F85DE")
+        lbl_e_cat_2 = ctk.CTkLabel(f1, textvariable=var_e_cat_2, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_2.grid(row=4, column=1, sticky="w", pady=8)
         btn_sel_cat_2 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_2))
         btn_sel_cat_2.grid(row=4, column=3, sticky="w", padx=15, pady=8)
 
-        ctk.CTkLabel(f1, text="Categoría Adicional 3:", font=("Arial", 12, "bold")).grid(row=5, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Categoría Adicional 3:", font=(familia_fuente, 12, "bold")).grid(row=5, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_3 = tk.StringVar(value=str(p[22]) if len(p)>22 and p[22] else "No seleccionada")
-        lbl_e_cat_3 = ctk.CTkLabel(f1, textvariable=var_e_cat_3, font=("Arial", 12, "bold"), text_color="#1F85DE")
+        lbl_e_cat_3 = ctk.CTkLabel(f1, textvariable=var_e_cat_3, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_3.grid(row=5, column=1, sticky="w", pady=8)
         btn_sel_cat_3 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_3))
         btn_sel_cat_3.grid(row=5, column=3, sticky="w", padx=15, pady=8)
 
-        ctk.CTkLabel(f1, text="Categoría Adicional 4:", font=("Arial", 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Categoría Adicional 4:", font=(familia_fuente, 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_4 = tk.StringVar(value=str(p[23]) if len(p)>23 and p[23] else "No seleccionada")
-        lbl_e_cat_4 = ctk.CTkLabel(f1, textvariable=var_e_cat_4, font=("Arial", 12, "bold"), text_color="#1F85DE")
+        lbl_e_cat_4 = ctk.CTkLabel(f1, textvariable=var_e_cat_4, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_4.grid(row=6, column=1, sticky="w", pady=8)
         btn_sel_cat_4 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_4))
         btn_sel_cat_4.grid(row=6, column=3, sticky="w", padx=15, pady=8)
 
-        ctk.CTkLabel(f1, text="Categoría Adicional 5:", font=("Arial", 12, "bold")).grid(row=7, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f1, text="Categoría Adicional 5:", font=(familia_fuente, 12, "bold")).grid(row=7, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_5 = tk.StringVar(value=str(p[24]) if len(p)>24 and p[24] else "No seleccionada")
-        lbl_e_cat_5 = ctk.CTkLabel(f1, textvariable=var_e_cat_5, font=("Arial", 12, "bold"), text_color="#1F85DE")
+        lbl_e_cat_5 = ctk.CTkLabel(f1, textvariable=var_e_cat_5, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_5.grid(row=7, column=1, sticky="w", pady=8)
         btn_sel_cat_5 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_5))
         btn_sel_cat_5.grid(row=7, column=3, sticky="w", padx=15, pady=8)
 
-        ctk.CTkLabel(f1, text="Descripción Proveedor:\n(Max 400 carac.)", font=("Arial", 12, "bold")).grid(row=8, column=0, sticky="nw", padx=(20, 5), pady=12)
-        txt_e_descripcion = ctk.CTkTextbox(f1, height=110, font=("Arial", 12), border_width=1)
+        ctk.CTkLabel(f1, text="Descripción Proveedor:\n(Max 400 carac.)", font=(familia_fuente, 12, "bold")).grid(row=8, column=0, sticky="nw", padx=(20, 5), pady=12)
+        txt_e_descripcion = ctk.CTkTextbox(f1, height=110, font=(familia_fuente, 12), border_width=1)
         txt_e_descripcion.grid(row=8, column=1, columnspan=4, sticky="ew", pady=12)
         txt_e_descripcion.insert("1.0", str(p[20]) if p[20] else "")
         self.crear_botones_cp(f1, 8, 5, txt_e_descripcion, "la Descripción")
@@ -1085,7 +1151,7 @@ class SistemaProveedores:
         txt_e_descripcion._textbox.bind("<Button-4>", _propagar_scroll_editar, add="+")
         txt_e_descripcion._textbox.bind("<Button-5>", _propagar_scroll_editar, add="+")
         
-        lbl_e_contador = ctk.CTkLabel(f1, text=f"Caracteres restantes: {400 - len(txt_e_descripcion.get('1.0', 'end-1c'))}", font=("Arial", 11), text_color="gray")
+        lbl_e_contador = ctk.CTkLabel(f1, text=f"Caracteres restantes: {400 - len(txt_e_descripcion.get('1.0', 'end-1c'))}", font=(familia_fuente, 11), text_color="gray")
         lbl_e_contador.grid(row=9, column=1, sticky="w", padx=2)
 
         def limitar_caracteres_edit(event):
@@ -1101,59 +1167,68 @@ class SistemaProveedores:
         f2 = ctk.CTkFrame(scroll_frame_e, corner_radius=12)
         f2.pack(fill="x", padx=10, pady=10, ipady=15)
         
+        for frame_caja in [f2]:
+            frame_caja.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-4>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-5>", _propagar_scroll_editar, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-4>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-5>", _propagar_scroll_editar, add="+")
+
         f2.columnconfigure(1, weight=1)
         f2.columnconfigure(4, weight=1)
         
-        ctk.CTkLabel(f2, text="Información de Contacto y Enlaces", font=("Arial", 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
+        ctk.CTkLabel(f2, text="Información de Contacto y Enlaces", font=(familia_fuente, 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
         
-        ctk.CTkLabel(f2, text="Contacto Principal:", font=("Arial", 12, "bold")).grid(row=1, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f2, text="Contacto Principal:", font=(familia_fuente, 12, "bold")).grid(row=1, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_contacto = ctk.CTkEntry(f2)
         ent_e_contacto.grid(row=1, column=1, sticky="ew", pady=8)
         ent_e_contacto.insert(0, str(p[4]) if p[4] else "")
         self.crear_botones_cp(f2, 1, 2, ent_e_contacto, "el Contacto Principal")
         
-        ctk.CTkLabel(f2, text="WhatsApp Principal:", font=("Arial", 12, "bold")).grid(row=1, column=3, sticky="w", padx=(30, 5), pady=8)
+        ctk.CTkLabel(f2, text="WhatsApp Principal:", font=(familia_fuente, 12, "bold")).grid(row=1, column=3, sticky="w", padx=(30, 5), pady=8)
         ent_e_whatsapp = ctk.CTkEntry(f2)
         ent_e_whatsapp.grid(row=1, column=4, sticky="ew", pady=8)
         ent_e_whatsapp.insert(0, str(p[5]) if p[5] else "")
         self.crear_botones_cp(f2, 1, 5, ent_e_whatsapp, "el WhatsApp Principal")
 
-        ctk.CTkLabel(f2, text="Contacto Alternativo:", font=("Arial", 12, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f2, text="Contacto Alternativo:", font=(familia_fuente, 12, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_contacto_2 = ctk.CTkEntry(f2)
         ent_e_contacto_2.grid(row=2, column=1, sticky="ew", pady=8)
         ent_e_contacto_2.insert(0, str(p[6]) if p[6] else "")
         self.crear_botones_cp(f2, 2, 2, ent_e_contacto_2, "el Contacto Alternativo")
         
-        ctk.CTkLabel(f2, text="WhatsApp Alternativo:", font=("Arial", 12, "bold")).grid(row=2, column=3, sticky="w", padx=(30, 5), pady=8)
+        ctk.CTkLabel(f2, text="WhatsApp Alternativo:", font=(familia_fuente, 12, "bold")).grid(row=2, column=3, sticky="w", padx=(30, 5), pady=8)
         ent_e_whatsapp_2 = ctk.CTkEntry(f2)
         ent_e_whatsapp_2.grid(row=2, column=4, sticky="ew", pady=8)
         ent_e_whatsapp_2.insert(0, str(p[7]) if p[7] else "")
         self.crear_botones_cp(f2, 2, 5, ent_e_whatsapp_2, "el WhatsApp Alternativo")
         
-        ctk.CTkLabel(f2, text="Correo Electrónico:", font=("Arial", 12, "bold")).grid(row=3, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f2, text="Correo Electrónico:", font=(familia_fuente, 12, "bold")).grid(row=3, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_correo = ctk.CTkEntry(f2)
         ent_e_correo.grid(row=3, column=1, sticky="ew", pady=8)
         ent_e_correo.insert(0, str(p[8]) if p[8] else "")
         self.crear_botones_cp(f2, 3, 2, ent_e_correo, "el Correo")
         
-        ctk.CTkLabel(f2, text="Ubicación (Zonas Lima):", font=("Arial", 12, "bold")).grid(row=3, column=3, sticky="w", padx=(30, 5), pady=8)
+        ctk.CTkLabel(f2, text="Ubicación (Zonas Lima):", font=(familia_fuente, 12, "bold")).grid(row=3, column=3, sticky="w", padx=(30, 5), pady=8)
         cmb_e_ubicacion = ctk.CTkOptionMenu(f2, values=ZONAS_LIMA)
         cmb_e_ubicacion.grid(row=3, column=4, sticky="ew", pady=8)
         if p[9] in ZONAS_LIMA: cmb_e_ubicacion.set(p[9])
         
-        ctk.CTkLabel(f2, text="Link Web:", font=("Arial", 12, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f2, text="Link Web:", font=(familia_fuente, 12, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_web = ctk.CTkEntry(f2)
         ent_e_web.grid(row=4, column=1, sticky="ew", pady=8)
         ent_e_web.insert(0, str(p[10]) if p[10] else "")
         self.crear_botones_cp(f2, 4, 2, ent_e_web, "el Link Web")
         
-        ctk.CTkLabel(f2, text="Zona:", font=("Arial", 12, "bold")).grid(row=4, column=3, sticky="w", padx=(30, 5), pady=8)
+        ctk.CTkLabel(f2, text="Zona:", font=(familia_fuente, 12, "bold")).grid(row=4, column=3, sticky="w", padx=(30, 5), pady=8)
         ent_e_catalogo = ctk.CTkEntry(f2)
         ent_e_catalogo.grid(row=4, column=4, sticky="ew", pady=8)
         ent_e_catalogo.insert(0, str(p[11]) if p[11] else "")
         self.crear_botones_cp(f2, 4, 5, ent_e_catalogo, "la Zona")
 
-        ctk.CTkLabel(f2, text="Enlace Catálogo:", font=("Arial", 12, "bold")).grid(row=5, column=0, sticky="w", padx=(20, 5), pady=8)
+        ctk.CTkLabel(f2, text="Enlace Catálogo:", font=(familia_fuente, 12, "bold")).grid(row=5, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_catalogo_link = ctk.CTkEntry(f2)
         ent_e_catalogo_link.grid(row=5, column=1, sticky="ew", pady=8)
         ent_e_catalogo_link.insert(0, str(p[11]) if p[11] else "")
@@ -1162,55 +1237,64 @@ class SistemaProveedores:
         f3 = ctk.CTkFrame(scroll_frame_e, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)
         
+        for frame_caja in [f3]:
+            frame_caja.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-4>", _propagar_scroll_editar, add="+")
+            frame_caja.bind("<Button-5>", _propagar_scroll_editar, add="+")
+            if hasattr(frame_caja, '_canvas'):
+                frame_caja._canvas.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-4>", _propagar_scroll_editar, add="+")
+                frame_caja._canvas.bind("<Button-5>", _propagar_scroll_editar, add="+")
+
         f3.columnconfigure(1, weight=1)
         f3.columnconfigure(4, weight=1)
 
-        ctk.CTkLabel(f3, text="Información Financiera y Detracciones", font=("Arial", 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
+        ctk.CTkLabel(f3, text="Información Financiera y Detracciones", font=(familia_fuente, 15, "bold"), text_color="#1f538d").grid(row=0, column=0, columnspan=6, sticky="w", padx=20, pady=(15, 15))
         
-        ctk.CTkLabel(f3, text="CUENTA PRINCIPAL", font=("Arial", 12, "bold"), text_color="gray").grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(5, 10))
-        ctk.CTkLabel(f3, text="Banco:", font=("Arial", 11, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=5)
+        ctk.CTkLabel(f3, text="CUENTA PRINCIPAL", font=(familia_fuente, 12, "bold"), text_color="gray").grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(5, 10))
+        ctk.CTkLabel(f3, text="Banco:", font=(familia_fuente, 11, "bold")).grid(row=2, column=0, sticky="w", padx=(20, 5), pady=5)
         cmb_e_banco_1 = ctk.CTkOptionMenu(f3, values=["Ninguno"] + BANCOS_PERU)
         cmb_e_banco_1.grid(row=2, column=1, sticky="w", pady=5)
         if p[12] in (["Ninguno"] + BANCOS_PERU): cmb_e_banco_1.set(p[12])
         
-        ctk.CTkLabel(f3, text="N° Cuenta:", font=("Arial", 11, "bold")).grid(row=2, column=2, sticky="w", padx=(15, 5), pady=5)
+        ctk.CTkLabel(f3, text="N° Cuenta:", font=(familia_fuente, 11, "bold")).grid(row=2, column=2, sticky="w", padx=(15, 5), pady=5)
         ent_e_cuenta_1 = ctk.CTkEntry(f3)
         ent_e_cuenta_1.grid(row=2, column=3, sticky="ew", pady=5)
         ent_e_cuenta_1.insert(0, str(p[13]) if p[13] else "")
         self.crear_botones_cp(f3, 2, 4, ent_e_cuenta_1, "la Cuenta Principal")
         
-        ctk.CTkLabel(f3, text="CCI:", font=("Arial", 11, "bold")).grid(row=2, column=5, sticky="w", padx=(15, 5), pady=5)
+        ctk.CTkLabel(f3, text="CCI:", font=(familia_fuente, 11, "bold")).grid(row=2, column=5, sticky="w", padx=(15, 5), pady=5)
         ent_e_cci_1 = ctk.CTkEntry(f3)
         ent_e_cci_1.grid(row=2, column=6, sticky="ew", pady=5)
         ent_e_cci_1.insert(0, str(p[14]) if p[14] else "")
         self.crear_botones_cp(f3, 2, 7, ent_e_cci_1, "el CCI Principal")
 
-        ctk.CTkLabel(f3, text="CUENTA SECUNDARIA (OPCIONAL)", font=("Arial", 12, "bold"), text_color="gray").grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 10))
-        ctk.CTkLabel(f3, text="Banco:", font=("Arial", 11, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=5)
+        ctk.CTkLabel(f3, text="CUENTA SECUNDARIA (OPCIONAL)", font=(familia_fuente, 12, "bold"), text_color="gray").grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 10))
+        ctk.CTkLabel(f3, text="Banco:", font=(familia_fuente, 11, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=5)
         cmb_e_banco_2 = ctk.CTkOptionMenu(f3, values=["Ninguno"] + BANCOS_PERU)
         cmb_e_banco_2.grid(row=4, column=1, sticky="w", pady=5)
         if p[15] in (["Ninguno"] + BANCOS_PERU): cmb_e_banco_2.set(p[15])
         
-        ctk.CTkLabel(f3, text="N° Cuenta:", font=("Arial", 11, "bold")).grid(row=4, column=2, sticky="w", padx=(15, 5), pady=5)
+        ctk.CTkLabel(f3, text="N° Cuenta:", font=(familia_fuente, 11, "bold")).grid(row=4, column=2, sticky="w", padx=(15, 5), pady=5)
         ent_e_cuenta_2 = ctk.CTkEntry(f3)
         ent_e_cuenta_2.grid(row=4, column=3, sticky="ew", pady=5)
         ent_e_cuenta_2.insert(0, str(p[16]) if p[16] else "")
         self.crear_botones_cp(f3, 4, 4, ent_e_cuenta_2, "la Cuenta Secundaria")
         
-        ctk.CTkLabel(f3, text="CCI:", font=("Arial", 11, "bold")).grid(row=4, column=5, sticky="w", padx=(15, 5), pady=5)
+        ctk.CTkLabel(f3, text="CCI:", font=(familia_fuente, 11, "bold")).grid(row=4, column=5, sticky="w", padx=(15, 5), pady=5)
         ent_e_cci_2 = ctk.CTkEntry(f3)
         ent_e_cci_2.grid(row=4, column=6, sticky="ew", pady=5)
         ent_e_cci_2.insert(0, str(p[17]) if p[17] else "")
         self.crear_botones_cp(f3, 4, 7, ent_e_cci_2, "el CCI Secundario")
 
-        ctk.CTkLabel(f3, text="SISTEMA DE DETRACCIONES", font=("Arial", 12, "bold"), text_color="#1F85DE").grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 10))
-        ctk.CTkLabel(f3, text="Cuenta BN:", font=("Arial", 11, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=5)
+        ctk.CTkLabel(f3, text="SISTEMA DE DETRACCIONES", font=(familia_fuente, 12, "bold"), text_color="#1F85DE").grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 10))
+        ctk.CTkLabel(f3, text="Cuenta BN:", font=(familia_fuente, 11, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=5)
         ent_e_detraccion = ctk.CTkEntry(f3)
         ent_e_detraccion.grid(row=6, column=1, sticky="ew", pady=5)
         ent_e_detraccion.insert(0, str(p[18]) if p[18] else "")
         self.crear_botones_cp(f3, 6, 2, ent_e_detraccion, "la Detracción")
         
-        ctk.CTkLabel(f3, text="Tasa Detracción (%):", font=("Arial", 11, "bold")).grid(row=6, column=3, sticky="w", padx=(30, 5), pady=5)
+        ctk.CTkLabel(f3, text="Tasa Detracción (%):", font=(familia_fuente, 11, "bold")).grid(row=6, column=3, sticky="w", padx=(30, 5), pady=5)
         ent_e_porcentaje_detraccion = ctk.CTkEntry(f3)
         ent_e_porcentaje_detraccion.grid(row=6, column=4, sticky="ew", pady=5)
         ent_e_porcentaje_detraccion.insert(0, str(p[19]) if p[19] else "")

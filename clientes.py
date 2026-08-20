@@ -11,7 +11,9 @@ Optimizaciones Aplicadas:
 4. 🔍 Consulta RUC SUNAT No Bloqueante: Hilos dedicados con bypass SSL seguro en macOS.
 5. 💾 Caché en Memoria + Paginación Lazy Loading (50 en 50).
 6. ✅ Mensajes Flash Flotantes (Toast) en la parte INFERIOR de la pantalla.
-7. 🔇 Autocompletado de RUC silencioso (Sin letreros molestos).
+7. 🔇 Autocompletado de RUC silencioso.
+8. 🛡️ FIX SSL: Bypass estricto de certificados para API RUC.
+9. 🚀 FIX SCROLL: Velocidad acelerada y sincronizada en áreas blancas.
 """
 
 import sys
@@ -230,7 +232,6 @@ class SistemaClientes:
     def crear_tab_buscar(self):
         familia_fuente = "Helvetica" if sys.platform == "darwin" else "Arial"
         
-        # 🚀 MENSAJE FLASH FLOTANTE PARA ELIMINACIÓN (ROJO)
         self.frame_flash_buscar = ctk.CTkFrame(self.tab_buscar, fg_color="#e74c3c", corner_radius=8, border_width=2, border_color="#c0392b")
         self.lbl_flash_buscar = ctk.CTkLabel(self.frame_flash_buscar, text="❌ Cliente eliminado correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
         self.lbl_flash_buscar.pack(padx=30, pady=12)
@@ -302,10 +303,8 @@ class SistemaClientes:
         self.tabla.bind("<<TreeviewSelect>>", self.on_fila_seleccionada)
         self.tabla.bind("<Double-1>", lambda event: self.abrir_ventana_editar())
         
-        # Placeholder instantáneo
         self.tabla.insert("", tk.END, values=("", "", "Cargando...", "Conectando con base de datos...", "", "", "", ""))
         
-        # 🚀 BOTONES DE PAGINACIÓN
         frame_paginacion = ctk.CTkFrame(self.tab_buscar, fg_color="transparent")
         frame_paginacion.pack(fill="x", padx=10, pady=(0, 10))
         
@@ -339,7 +338,6 @@ class SistemaClientes:
         self.ent_buscar.delete(0, tk.END)
         self.cargar_clientes_tabla(reset_pagina=True)
 
-    # ⚡ CARGA CONCURRENTE CON CACHÉ (Zero Lag)
     def cargar_clientes_tabla(self, reset_pagina=False):
         if self._esta_destruido:
             return
@@ -449,7 +447,6 @@ class SistemaClientes:
         id_cli = valores[1]
         nombre_cli = valores[3]
         
-        # 🚀 PREGUNTA DE CONFIRMACIÓN ANTES DE ELIMINAR
         if not messagebox.askyesno("Confirmar Eliminación", f"¿Desea eliminar permanentemente al cliente:\n\n'{nombre_cli}' (Ref. Interna: {id_cli})?"):
             return
             
@@ -467,7 +464,6 @@ class SistemaClientes:
             
             self.cargar_clientes_tabla(reset_pagina=True)
             
-            # 🚀 MENSAJE FLASH FLOTANTE DE ELIMINACIÓN (ROJO) EN LA PARTE INFERIOR
             self.frame_flash_buscar.place(relx=0.5, rely=0.95, anchor="s")
             self.frame_flash_buscar.lift()
             self.root.update_idletasks()
@@ -478,9 +474,6 @@ class SistemaClientes:
         finally:
             liberar_conexion(conn)
 
-    # =======================================================
-    # UTILIDADES DE PORTAPAPELES Y SCROLL
-    # =======================================================
     def portapapeles_copiar(self, widget, nombre_campo):
         self.root.clipboard_clear()
         if hasattr(widget, 'get') and not isinstance(widget, ctk.CTkTextbox):
@@ -511,22 +504,20 @@ class SistemaClientes:
         btn_c.pack(side="left", padx=2)
         ToolTip(btn_c, f"Copia el contenido de {nombre_campo}.")
 
+    # 🚀 FIX SCROLL: Velocidad aumentada en cajas de texto (delta/6 en Win, +-3 en Linux)
     def _propagar_scroll_incluir(self, event):
         try:
             if sys.platform == 'win32':
-                self.scroll_frame._parent_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                self.scroll_frame._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
             elif sys.platform == 'darwin':
                 self.scroll_frame._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
             else:
-                if event.num == 4: self.scroll_frame._parent_canvas.yview_scroll(-1, "units")
-                elif event.num == 5: self.scroll_frame._parent_canvas.yview_scroll(1, "units")
+                if event.num == 4: self.scroll_frame._parent_canvas.yview_scroll(-3, "units")
+                elif event.num == 5: self.scroll_frame._parent_canvas.yview_scroll(3, "units")
         except Exception:
             pass
         return "break"
 
-    # =======================================================
-    # ⚡ CONSULTA DE RUC (SUNAT) ASÍNCRONA
-    # =======================================================
     def consultar_ruc_api(self, ruc_entry, nombre_entry, dir_entry):
         ruc = ruc_entry.get().strip()
         if len(ruc) != 11 or not ruc.isdigit():
@@ -534,9 +525,18 @@ class SistemaClientes:
 
         def tarea():
             try:
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
+                import ssl
+                import json
+                import urllib.request
+                import urllib.error
+                import os
+                
+                try:
+                    ctx = ssl._create_unverified_context()
+                except AttributeError:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
                 
                 token = ""
                 try:
@@ -561,8 +561,15 @@ class SistemaClientes:
                     if response.status == 200:
                         data = json.loads(response.read().decode())
                         self.ejecutar_en_ui(self._aplicar_datos_ruc, data, nombre_entry, dir_entry)
-                    else:
-                        self.ejecutar_en_ui(messagebox.showwarning, "Sin Resultados", "No se encontró información para este RUC.")
+            
+            except urllib.error.HTTPError as e:
+                if e.code in [404, 422]:
+                    self.ejecutar_en_ui(messagebox.showwarning, "RUC Inválido", "El RUC ingresado no existe en SUNAT o no es válido.")
+                elif e.code in [401, 403]:
+                    self.ejecutar_en_ui(messagebox.showwarning, "API Restringida", "Se requiere un Token de API válido o el servicio está bloqueado.")
+                else:
+                    self.ejecutar_en_ui(messagebox.showwarning, "Error de Servidor", f"El servidor de SUNAT devolvió un error (Código {e.code}).")
+            
             except urllib.error.URLError as e:
                 error_msg = str(e.reason) if hasattr(e, 'reason') else str(e)
                 self.ejecutar_en_ui(messagebox.showerror, "Error de Red", f"Conexión bloqueada o sin internet.\nDetalle: {error_msg}")
@@ -610,14 +617,13 @@ class SistemaClientes:
         self.scroll_frame = ctk.CTkScrollableFrame(self.tab_incluir, fg_color="transparent")
         self.scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # 🚀 CONTENEDOR SEGURO Y PERMANENTE PARA EL MENSAJE FLASH
         self.flash_container = ctk.CTkFrame(self.scroll_frame, fg_color="transparent", height=0)
         self.flash_container.pack(fill="x", pady=0)
         
         self.frame_flash = ctk.CTkFrame(self.flash_container, fg_color="#27ae60", corner_radius=8)
         self.lbl_flash = ctk.CTkLabel(self.frame_flash, text="✅ Cliente guardado correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
         self.lbl_flash.pack(padx=20, pady=10)
-        self.frame_flash.pack_forget() # Oculto por defecto
+        self.frame_flash.pack_forget()
         
         f1 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f1.pack(fill="x", padx=10, pady=10, ipady=15)
@@ -823,12 +829,12 @@ class SistemaClientes:
         def _propagar_scroll_editar(event):
             try:
                 if sys.platform == 'win32':
-                    scroll_frame_e._parent_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                    scroll_frame_e._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
                 elif sys.platform == 'darwin':
                     scroll_frame_e._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
                 else:
-                    if event.num == 4: scroll_frame_e._parent_canvas.yview_scroll(-1, "units")
-                    elif event.num == 5: scroll_frame_e._parent_canvas.yview_scroll(1, "units")
+                    if event.num == 4: scroll_frame_e._parent_canvas.yview_scroll(-3, "units")
+                    elif event.num == 5: scroll_frame_e._parent_canvas.yview_scroll(3, "units")
             except Exception:
                 pass
             return "break"

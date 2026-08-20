@@ -11,6 +11,7 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
   estrictamente los márgenes laterales.
 - FIX: Términos y Condiciones cargados desde Configuración Global.
 - FIX: Exoneración de Fee incorporada dinámicamente.
+- FIX: Respeta el orden manual de los ítems (ORDER BY id ASC).
 """
 
 import os
@@ -87,7 +88,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         sin_fee_db = False
 
         try:
-            # 🚀 AQUÍ LEEMOS EL VALOR DEL CHECKBOX (SIN_FEE) DESDE LA BASE DE DATOS
             cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
             res_db = cursor.fetchone()
             if res_db:
@@ -359,7 +359,8 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         dibujar_encabezado_tabla(y_pos)
 
         try:
-            cursor.execute("SELECT * FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY categoria_suministro ASC", (codigo_cotizacion,))
+            # 🚀 FIX: EL ORDEN ESTRICTO DEL ID PARA QUE SE VEA IGUAL QUE EN PANTALLA
+            cursor.execute("SELECT * FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (codigo_cotizacion,))
             filas_preparadas, bloques_items = [], []
             for r in cursor.fetchall():
                 cat_sum = str(r[2]).strip().upper() if len(r) > 2 and r[2] else "SUMINISTRO"

@@ -5,14 +5,10 @@
 FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 =========================================================
 - FIX: Ajuste dinámico de la posición del bloque de totales. 
-  Si sobran más de 205 puntos, el subtotal se dibujará fijo al pie de la página,
-  garantizando que siempre quede en la parte inferior (estilo carta formal).
-- FIX: Logo adaptado al ancho de la hoja (borde a borde), respetando 
-  estrictamente los márgenes laterales.
-- FIX: Términos y Condiciones cargados desde Configuración Global.
+- FIX: Logo adaptado al ancho de la hoja (borde a borde).
 - FIX: Exoneración de Fee incorporada dinámicamente.
 - FIX: Respeta el orden manual de los ítems (ORDER BY id ASC).
-- FIX: Etiqueta "CONTACTO" bajada una línea dentro del recuadro.
+- FIX: "Descripción del Proyecto" ajustada automáticamente (Word Wrap) para que no se salga del recuadro gris.
 """
 
 import os
@@ -139,7 +135,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             conn_shared.rollback()
 
         # --------------------------------------------------
-        # 🚀 FIX MAC: RUTAS DE GUARDADO BLINDADAS
+        # RUTAS DE GUARDADO
         # --------------------------------------------------
         ruta_drive = str(config.get("ruta_drive", "")).strip()
         usando_respaldo = False
@@ -177,111 +173,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         margen_der = 40
         ancho_util = ancho_hoja - margen_izq - margen_der
 
-        ruta_usar = None
-        mostrar_logo = True
-        
-        if "ruta_logo_cotizacion" in config:
-            ruta_conf = str(config.get("ruta_logo_cotizacion", "")).strip()
-            if ruta_conf != "":
-                ruta_conf = os.path.normpath(ruta_conf)
-                
-            if ruta_conf == "":
-                mostrar_logo = False
-            elif os.path.exists(ruta_conf):
-                ruta_usar = ruta_conf
-                
-        if mostrar_logo and not ruta_usar:
-            fallbacks = [
-                "LogoCotizacion.png",
-                "LogoCotizacion.jpg",
-                "Logo_Collie_Software.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
-            ]
-            for fallback in fallbacks:
-                fallback_norm = os.path.normpath(fallback)
-                if os.path.exists(fallback_norm):
-                    ruta_usar = fallback_norm
-                    break
-
-        rgb_primario = hex_to_rgb(config.get("color_primario", "#eb337a"))
-        rgb_secundario = hex_to_rgb(config.get("color_secundario", "#000000"))
-        rgb_franja = hex_to_rgb(config.get("color_franja", config.get("color_primario", "#eb337a")))
-
-        offset = 0
-        if mostrar_logo and ruta_usar:
-            try:
-                img = ImageReader(ruta_usar)
-                img_w, img_h = img.getSize()
-                
-                if img_w == 0: img_w = 1
-                if img_h == 0: img_h = 1
-                
-                ratio = ancho_util / float(img_w)
-                
-                final_w = ancho_util
-                final_h = img_h * ratio
-                y_logo = 792 - 40 - final_h
-                
-                c.drawImage(ruta_usar, margen_izq, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
-                
-                techo_textos = 685
-                margen_inferior_logo = y_logo - 25
-                offset = (margen_inferior_logo - techo_textos) if margen_inferior_logo < techo_textos else 0
-            except Exception as e:
-                try:
-                    c.drawImage(ruta_usar, 40, 685, width=150, height=80, preserveAspectRatio=True)
-                except Exception:
-                    pass
-                offset = 0
-
-        c.setFont("Helvetica-Bold", 26)
-        c.drawString(40, 650 + offset, "Cotización")
-        c.setFont("Helvetica-Bold", 10.5)
-        c.drawRightString(570, 665 + offset, f"No.: {codigo_impresion}")
-        c.setFont("Helvetica", 10)
-        c.drawRightString(570, 650 + offset, f"Fecha: {fecha_actual}")
-        c.drawRightString(570, 635 + offset, f"Moneda: {moneda}")
-
-        c.setLineWidth(1)
-        c.setStrokeColorRGB(0.88, 0.88, 0.88)
-        c.setFillColorRGB(0.98, 0.98, 0.98)
-        c.roundRect(40, 540 + offset, 530, 80, 2, stroke=1, fill=1)
-        c.setFont("Helvetica-Bold", 9)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(50, 603 + offset, "CLIENTE:")
-        
-        # 🚀 FIX: CONTACTO BAJADO UNA LÍNEA (DE 585 A 570)
-        c.drawString(50, 570 + offset, "CONTACTO:")
-        
-        c.drawString(365, 603 + offset, "PROYECTO:")
-
-        if len(proyecto) > 26:
-            c.drawString(435, 603 + offset, proyecto[:26])
-            c.drawString(435, 591 + offset, proyecto[26:52])
-            y_etiqueta_desc, y_texto_desc = 573 + offset, 560 + offset
-        else:
-            c.drawString(435, 603 + offset, proyecto)
-            y_etiqueta_desc, y_texto_desc = 585 + offset, 572 + offset
-
-        c.drawString(365, y_etiqueta_desc, "DESCRIPCION DEL PROYECTO:")
-        c.setFont("Helvetica", 9)
-        c.setFillColorRGB(0.3, 0.3, 0.3)
-        if len(descripcion_proyecto) > 45:
-            c.drawString(365, y_texto_desc, descripcion_proyecto[:45])
-            c.drawString(365, y_texto_desc - 11, descripcion_proyecto[45:90])
-        else:
-            c.drawString(365, y_texto_desc, descripcion_proyecto)
-
-        c.setFont("Helvetica", 9.5)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(105, 603 + offset, cliente)
-        
-        # 🚀 FIX: DATO CONTACTO BAJADO UNA LÍNEA (DE 585 A 570)
-        c.drawString(115, 570 + offset, contacto_cliente)
-
-        TABLE_LEFT, TABLE_RIGHT, DESC_X, DESC_MAX_WIDTH, ITEM_MAX_WIDTH, HEADER_H, MARGEN_INFERIOR_TABLA, Y_INICIO_PAGINA_CONTINUACION = 40, 570, 135, 205, 88, 20, 55, 745
-
+        # =======================================================
+        # 🚀 FUNCIONES AUXILIARES PARA AJUSTE DINÁMICO DE TEXTO
+        # =======================================================
         def wrap_text(texto, fuente, tam, max_ancho):
             lineas_finales = []
             for parrafo in str(texto).replace('\r', '').split('\n'):
@@ -349,6 +243,128 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 c.setFont(fuente_palabra, tam)
                 c.drawString(x_cursor, y, palabra)
                 x_cursor += c.stringWidth(palabra, fuente_palabra, tam)
+
+        ruta_usar = None
+        mostrar_logo = True
+        
+        if "ruta_logo_cotizacion" in config:
+            ruta_conf = str(config.get("ruta_logo_cotizacion", "")).strip()
+            if ruta_conf != "":
+                ruta_conf = os.path.normpath(ruta_conf)
+                
+            if ruta_conf == "":
+                mostrar_logo = False
+            elif os.path.exists(ruta_conf):
+                ruta_usar = ruta_conf
+                
+        if mostrar_logo and not ruta_usar:
+            fallbacks = [
+                "LogoCotizacion.png",
+                "LogoCotizacion.jpg",
+                "Logo_Collie_Software.png",
+                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
+                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
+            ]
+            for fallback in fallbacks:
+                fallback_norm = os.path.normpath(fallback)
+                if os.path.exists(fallback_norm):
+                    ruta_usar = fallback_norm
+                    break
+
+        rgb_primario = hex_to_rgb(config.get("color_primario", "#eb337a"))
+        rgb_secundario = hex_to_rgb(config.get("color_secundario", "#000000"))
+        rgb_franja = hex_to_rgb(config.get("color_franja", config.get("color_primario", "#eb337a")))
+
+        offset = 0
+        if mostrar_logo and ruta_usar:
+            try:
+                img = ImageReader(ruta_usar)
+                img_w, img_h = img.getSize()
+                
+                if img_w == 0: img_w = 1
+                if img_h == 0: img_h = 1
+                
+                ratio = ancho_util / float(img_w)
+                
+                final_w = ancho_util
+                final_h = img_h * ratio
+                y_logo = 792 - 40 - final_h
+                
+                c.drawImage(ruta_usar, margen_izq, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
+                
+                techo_textos = 685
+                margen_inferior_logo = y_logo - 25
+                offset = (margen_inferior_logo - techo_textos) if margen_inferior_logo < techo_textos else 0
+            except Exception as e:
+                try:
+                    c.drawImage(ruta_usar, 40, 685, width=150, height=80, preserveAspectRatio=True)
+                except Exception:
+                    pass
+                offset = 0
+
+        c.setFont("Helvetica-Bold", 26)
+        c.drawString(40, 650 + offset, "Cotización")
+        c.setFont("Helvetica-Bold", 10.5)
+        c.drawRightString(570, 665 + offset, f"No.: {codigo_impresion}")
+        c.setFont("Helvetica", 10)
+        c.drawRightString(570, 650 + offset, f"Fecha: {fecha_actual}")
+        c.drawRightString(570, 635 + offset, f"Moneda: {moneda}")
+
+        # RECUADRO GRIS
+        c.setLineWidth(1)
+        c.setStrokeColorRGB(0.88, 0.88, 0.88)
+        c.setFillColorRGB(0.98, 0.98, 0.98)
+        c.roundRect(40, 540 + offset, 530, 80, 2, stroke=1, fill=1)
+        
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        c.drawString(50, 603 + offset, "CLIENTE:")
+        c.drawString(50, 570 + offset, "CONTACTO:")
+        c.drawString(365, 603 + offset, "PROYECTO:")
+
+        # 🚀 FIX: AJUSTE DINÁMICO DE TEXTOS EN ENCABEZADO PARA EVITAR DESBORDAMIENTO
+        # PROYECTO
+        c.setFont("Helvetica-Bold", 9)
+        lineas_proyecto = wrap_text(proyecto, "Helvetica-Bold", 9, 130)
+        y_cursor = 603 + offset
+        for linea in lineas_proyecto[:2]: 
+            c.drawString(435, y_cursor, linea)
+            y_cursor -= 11
+
+        if len(lineas_proyecto) > 1:
+            y_etiqueta_desc, y_texto_desc = 573 + offset, 560 + offset
+        else:
+            y_etiqueta_desc, y_texto_desc = 585 + offset, 572 + offset
+
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        c.drawString(365, y_etiqueta_desc, "DESCRIPCIÓN DEL PROYECTO:")
+        
+        # DESCRIPCIÓN DEL PROYECTO
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.3, 0.3, 0.3)
+        lineas_desc_proy = wrap_text(descripcion_proyecto, "Helvetica", 9, 195)
+        y_cursor = y_texto_desc
+        for linea in lineas_desc_proy[:3]: 
+            c.drawString(365, y_cursor, linea)
+            y_cursor -= 11
+
+        # CLIENTE
+        c.setFont("Helvetica", 9.5)
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        lineas_cliente = wrap_text(cliente, "Helvetica", 9.5, 250)
+        y_cursor = 603 + offset
+        for linea in lineas_cliente[:2]:
+            c.drawString(105, y_cursor, linea)
+            y_cursor -= 11
+            
+        # CONTACTO
+        lineas_contacto = wrap_text(contacto_cliente, "Helvetica", 9.5, 240)
+        y_cursor = 570 + offset
+        for linea in lineas_contacto[:2]:
+            c.drawString(115, y_cursor, linea)
+            y_cursor -= 11
+
+        TABLE_LEFT, TABLE_RIGHT, DESC_X, DESC_MAX_WIDTH, ITEM_MAX_WIDTH, HEADER_H, MARGEN_INFERIOR_TABLA, Y_INICIO_PAGINA_CONTINUACION = 40, 570, 135, 205, 88, 20, 55, 745
 
         def dibujar_encabezado_tabla(y):
             c.setFillColorRGB(*rgb_franja)
@@ -452,6 +468,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
 
+        # 🚀 LÓGICA DE EXONERACIÓN DE FEE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
         total_general_soles = subtotal_acumulado + fee_produccion
         total_general_dolares = total_general_soles / tipo_cambio_pdf
@@ -496,12 +513,14 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFillColorRGB(0.3, 0.3, 0.3)
         y_cond_actual = y_totales - 68
         
+        # 🚀 IMPRIMIR FORMA DE PAGO PRIMERO (DINÁMICO POR EVENTO)
         c.drawString(40, y_cond_actual, "Forma de pago: ")
         x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
         for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
             c.drawString(x_pago, y_cond_actual, linea)
             y_cond_actual -= 12
 
+        # 🚀 IMPRIMIR TÉRMINOS Y CONDICIONES EDITABLES
         terminos_default = "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
         terminos_config = str(config.get("terminos_cotizacion", terminos_default)).strip()
         

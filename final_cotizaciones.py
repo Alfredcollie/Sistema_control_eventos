@@ -12,6 +12,7 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 - FIX: Términos y Condiciones cargados desde Configuración Global.
 - FIX: Exoneración de Fee incorporada dinámicamente.
 - FIX: Respeta el orden manual de los ítems (ORDER BY id ASC).
+- FIX: Etiqueta "CONTACTO" bajada una línea dentro del recuadro.
 """
 
 import os
@@ -249,7 +250,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFont("Helvetica-Bold", 9)
         c.setFillColorRGB(0.1, 0.1, 0.1)
         c.drawString(50, 603 + offset, "CLIENTE:")
-        c.drawString(50, 585 + offset, "CONTACTO:")
+        
+        # 🚀 FIX: CONTACTO BAJADO UNA LÍNEA (DE 585 A 570)
+        c.drawString(50, 570 + offset, "CONTACTO:")
+        
         c.drawString(365, 603 + offset, "PROYECTO:")
 
         if len(proyecto) > 26:
@@ -272,7 +276,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFont("Helvetica", 9.5)
         c.setFillColorRGB(0.1, 0.1, 0.1)
         c.drawString(105, 603 + offset, cliente)
-        c.drawString(115, 585 + offset, contacto_cliente)
+        
+        # 🚀 FIX: DATO CONTACTO BAJADO UNA LÍNEA (DE 585 A 570)
+        c.drawString(115, 570 + offset, contacto_cliente)
 
         TABLE_LEFT, TABLE_RIGHT, DESC_X, DESC_MAX_WIDTH, ITEM_MAX_WIDTH, HEADER_H, MARGEN_INFERIOR_TABLA, Y_INICIO_PAGINA_CONTINUACION = 40, 570, 135, 205, 88, 20, 55, 745
 
@@ -359,7 +365,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         dibujar_encabezado_tabla(y_pos)
 
         try:
-            # 🚀 FIX: EL ORDEN ESTRICTO DEL ID PARA QUE SE VEA IGUAL QUE EN PANTALLA
             cursor.execute("SELECT * FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (codigo_cotizacion,))
             filas_preparadas, bloques_items = [], []
             for r in cursor.fetchall():
@@ -447,7 +452,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
 
-        # 🚀 LÓGICA DE EXONERACIÓN DE FEE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
         total_general_soles = subtotal_acumulado + fee_produccion
         total_general_dolares = total_general_soles / tipo_cambio_pdf
@@ -492,14 +496,12 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFillColorRGB(0.3, 0.3, 0.3)
         y_cond_actual = y_totales - 68
         
-        # 🚀 IMPRIMIR FORMA DE PAGO PRIMERO (DINÁMICO POR EVENTO)
         c.drawString(40, y_cond_actual, "Forma de pago: ")
         x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
         for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
             c.drawString(x_pago, y_cond_actual, linea)
             y_cond_actual -= 12
 
-        # 🚀 IMPRIMIR TÉRMINOS Y CONDICIONES EDITABLES
         terminos_default = "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
         terminos_config = str(config.get("terminos_cotizacion", terminos_default)).strip()
         

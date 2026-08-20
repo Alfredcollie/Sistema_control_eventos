@@ -387,7 +387,6 @@ class VentanaEtapaProveedores:
         self.lista_widgets_filas = []
         self.matriz_expandida = False
 
-        # 🚀 FIX: CURACIÓN DE BASE DE DATOS EN SEGUNDO PLANO PARA NO CONGELAR
         global _SCHEMA_F3_OK
         if not _SCHEMA_F3_OK:
             def tarea_init():
@@ -589,7 +588,7 @@ class VentanaEtapaProveedores:
         self.f_b_matriz = ctk.CTkFrame(self.v_prov, fg_color="transparent")
         self.f_b_matriz.pack(fill="x", padx=15, pady=5)
         ctk.CTkButton(self.f_b_matriz, text="<< Atrás", width=100, fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=self.regresar_a_etapa2).pack(side="left", padx=(0, 5))
-        self.btn_toggle_vista = ctk.CTkButton(self.f_b_matriz, text="[ + ] Pantalla Completa", width=140, fg_color="#8E44AD", hover_color="#732D91", command=self.toggle_vista_matriz)
+        self.btn_toggle_vista = ctk.CTkButton(self.f_b_matriz, text="[ - ] Mostrar Formulario", width=140, fg_color="#2980B9", hover_color="#1A5276", command=self.toggle_vista_matriz)
         self.btn_toggle_vista.pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="[ Editar ] Costo/Margen", width=150, fg_color="#f39c12", hover_color="#e67e22", command=self.modificar_proveedor_matriz).pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="[ X ] Retirar Ítem", width=120, fg_color="#D32F2F", hover_color="#B71C1C", command=self.retirar_proveedor_matriz).pack(side="left", padx=5)
@@ -604,20 +603,23 @@ class VentanaEtapaProveedores:
         
         f_headers = ctk.CTkFrame(self.f_grid, fg_color="#e0e0e0", corner_radius=5)
         f_headers.pack(fill="x", padx=10, pady=(0, 5))
-        anchos = [("ID", 30), ("Categoría", 130), ("Proveedor", 130), ("Cant.", 40), ("P. Lista", 70), ("Dscto", 60), ("P. Venta", 80)]
-        for text, w in anchos:
+        
+        anchos_encabezado = [("ID", 30), ("Categoría", 130), ("Proveedor", 140), ("Cant.", 40), ("P. Lista", 70), ("Dscto", 50), ("P. Venta", 80)]
+        for text, w in anchos_encabezado:
             ctk.CTkLabel(f_headers, text=text, font=("Arial", 11, "bold"), width=w, anchor="center").pack(side="left", padx=2, pady=5)
         
         f_h_notas = ctk.CTkFrame(f_headers, fg_color="transparent")
         f_h_notas.pack(side="left", fill="x", expand=True, padx=2)
-        ctk.CTkLabel(f_h_notas, text="Notas Cliente", font=("Arial", 11, "bold"), anchor="center").pack(side="left", fill="x", expand=True)
-        ctk.CTkLabel(f_h_notas, text="Notas Internas", font=("Arial", 11, "bold"), text_color="#D32F2F", anchor="center").pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_h_notas, text="Notas Cliente", font=("Arial", 11, "bold"), anchor="center").pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(f_h_notas, text="Notas Internas", font=("Arial", 11, "bold"), text_color="#D32F2F", anchor="center").pack(side="left", fill="x", expand=True, padx=4)
         
         self.f_rows_dinamicas = ctk.CTkScrollableFrame(self.f_grid, fg_color="transparent")
         self.f_rows_dinamicas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.filtrar_proveedores_por_categoria()
         self.cargar_grid_proveedores()
+        
+        self.matriz_expandida = False
 
     def evento_toggle_fee(self):
         self.guardar_ajustes_globales_db()
@@ -1006,7 +1008,6 @@ class VentanaEtapaProveedores:
         except Exception:
             pass
 
-    # 🚀 BUSCADOR INTELIGENTE EN SEGUNDO PLANO (SIN CONGELAR)
     def filtrar_proveedores_por_categoria(self, choice=None):
         cat_sel = str(self.cmb_cat_e.get()).strip()
         self.cmb_p_list.set("Cargando...")
@@ -1227,7 +1228,99 @@ class VentanaEtapaProveedores:
         ctk.CTkButton(f_m, text="[ Guardar Cambios ]", command=ejecutar_update_matriz).pack(pady=15)
 
     # =======================================================
-    # PINTADO DE LA MATRIZ
+    # LÓGICA DE INTERCAMBIO (DRAG & DROP Y BOTONES)
+    # =======================================================
+    def _intercambiar_datos(self, id1, id2, cursor):
+        cols = "categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito"
+        cursor.execute(f"SELECT {cols} FROM cotizacion_proveedores WHERE id = %s", (id1,))
+        d1 = cursor.fetchone()
+        cursor.execute(f"SELECT {cols} FROM cotizacion_proveedores WHERE id = %s", (id2,))
+        d2 = cursor.fetchone()
+        if d1 and d2:
+            query = f"UPDATE cotizacion_proveedores SET categoria_suministro=%s, proveedor_nombre=%s, precio_lista=%s, precio_descuento=%s, tipo_ganancia=%s, valor_ganancia=%s, precio_final_venta=%s, notes_negociacion=%s, notas_internas=%s, cantidad=%s, dias_credito=%s WHERE id=%s"
+            cursor.execute(query, d2 + (id1,))
+            cursor.execute(query, d1 + (id2,))
+
+    def _reordenar_items(self, start_idx, target_idx):
+        if not self.conn: return
+        c = self.conn.cursor()
+        try:
+            if start_idx < target_idx:
+                for i in range(start_idx, target_idx):
+                    id1 = self.lista_widgets_filas[i].data_pack[0]
+                    id2 = self.lista_widgets_filas[i+1].data_pack[0]
+                    self._intercambiar_datos(id1, id2, c)
+            else:
+                for i in range(start_idx, target_idx, -1):
+                    id1 = self.lista_widgets_filas[i].data_pack[0]
+                    id2 = self.lista_widgets_filas[i-1].data_pack[0]
+                    self._intercambiar_datos(id1, id2, c)
+            self.conn.commit()
+            cache_sistema.invalidar()
+            id_dest = self.lista_widgets_filas[target_idx].data_pack[0]
+            self.cargar_grid_proveedores(id_a_seleccionar=id_dest)
+        except Exception as e:
+            self.conn.rollback()
+            print("Error Drag&Drop:", e)
+            self.cargar_grid_proveedores()
+
+    def _iniciar_arrastre(self, event, idx):
+        self._drag_start_index = idx
+        if idx < len(self.lista_widgets_filas):
+            f_row = self.lista_widgets_filas[idx]
+            f_row.configure(border_color=COLOR_PRIMARIO, border_width=2)
+
+    def _en_arrastre(self, event):
+        self.v_prov.config(cursor="fleur")
+
+    def _soltar_arrastre(self, event):
+        self.v_prov.config(cursor="")
+        if not hasattr(self, '_drag_start_index'): return
+        start_idx = self._drag_start_index
+        del self._drag_start_index
+        
+        y_mouse = event.y_root
+        target_idx = -1
+        
+        for i, row in enumerate(self.lista_widgets_filas):
+            y_row = row.winfo_rooty()
+            h_row = row.winfo_height()
+            if y_row <= y_mouse <= y_row + h_row:
+                target_idx = i
+                break
+                
+        if target_idx == -1 and self.lista_widgets_filas:
+            if y_mouse < self.lista_widgets_filas[0].winfo_rooty():
+                target_idx = 0
+            elif y_mouse > self.lista_widgets_filas[-1].winfo_rooty() + self.lista_widgets_filas[-1].winfo_height():
+                target_idx = len(self.lista_widgets_filas) - 1
+                
+        if target_idx != -1 and start_idx != target_idx:
+            self._reordenar_items(start_idx, target_idx)
+        else:
+            if start_idx < len(self.lista_widgets_filas):
+                f_row = self.lista_widgets_filas[start_idx]
+                f_row.configure(border_color="#e0e0e0", border_width=1)
+
+    # 🚀 FIX SCROLL: PUENTE DE EVENTOS PARA LAS CAJAS DE TEXTO
+    def _propagar_scroll(self, event):
+        try:
+            if sys.platform == 'win32':
+                # CustomTkinter usa internamente una velocidad de event.delta / 6 (es decir, 20 unidades)
+                self.f_rows_dinamicas._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
+            elif sys.platform == 'darwin':
+                self.f_rows_dinamicas._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
+            else:
+                if event.num == 4:
+                    self.f_rows_dinamicas._parent_canvas.yview_scroll(-3, "units")
+                elif event.num == 5:
+                    self.f_rows_dinamicas._parent_canvas.yview_scroll(3, "units")
+        except Exception:
+            pass
+        return "break"
+
+    # =======================================================
+    # PINTADO DE LA MATRIZ (GRILLA RESTRINGIDA CON WRAP)
     # =======================================================
     def cargar_grid_proveedores(self, id_a_seleccionar=None):
         if not self.conn:
@@ -1244,17 +1337,30 @@ class VentanaEtapaProveedores:
             ctk.CTkLabel(self.f_rows_dinamicas, text="No hay costos asignados a este evento aún.", font=("Arial", 12, "italic"), text_color="#888").pack(pady=20)
             return
         self.actualizar_bloque_totales_pantalla()
+        
         for i, r in enumerate(registros, start=1):
             id_real, cat_r, prov_r, pl_r, pd_r, pf_r, notas_r, notas_int_r, cant_r = r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], (r[8] if len(r) > 8 and r[8] else 1)
             cat_limpia = str(cat_r).strip("() '\",")
             prov_limpio = str(prov_r).strip("() '\",")
             data_pack = (id_real, cat_limpia, prov_limpio, pl_r, pd_r, pf_r, notas_r, cant_r)
+            
             f_row = ctk.CTkFrame(self.f_rows_dinamicas, fg_color="#ffffff", border_width=1, border_color="#e0e0e0", corner_radius=0)
             f_row.pack(fill="x", pady=2)
+            f_row.data_pack = data_pack
+            self.lista_widgets_filas.append(f_row)
+            
+            row_idx = len(self.lista_widgets_filas) - 1
+
+            def bind_drag(w):
+                w.bind("<ButtonPress-1>", lambda e, idx=row_idx: self._iniciar_arrastre(e, idx), add="+")
+                w.bind("<B1-Motion>", self._en_arrastre, add="+")
+                w.bind("<ButtonRelease-1>", self._soltar_arrastre, add="+")
+
+            bind_drag(f_row)
 
             def marcar_seleccion_f(event, f=f_row, d=data_pack):
                 for child in self.f_rows_dinamicas.winfo_children():
-                    child.configure(fg_color="#ffffff")
+                    child.configure(fg_color="#ffffff", border_color="#e0e0e0", border_width=1)
                     for sub in child.winfo_children():
                         if isinstance(sub, ctk.CTkTextbox):
                             if "FFFDE7" in sub.cget("fg_color"): continue 
@@ -1267,14 +1373,24 @@ class VentanaEtapaProveedores:
                 self.fila_matriz_seleccionada = d
 
             f_row.bind("<Button-1>", marcar_seleccion_f)
-            lbl_id = ctk.CTkLabel(f_row, text=str(i), font=("Arial", 11), width=30, anchor="center")
-            lbl_id.pack(side="left", padx=2, fill="y")
-            lbl_id.bind("<Button-1>", marcar_seleccion_f)
-            anchos = [(cat_limpia, 130, "w"), (prov_limpio, 130, "w"), (str(cant_r), 40, "center"), (f"S/. {pl_r:.2f}", 70, "e"), (f"S/. {pd_r:.2f}", 60, "e"), (f"S/. {pf_r:.2f}", 80, "e")]
-            for text, w, align in anchos:
-                lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, anchor=align)
+            
+            anchos_row = [
+                (str(i), 30, "center"), 
+                (cat_limpia, 130, "w"), 
+                (prov_limpio, 140, "w"), 
+                (str(cant_r), 40, "center"), 
+                (f"S/. {pl_r:.2f}", 70, "e"), 
+                (f"S/. {pd_r:.2f}", 50, "e"), 
+                (f"S/. {pf_r:.2f}", 80, "e")
+            ]
+            
+            for text, w, align in anchos_row:
+                just = "left" if align == "w" else ("right" if align == "e" else "center")
+                wrap_val = w - 5 if w > 50 else 0 
+                lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, wraplength=wrap_val, anchor=align, justify=just)
                 lbl.pack(side="left", padx=2, fill="y")
                 lbl.bind("<Button-1>", marcar_seleccion_f)
+                bind_drag(lbl)
             
             # --- NOTAS DEL CLIENTE ---
             texto_nota = str(notas_r) if notas_r else "-"
@@ -1285,22 +1401,34 @@ class VentanaEtapaProveedores:
             txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             configurar_tags_formato(txt_notas, tam=10)
             insertar_texto_formateado(txt_notas, texto_nota)
-            txt_notas.pack(side="left", fill="both", expand=True, padx=2, pady=5)
+            txt_notas.pack(side="left", fill="both", expand=True, padx=(4, 2), pady=5)
             
             txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
             txt_notas._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
+            bind_drag(txt_notas)
+            bind_drag(txt_notas._textbox)
+            
+            # 🚀 APLICANDO EL FIX DE SCROLL AL TEXTBOX CLIENTE
+            txt_notas._textbox.bind("<MouseWheel>", self._propagar_scroll, add="+")
+            txt_notas._textbox.bind("<Button-4>", self._propagar_scroll, add="+")
+            txt_notas._textbox.bind("<Button-5>", self._propagar_scroll, add="+")
             
             # --- NOTAS INTERNAS ---
             texto_nota_int = str(notas_int_r) if notas_int_r else ""
             txt_notas_int = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
             txt_notas_int.insert("1.0", texto_nota_int)
-            txt_notas_int.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+            txt_notas_int.pack(side="left", fill="both", expand=True, padx=(2, 4), pady=5)
             
             txt_notas_int.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
             txt_notas_int._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
+            bind_drag(txt_notas_int)
+            bind_drag(txt_notas_int._textbox)
+            
+            # 🚀 APLICANDO EL FIX DE SCROLL AL TEXTBOX INTERNO
+            txt_notas_int._textbox.bind("<MouseWheel>", self._propagar_scroll, add="+")
+            txt_notas_int._textbox.bind("<Button-4>", self._propagar_scroll, add="+")
+            txt_notas_int._textbox.bind("<Button-5>", self._propagar_scroll, add="+")
 
-            f_row.data_pack = data_pack
-            self.lista_widgets_filas.append(f_row)
             if id_a_seleccionar == id_real:
                 marcar_seleccion_f(None, f_row, data_pack)
 
@@ -1310,29 +1438,24 @@ class VentanaEtapaProveedores:
         if not self.fila_matriz_seleccionada:
             return
         idx_act = -1
-        widget_sel = None
         for idx, widget in enumerate(self.lista_widgets_filas):
             if widget.data_pack == self.fila_matriz_seleccionada:
-                idx_act, widget_sel = idx, widget
+                idx_act = idx
                 break
         if idx_act == -1:
             return
         idx_dest = idx_act - 1 if direccion == "ARRIBA" else idx_act + 1
         if idx_dest < 0 or idx_dest >= len(self.lista_widgets_filas):
             return
-        id_act, id_dest = widget_sel.data_pack[0], self.lista_widgets_filas[idx_dest].data_pack[0]
+            
+        id_act = self.lista_widgets_filas[idx_act].data_pack[0]
+        id_dest = self.lista_widgets_filas[idx_dest].data_pack[0]
+        
         c = self.conn.cursor()
         try:
-            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_act,))
-            d_act = c.fetchone()
-            c.execute("SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE id = %s", (id_dest,))
-            d_dest = c.fetchone()
-            if d_act and d_dest:
-                query = "UPDATE cotizacion_proveedores SET categoria_suministro=%s, proveedor_nombre=%s, precio_lista=%s, precio_descuento=%s, precio_final_venta=%s, notes_negociacion=%s, notas_internas=%s, cantidad=%s, dias_credito=%s WHERE id=%s"
-                c.execute(query, d_dest + (id_act,))
-                c.execute(query, d_act + (id_dest,))
-                self.conn.commit()
-                cache_sistema.invalidar()
+            self._intercambiar_datos(id_act, id_dest, c)
+            self.conn.commit()
+            cache_sistema.invalidar()
         except Exception:
             self.conn.rollback()
         self.cargar_grid_proveedores(id_a_seleccionar=id_dest)

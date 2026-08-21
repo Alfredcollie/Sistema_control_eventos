@@ -39,7 +39,7 @@ try:
     from app_paths import CONFIG_FILE
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
 
 try:
     import pdfplumber
@@ -1697,8 +1697,8 @@ class CronogramaApp:
             self.ent_responsable.insert(0, self.dict_responsables[choice])
             if choice in self.dict_notas and self.dict_notas[choice]:
                 texto_limpio = self.dict_notas[choice].replace("[B]", "").replace("[/B]", "").replace("[M]", "").replace("[/M]", "")
-                self.txt_notas.delete(0, tk.END)
-                self.txt_notas.insert(0, f"{texto_limpio}")
+                self.txt_notas.delete("1.0", tk.END)
+                self.txt_notas.insert("1.0", f"{texto_limpio}")
 
     def limpiar_formulario(self):
         self.id_tarea_seleccionada = None

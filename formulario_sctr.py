@@ -12,16 +12,21 @@ PC o el celular (Adobe Acrobat / Xodo).
 import os
 import sys
 import json
+import subprocess
 from datetime import datetime
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
 try:
-    from app_paths import CONFIG_FILE
+    from app_paths import CONFIG_FILE, CONFIG_DIR, ruta_recurso
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    _dir_app = os.path.dirname(os.path.abspath(__file__))
+    RUTA_CONFIG = os.path.join(_dir_app, "config_local.json")
+    CONFIG_DIR = os.path.expanduser("~")
+    def ruta_recurso(nombre_relativo):
+        return os.path.join(_dir_app, nombre_relativo)
 
 
 def cargar_config():
@@ -39,9 +44,9 @@ def copiar_archivo_portapapeles(ruta):
     try:
         ruta_absoluta = os.path.abspath(ruta)
         if sys.platform == "darwin":
-            os.system(f'osascript -e \'set the clipboard to POSIX file "{ruta_absoluta}"\'')
+            subprocess.run(["osascript", "-e", f'set the clipboard to POSIX file "{ruta_absoluta}"'])
         elif sys.platform == "win32":
-            os.system(f'powershell -command "Set-Clipboard -Path \'{ruta_absoluta}\'"')
+            subprocess.run(["powershell", "-NoProfile", "-Command", "Set-Clipboard", "-Path", ruta_absoluta], creationflags=0x08000000)
     except Exception as e:
         print("Error copiando al portapapeles:", e)
 
@@ -51,7 +56,7 @@ def generar_formulario_sctr(codigo_cot, evento_nombre, fecha_evento, locacion, p
     razon_social = str(config.get("razon_social_empresa", "")).strip()
     ruc_emp = str(config.get("ruc_empresa", "")).strip()
 
-    carpeta = "formularios_proveedores"
+    carpeta = os.path.join(str(CONFIG_DIR), "formularios_proveedores")
     ruta_base = str(config.get("ruta_drive", "")).strip()
     if ruta_base and os.path.exists(ruta_base):
         carpeta = os.path.join(ruta_base, "formularios_proveedores")
@@ -84,11 +89,9 @@ def generar_formulario_sctr(codigo_cot, evento_nombre, fecha_evento, locacion, p
     # 2. Si no existe o no se configuró, probamos con las rutas de respaldo automáticas
     if not ruta_usar:
         fallbacks = [
-            "LogoCotizacion.png",
-            "LogoCotizacion.jpg",
-            "Logo_Collie_Software.png",
-            r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-            r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
+            ruta_recurso("LogoCotizacion.png"),
+            ruta_recurso("LogoCotizacion.jpg"),
+            ruta_recurso("Logo_Collie_Software.png")
         ]
         for fallback in fallbacks:
             if os.path.exists(fallback):

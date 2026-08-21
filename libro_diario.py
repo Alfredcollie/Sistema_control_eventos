@@ -22,6 +22,7 @@ import customtkinter as ctk
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
+from app_paths import cargar_config_local
 
 # =========================================================
 # 🚀 ADAPTACIÓN MULTIPLATAFORMA: Función universal para abrir archivos
@@ -46,9 +47,7 @@ def cargar_configuracion_regional():
         "formato_numero": "1,000.00"
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+        config.update(cargar_config_local())
     except Exception: pass
     return config
 
@@ -344,7 +343,7 @@ class LibroDiarioApp:
             finally:
                 liberar_conexion(conn)
                 
-            movimientos.sort(key=lambda x: x[2])
+            movimientos.sort(key=lambda x: (str(x[2])[:10] if x[2] else ""))
             
             if hasattr(self.root, 'after'):
                 self.root.after(0, lambda t=token, m=movimientos: self._pintar_diario(t, m))

@@ -12,7 +12,7 @@ from datetime import datetime
 import webbrowser
 import shutil
 
-from conexion import conectar_db, registrar_auditoria
+from conexion import conectar_db, registrar_auditoria, liberar_conexion
 
 def obtener_configuracion_fe():
     config = {
@@ -23,12 +23,10 @@ def obtener_configuracion_fe():
         "razon_social_empresa": "",
         "ruta_drive": ""
     }
-    if os.path.exists("config_local.json"):
-        try:
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
-        except Exception:
-            pass
+    try:
+        from app_paths import cargar_config_local; config.update(cargar_config_local())
+    except Exception:
+        pass
     return config
 
 def construir_payload_nubefact(datos_factura):
@@ -71,9 +69,10 @@ def construir_payload_nubefact(datos_factura):
         motivo_str = datos_factura.get("motivo_nc", "")
         
         tipo_nc = 1 
-        if "RUC" in motivo_str: tipo_nc = 2
-        elif "Devolución total" in motivo_str: tipo_nc = 7
-        elif "ítem" in motivo_str: tipo_nc = 6
+        motivo_norm = motivo_str.strip().lower()
+        if "ruc" in motivo_norm: tipo_nc = 2
+        elif "devolución total" in motivo_norm: tipo_nc = 7
+        elif "ítem" in motivo_norm: tipo_nc = 6
 
         return {
             "operacion": "generar_comprobante",
@@ -166,7 +165,7 @@ def enviar_factura_sunat(datos_factura):
                                            (sunat_description, pdf_link, xml_link, id_factura))
                         conn.commit()
                     except Exception: pass
-                    finally: conn.close()
+                    finally: liberar_conexion(conn)
 
             res_resumen = (
                 f"✅ ENVIADO EXITOSAMENTE A TRAVÉS DE {proveedor.upper()}\n\n"

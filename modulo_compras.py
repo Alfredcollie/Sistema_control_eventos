@@ -83,9 +83,7 @@ def cargar_configuracion_regional():
         "client_secret_sire": ""
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+        from app_paths import cargar_config_local; config.update(cargar_config_local())
     except Exception:
         pass
     return config
@@ -998,7 +996,6 @@ class FacturasRecibidasTab:
                     c_check = conn_check.cursor()
                     c_check.execute("SELECT COUNT(*) FROM facturas_recibidas WHERE numero_documento = %s AND proveedor = %s", (nro_doc, prov))
                     if c_check.fetchone()[0] > 0:
-                        liberar_conexion(conn_check)
                         return messagebox.showwarning("Duplicado", "Ese N° de Documento ya está registrado para este proveedor.")
                 finally: 
                     liberar_conexion(conn_check)

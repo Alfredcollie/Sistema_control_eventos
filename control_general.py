@@ -71,7 +71,7 @@ def ruta_recurso(ruta_relativa):
     try:
         ruta_base = sys._MEIPASS
     except Exception:
-        ruta_base = os.path.abspath(".")
+        ruta_base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(ruta_base, ruta_relativa)
 
 def aplicar_icono_ventana(ventana):
@@ -495,7 +495,7 @@ class ControlGeneralEventos:
         self.contenedor_central.pack(side="right", fill="both", expand=True)
         frame_top_sidebar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         frame_top_sidebar.pack(side="top", fill="x", pady=(10, 5))
-        ruta_logo_sidebar = ruta_recurso("Logo.png")
+        ruta_logo_sidebar = ruta_recurso("logo.png")
         if os.path.exists(ruta_logo_sidebar):
             try:
                 self.logo_img = tk.PhotoImage(file=ruta_logo_sidebar)
@@ -1312,7 +1312,7 @@ class ControlGeneralEventos:
                 kwargs = {}
                 if sys.platform == "win32":
                     kwargs["creationflags"] = 0x08000000
-                result = subprocess.run([cmd_rclone, "config", "create", remote, "drive", "scope", "drive"], capture_output=True, text=True, **kwargs)
+                result = subprocess.run([cmd_rclone, "config", "create", remote, "drive", "scope", "drive"], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
                 if result.returncode == 0:
                     messagebox.showinfo("Éxito", "¡Google Drive vinculado correctamente!\nYa puedes realizar la prueba de conexión.", parent=v_conf)
                 else:
@@ -1345,13 +1345,13 @@ class ControlGeneralEventos:
 
             try:
                 subprocess.run([cmd_rclone, "version"], check=True, capture_output=True, **kwargs)
-                result = subprocess.run([cmd_rclone, "about", remote], capture_output=True, text=True, **kwargs)
+                result = subprocess.run([cmd_rclone, "about", remote], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
                 
                 if result.returncode == 0:
                     msg_adicional = ""
                     if nube:
                         ruta_remota = f"{remote}{nube}" if remote.endswith(":") else f"{remote}:{nube}"
-                        res_mkdir = subprocess.run([cmd_rclone, "mkdir", ruta_remota], capture_output=True, text=True, **kwargs)
+                        res_mkdir = subprocess.run([cmd_rclone, "mkdir", ruta_remota], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
                         if res_mkdir.returncode == 0:
                             msg_adicional = f"\n\n📁 Se verificó/creó la carpeta en la nube: '{nube}'"
                             lanzar_sync_background() 
@@ -1764,5 +1764,14 @@ if __name__ == "__main__":
         pass
 
     root = ctk.CTk()
+
+    # Scroll de rueda global: funciona sobre toda la ventana (y subventanas),
+    # no solo sobre widgets internos concretos.
+    try:
+        from scroll_utils import instalar_scroll_global
+        instalar_scroll_global(root)
+    except Exception:
+        pass
+
     app = ControlGeneralEventos(root)
     root.mainloop()

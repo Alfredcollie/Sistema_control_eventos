@@ -745,10 +745,19 @@ class CatalogoLocacionesTab:
             mid_y = (oy1 + oy2) / 2
             
             tam_fuente = max(16, int(20 / estado["escala"]))
-            try: font = ImageFont.truetype("arialbd.ttf", tam_fuente)
-            except:
-                try: font = ImageFont.truetype("arial.ttf", tam_fuente)
-                except: font = ImageFont.load_default()
+            candidatos_fuente = ["arialbd.ttf", "arial.ttf"]
+            if sys.platform == "darwin":
+                candidatos_fuente = [
+                    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                    "/System/Library/Fonts/Supplemental/Arial.ttf",
+                ] + candidatos_fuente
+            font = ImageFont.load_default()
+            for ruta_fuente in candidatos_fuente:
+                try:
+                    font = ImageFont.truetype(ruta_fuente, tam_fuente)
+                    break
+                except Exception:
+                    continue
                 
             try:
                 bbox = draw.textbbox((0, 0), medida, font=font)

@@ -9,7 +9,8 @@ import subprocess
 import webbrowser
 import threading
 import customtkinter as ctk
-from conexion import conectar_db
+from conexion import conectar_db, liberar_conexion
+from app_paths import cargar_config_local
 
 # =========================================================
 # 🚀 ADAPTACIÓN MULTIPLATAFORMA: Función universal para abrir archivos
@@ -34,9 +35,7 @@ def cargar_configuracion_regional():
         "formato_numero": "1,000.00"
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+        config.update(cargar_config_local())
     except Exception: pass
     return config
 
@@ -246,7 +245,7 @@ class LibroMayorApp:
             except Exception as e:
                 self.root.after(0, lambda err=e: messagebox.showerror("Error de Base de Datos", f"No se pudo compilar el mayor:\n{str(err)}"))
             finally:
-                conn.close()
+                liberar_conexion(conn)
                 
             lista_ordenada = sorted(agrupado.items(), key=lambda x: x[0])
             self.root.after(0, lambda t=token, l=lista_ordenada: self._pintar_mayor(t, l))

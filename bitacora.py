@@ -2,7 +2,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import customtkinter as ctk
-from conexion import conectar_db
+from conexion import conectar_db, liberar_conexion
 
 class BitacoraApp:
     def __init__(self, parent_frame):
@@ -61,7 +61,7 @@ class BitacoraApp:
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo cargar la bitácora:\n{e}")
         finally:
-            conn.close()
+            liberar_conexion(conn)
 
 if __name__ == "__main__":
     pass

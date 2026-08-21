@@ -34,7 +34,7 @@ try:
     from app_paths import CONFIG_FILE
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
 
 try:
     import pdfplumber
@@ -95,7 +95,7 @@ def detectar_ruta_google_drive_sugerida():
                 return clasico
         elif sys.platform == "win32":
             for letra in ["G:", "H:", "D:", "E:"]:
-                cand = os.path.join(f"{letra}\\", "Mi unidad")
+                cand = os.path.join(letra + os.sep, "Mi unidad")
                 if os.path.exists(cand):
                     return cand
             clasico = os.path.expanduser("~/Google Drive")

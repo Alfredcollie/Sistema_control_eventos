@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
@@ -28,11 +28,23 @@ def obtener_hwid():
     hwid = ""
     try:
         if sys.platform == "win32":
-            hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+            # 'wmic' está deprecado/eliminado en Windows 11. Usar CIM de PowerShell (Win10/11).
+            hwid = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystemProduct).UUID"],
+                timeout=15
+            ).decode("utf-8", errors="ignore").strip()
         elif sys.platform == "darwin":
-            hwid = subprocess.check_output('ioreg -rd1 -c IOPlatformExpertDevice | grep -E "IOPlatformUUID"', shell=True).decode().split('"')[-2]
+            out = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]).decode("utf-8", "replace")
+            hwid = ""
+            for linea in out.splitlines():
+                if "IOPlatformUUID" in linea:
+                    hwid = linea.split('"')[-2]
+                    break
+            if not hwid:
+                raise RuntimeError("IOPlatformUUID no encontrado")
         else:
-            hwid = subprocess.check_output('cat /etc/machine-id', shell=True).decode().strip()
+            hwid = subprocess.check_output(["/bin/cat", "/etc/machine-id"]).decode("utf-8", "replace").strip()
     except Exception:
         hwid = str(uuid.UUID(int=uuid.getnode())).upper()
     return hwid
@@ -81,14 +93,18 @@ def consultar_licencia_supabase(hwid):
 
             try:
                 if venc_eq:
-                    if hoy > datetime.strptime(venc_eq, fmt):
+                    if isinstance(venc_eq, str):
+                        venc_eq = datetime.strptime(venc_eq, fmt)
+                    if hoy > venc_eq:
                         errores.append("Licencia de equipo vencida")
                         valido = False
             except Exception: pass
 
             try:
                 if venc_lic:
-                    if hoy > datetime.strptime(venc_lic, fmt):
+                    if isinstance(venc_lic, str):
+                        venc_lic = datetime.strptime(venc_lic, fmt)
+                    if hoy > venc_lic:
                         errores.append("Licencia general vencida")
                         valido = False
             except Exception: pass

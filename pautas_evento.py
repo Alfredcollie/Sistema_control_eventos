@@ -38,7 +38,12 @@ from reportlab.lib.utils import ImageReader
 # 🚀 IMPORTAMOS NUESTRAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
-from app_paths import CONFIG_FILE
+try:
+    from app_paths import CONFIG_FILE, ruta_recurso
+except Exception:
+    CONFIG_FILE = None
+    def ruta_recurso(nombre):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
 
 # Variable global definida al más alto nivel
 _SCHEMA_PAUTAS_OK = False
@@ -458,8 +463,8 @@ class PautasEventoApp:
             "ruta_drive": ""
         }
         try:
-            ruta_segura = str(CONFIG_FILE)
-            if os.path.exists(ruta_segura):
+            ruta_segura = str(CONFIG_FILE) if CONFIG_FILE else ""
+            if ruta_segura and os.path.exists(ruta_segura):
                 with open(ruta_segura, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     config["ruta_logo"] = data.get("ruta_logo_cotizacion", "")
@@ -519,9 +524,9 @@ class PautasEventoApp:
                 
             if not ruta_usar:
                 fallbacks = [
-                    "LogoCotizacion.png",
-                    "LogoCotizacion.jpg",
-                    "Logo_Collie_Software.png"
+                    ruta_recurso("LogoCotizacion.png"),
+                    ruta_recurso("LogoCotizacion.jpg"),
+                    ruta_recurso("Logo_Collie_Software.png")
                 ]
                 for fallback in fallbacks:
                     if os.path.exists(fallback):

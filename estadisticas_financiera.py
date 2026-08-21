@@ -21,6 +21,7 @@ import threading
 from datetime import datetime
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+from app_paths import cargar_config_local
 
 # =========================================================
 # 🚀 ADAPTACIÓN MULTIPLATAFORMA: Función universal para abrir archivos (Excel)
@@ -48,19 +49,14 @@ def cargar_configuracion_regional():
         "impresora": ""
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+        config.update(cargar_config_local())
     except Exception: pass
     return config
 
 # 🚀 FUNCIÓN PARA LEER EL PORCENTAJE DE RENTA ANUAL DESDE CONFIG
 def obtener_porcentaje_renta_anual():
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
-                return float(config.get("renta_anual_porcentaje", "0.0"))
+        return float(cargar_config_local().get("renta_anual_porcentaje", "0.0"))
     except Exception: pass
     return 0.0
 

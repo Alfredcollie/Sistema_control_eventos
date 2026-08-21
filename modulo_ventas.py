@@ -76,8 +76,7 @@ def cargar_configuracion_regional():
         "client_id_sire": "", "client_secret_sire": ""
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f: config.update(json.load(f))
+        from app_paths import cargar_config_local; config.update(cargar_config_local())
     except Exception: pass
     return config
 
@@ -566,7 +565,7 @@ class FacturasEmitidasTab:
             cursor = conn.cursor()
             if nro_doc:
                 cursor.execute("SELECT COUNT(*) FROM facturas_emitidas WHERE numero_documento = %s", (nro_doc,))
-                if cursor.fetchone()[0] > 0: liberar_conexion(conn); return messagebox.showwarning("Duplicado", "Ese N° de Documento ya existe.")
+                if cursor.fetchone()[0] > 0: return messagebox.showwarning("Duplicado", "Ese N° de Documento ya existe.")
             cli_match = cliente.strip().upper()
             cursor.execute("SELECT limite_credito FROM clientes WHERE TRIM(UPPER(nombre_empresa)) = %s", (cli_match,))
             res_cli = cursor.fetchone()
@@ -586,7 +585,7 @@ class FacturasEmitidasTab:
                 deuda_proyectada = deuda_actual + neto_nuevo
                 if deuda_proyectada > limite_credito:
                     msg = f"⚠️ LÍMITE EXCEDIDO\nLímite: {formatear_moneda(limite_credito)}\nDeuda Actual: {formatear_moneda(deuda_actual)}\nProyectada: {formatear_moneda(deuda_proyectada)}"
-                    liberar_conexion(conn); return messagebox.showerror("Bloqueo por Crédito", msg)
+                    return messagebox.showerror("Bloqueo por Crédito", msg)
             ruta_final = ""
             if self.ruta_archivo_temp:
                 try:
@@ -595,7 +594,7 @@ class FacturasEmitidasTab:
                     nombre_ext = os.path.splitext(self.ruta_archivo_temp)[1]
                     ruta_final = os.path.join(carpeta_destino, f"Emitida_{datetime.now().strftime('%Y%m%d%H%M%S')}_{cliente.replace(' ', '_')}{nombre_ext}")
                     shutil.copy2(self.ruta_archivo_temp, ruta_final)
-                except Exception as e: liberar_conexion(conn); return messagebox.showerror("Error", f"Fallo al guardar:\n{e}")
+                except Exception as e: return messagebox.showerror("Error", f"Fallo al guardar:\n{e}")
             cursor.execute("""INSERT INTO facturas_emitidas (tipo_documento, numero_documento, fecha, cliente, descripcion, evento_asociado, subtotal, impuesto, total, archivo_ruta, dias_credito, det_porcentaje, det_monto, orden_compra) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""", (tipo, nro_doc, fecha, cliente, desc, evento, subtotal, imp, tot_bruto, ruta_final, dias, det_pct, det_monto, oc_sel))
             conn.commit()
             cache_sistema.invalidar(); registrar_auditoria(self.app_padre.usuario_activo, "Facturas Emitidas", f"Registró factura {nro_doc} del cliente '{cliente}'")

@@ -23,10 +23,11 @@ from reportlab.lib.utils import ImageReader
 from tkinter import messagebox
 
 try:
-    from app_paths import CONFIG_FILE
+    from app_paths import CONFIG_FILE, ruta_recurso
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
+    ruta_recurso = lambda nombre: os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
 
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
@@ -146,12 +147,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         if ruta_drive and os.path.exists(ruta_drive):
             carpeta_destino = os.path.join(ruta_drive, "Cotizaciones")
         else:
-            if os.path.exists(r"G:\Mi unidad"):
-                carpeta_destino = r"G:\Mi unidad\Programa de control black Cube\Cotizaciones"
-            else:
-                escritorio = os.path.join(os.path.expanduser("~"), "Desktop")
-                carpeta_destino = os.path.join(escritorio, "Cotizaciones")
-                usando_respaldo = True
+            escritorio = os.path.join(os.path.expanduser("~"), "Desktop")
+            carpeta_destino = os.path.join(escritorio, "Cotizaciones")
+            usando_respaldo = True
                 
         try:
             if not os.path.exists(carpeta_destino):
@@ -259,16 +257,13 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 
         if mostrar_logo and not ruta_usar:
             fallbacks = [
-                "LogoCotizacion.png",
-                "LogoCotizacion.jpg",
-                "Logo_Collie_Software.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
+                ruta_recurso("LogoCotizacion.png"),
+                ruta_recurso("LogoCotizacion.jpg"),
+                ruta_recurso("Logo_Collie_Software.png")
             ]
             for fallback in fallbacks:
-                fallback_norm = os.path.normpath(fallback)
-                if os.path.exists(fallback_norm):
-                    ruta_usar = fallback_norm
+                if os.path.exists(fallback):
+                    ruta_usar = fallback
                     break
 
         rgb_primario = hex_to_rgb(config.get("color_primario", "#eb337a"))

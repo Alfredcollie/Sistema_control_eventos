@@ -15,7 +15,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 from datetime import datetime
-from conexion import conectar_db, registrar_auditoria
+from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from app_paths import CONFIG_FILE
 import calendar
 import os
@@ -208,7 +208,7 @@ class CalculoImpuestosApp:
         except Exception as e:
             print("Error BD Impuestos:", e)
         finally:
-            conn.close()
+            liberar_conexion(conn)
 
     def toggle_pantalla_completa(self):
         sidebar = None
@@ -504,7 +504,7 @@ class CalculoImpuestosApp:
                 except Exception as e:
                     error = str(e)
                 finally:
-                    conn.close()
+                    liberar_conexion(conn)
             self.parent_frame.after(0, lambda r=resultado, e=error: self._aplicar_calculo(r, e))
 
         threading.Thread(target=tarea, daemon=True).start()
@@ -581,7 +581,7 @@ class CalculoImpuestosApp:
         messagebox.showinfo("Comprobante de Pago", "A continuación, seleccione el comprobante de pago de SUNAT (PDF o Imagen).\n\nPuede cancelar si no desea adjuntar uno ahora.")
         ruta_origen = filedialog.askopenfilename(
             title="Seleccionar Comprobante de Pago SUNAT",
-            filetypes=[("Archivos", "*.pdf;*.png;*.jpg;*.jpeg")]
+            filetypes=[("Archivos", "*.pdf *.png *.jpg *.jpeg")]
         )
         ruta_destino_final = ""
         if ruta_origen:
@@ -638,7 +638,7 @@ class CalculoImpuestosApp:
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar:\n{e}")
         finally:
-            conn.close()
+            liberar_conexion(conn)
 
     # =======================================================
     # HISTORIAL EN SEGUNDO PLANO (HILO + TOKEN)
@@ -663,7 +663,7 @@ class CalculoImpuestosApp:
                 except Exception:
                     rows = []
                 finally:
-                    conn.close()
+                    liberar_conexion(conn)
             self.parent_frame.after(0, lambda t=token, r=rows: self._pintar_historial(t, r))
 
         threading.Thread(target=tarea, daemon=True).start()
@@ -699,7 +699,7 @@ class CalculoImpuestosApp:
         except Exception:
             pass
         finally:
-            conn.close()
+            liberar_conexion(conn)
 
     def eliminar_registro(self):
         sel = self.tabla.selection()
@@ -726,7 +726,7 @@ class CalculoImpuestosApp:
             except Exception as e:
                 messagebox.showerror("Error", str(e))
             finally:
-                conn.close()
+                liberar_conexion(conn)
 
 
 if __name__ == "__main__":

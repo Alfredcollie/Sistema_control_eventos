@@ -2,14 +2,15 @@
 import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
+from app_paths import CONFIG_DIR, ruta_recurso
 
 def generar_pdf_interactivo_proveedor():
-    nombre_archivo = "Ficha_Registro_Proveedor.pdf"
+    nombre_archivo = os.path.join(str(CONFIG_DIR), "Ficha_Registro_Proveedor.pdf")
     c = canvas.Canvas(nombre_archivo, pagesize=letter)
     form = c.acroForm
     
     # 🚀 CONTROL DE LOGOTIPO
-    ruta_logo = "logo.png"
+    ruta_logo = ruta_recurso("logo.png")
     if os.path.exists(ruta_logo):
         c.drawImage(ruta_logo, 40, 735, width=45, height=45, mask='auto')
         

@@ -30,6 +30,7 @@ import subprocess
 
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+from app_paths import CONFIG_DIR, cargar_config_local
 
 try:
     from PIL import Image, ImageTk
@@ -64,9 +65,7 @@ def cargar_configuracion_regional():
         "formato_fecha": "DD/MM/AAAA"
     }
     try:
-        if os.path.exists("config_local.json"):
-            with open("config_local.json", "r", encoding="utf-8") as f:
-                config.update(json.load(f))
+        config.update(cargar_config_local())
     except Exception: pass
     return config
 
@@ -493,7 +492,7 @@ class CatalogoEquiposTab:
         )
         
         if ruta_origen:
-            carpeta_destino = "imagenes_inventario"
+            carpeta_destino = os.path.join(str(CONFIG_DIR), "imagenes_inventario")
             if not os.path.exists(carpeta_destino):
                 os.makedirs(carpeta_destino)
             
@@ -1117,8 +1116,12 @@ class ReservasTab:
             
         try:
             equipo_id = int(valor.split("]")[0].replace("[", ""))
-            conn = conectar_db(silencioso=True)
-            if not conn: return
+        except Exception:
+            self.lbl_stock.configure(text="Existencia en Almacén: --")
+            return
+        conn = conectar_db(silencioso=True)
+        if not conn: return
+        try:
             cursor = conn.cursor()
             query = """
                 SELECT e.cantidad_total, 
@@ -1129,9 +1132,10 @@ class ReservasTab:
             res = cursor.fetchone()
             if res:
                 self.lbl_stock.configure(text=f"Físico: {res[0]} ud(s) | Disp. Ahora: {res[1]} ud(s)")
-            liberar_conexion(conn)
         except Exception:
             self.lbl_stock.configure(text="Existencia en Almacén: --")
+        finally:
+            liberar_conexion(conn)
 
     def str_to_date(self, date_str):
         try: return datetime.strptime(date_str, "%d/%m/%Y").date()
@@ -1501,7 +1505,7 @@ class RecepcionEquiposTab:
         )
         
         if ruta_origen:
-            carpeta_destino = "evidencias_recepcion"
+            carpeta_destino = os.path.join(str(CONFIG_DIR), "evidencias_recepcion")
             if not os.path.exists(carpeta_destino):
                 os.makedirs(carpeta_destino)
             

@@ -25,7 +25,7 @@ try:
     from app_paths import CONFIG_FILE
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")

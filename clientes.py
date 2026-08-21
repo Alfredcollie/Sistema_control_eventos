@@ -165,12 +165,12 @@ class SistemaClientes:
     def _inicializar_db_async(self):
         global _SCHEMA_CLIENTES_OK
         if _SCHEMA_CLIENTES_OK:
-            self.cargar_clientes_tabla(reset_pagina=True)
+            self.ejecutar_en_ui(self.cargar_clientes_tabla, True)
             return
 
         conn = conectar_db(silencioso=True)
         if not conn:
-            self.cargar_clientes_tabla(reset_pagina=True)
+            self.ejecutar_en_ui(self.cargar_clientes_tabla, True)
             return
 
         try:
@@ -211,7 +211,7 @@ class SistemaClientes:
         finally:
             liberar_conexion(conn)
 
-        self.cargar_clientes_tabla(reset_pagina=True)
+        self.ejecutar_en_ui(self.cargar_clientes_tabla, True)
 
     def crear_interfaz(self):
         familia_fuente = "Helvetica" if sys.platform == "darwin" else "Arial"

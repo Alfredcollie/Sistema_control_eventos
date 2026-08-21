@@ -24,10 +24,11 @@ from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 
 try:
-    from app_paths import CONFIG_FILE
+    from app_paths import CONFIG_FILE, ruta_recurso
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
-    RUTA_CONFIG = "config_local.json"
+    RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
+    ruta_recurso = lambda nombre: os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -338,14 +339,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         if ruta_drive and os.path.exists(ruta_drive):
             carpeta_destino = os.path.join(ruta_drive, "Cotizaciones")
         else:
-            ruta_g = r"G:\Mi unidad\Programa de control black Cube\Cotizaciones"
-            if os.path.exists(r"G:\Mi unidad"):
-                carpeta_destino = ruta_g
-            else:
-                carpeta_destino = os.path.join(os.getcwd(), "Cotizaciones")
+            carpeta_destino = os.path.join(os.path.expanduser("~"), "Documents", "Cotizaciones")
         if not os.path.exists(carpeta_destino):
             try:
-                os.makedirs(carpeta_destino)
+                os.makedirs(carpeta_destino, exist_ok=True)
             except Exception:
                 pass
         nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
@@ -357,11 +354,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             ruta_usar = ruta_conf
         if not ruta_usar:
             fallbacks = [
-                "LogoCotizacion.png",
-                "LogoCotizacion.jpg",
-                "Logo_Collie_Software.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.png",
-                r"G:\Mi unidad\Programa de control black Cube\LogoCotizacion.jpg"
+                ruta_recurso("LogoCotizacion.png"),
+                ruta_recurso("LogoCotizacion.jpg"),
+                ruta_recurso("Logo_Collie_Software.png")
             ]
             for fallback in fallbacks:
                 if os.path.exists(fallback):

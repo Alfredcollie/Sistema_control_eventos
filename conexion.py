@@ -8,10 +8,15 @@ CONEXION.PY (v3 SEGURA + OPTIMIZADA + BLINDADA MAC)
 import logging
 import psycopg2
 from psycopg2 import pool
-import keyring
 import threading
 from datetime import datetime
 import sys
+
+# keyring es opcional: si no está instalado, se usan las credenciales de respaldo (fallback).
+try:
+    import keyring
+except ImportError:
+    keyring = None
 
 SERVICE_NAME = "ControlEventos"
 
@@ -27,10 +32,11 @@ _connection_pool = None
 def leer_credenciales():
     """Lee las credenciales del llavero del sistema. Si falla, usa el respaldo seguro."""
     host = None
-    try:
-        host = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST")
-    except Exception as e:
-        logging.error(f"Error al leer keyring: {e}")
+    if keyring is not None:
+        try:
+            host = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST")
+        except Exception as e:
+            logging.error(f"Error al leer keyring: {e}")
 
     # 🚀 PLAN DE RESPALDO INFALIBLE: Si el llavero de Mac falla, usamos los datos directos
     if not host:

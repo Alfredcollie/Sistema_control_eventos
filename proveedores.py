@@ -2,7 +2,7 @@
 import psycopg2
 import tkinter as tk
 import customtkinter as ctk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 import ctypes
 import urllib.request
 import json

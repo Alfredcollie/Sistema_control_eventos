@@ -50,7 +50,7 @@ class BitacoraApp:
         ctk.CTkButton(f_btn, text="🔄 Actualizar Historial", font=("Arial", 12, "bold"), command=self.cargar_registros).pack(side="right")
 
     def cargar_registros(self):
-        for item in self.tabla.get_children(): self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
         conn = conectar_db()
         if not conn: return
         try:

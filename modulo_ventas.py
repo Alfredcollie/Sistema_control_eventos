@@ -184,7 +184,8 @@ class CalendarioNativo(ctk.CTkToplevel):
         x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (280 // 2)
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
-        self.current_year, self.current_month = datetime.now().year, datetime.now().month
+        ahora = datetime.now()
+        self.current_year, self.current_month = ahora.year, ahora.month
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
         ctk.CTkButton(self.header_frame, text="<", width=30, fg_color="transparent", text_color="white", hover_color="#163b65", font=("Arial", 14, "bold"), command=self.prev_month).pack(side="left", padx=10, pady=10)
@@ -303,9 +304,11 @@ class FacturasEmitidasTab:
         ruta = filedialog.askopenfilename(title="Seleccionar Factura PDF de SUNAT", filetypes=[("Archivos PDF", "*.pdf")])
         if not ruta: return
         try:
-            self.bloquear_autocompletado_ruc, texto = True, ""
+            self.bloquear_autocompletado_ruc = True
+            texto_paginas = []
             with pdfplumber.open(ruta) as pdf:
-                for page in pdf.pages: texto += page.extract_text() + "\n"
+                for page in pdf.pages: texto_paginas.append(page.extract_text() + "\n")
+            texto = "".join(texto_paginas)
             if not texto.strip(): self.bloquear_autocompletado_ruc = False; return messagebox.showwarning("Aviso", "El PDF no contiene texto seleccionable.")
             if re.search(r"FACTURA\s+ELECTR[OÓ]NICA", texto, re.IGNORECASE): self.combo_tipo.set("Factura (18% IGV)")
             elif re.search(r"BOLETA\s+DE\s+VENTA", texto, re.IGNORECASE): self.combo_tipo.set("Boleta (Sin IGV)")
@@ -572,14 +575,20 @@ class FacturasEmitidasTab:
             limite_credito = float(res_cli[0]) if (res_cli and res_cli[0] is not None) else 0.0
             if limite_credito > 0.0:
                 cursor.execute("SELECT id, total, COALESCE(det_monto, 0), tipo_documento, COALESCE(impuesto, 0) FROM facturas_emitidas WHERE TRIM(UPPER(cliente)) = %s", (cli_match,))
-                facturas_historicas, deuda_actual = cursor.fetchall(), 0.0
+                facturas_historicas = cursor.fetchall()
+                deuda_actual = 0.0
+                pagos_por_factura = {}
+                if facturas_historicas:
+                    ids_fac = [r[0] for r in facturas_historicas]
+                    placeholders = ",".join(["%s"] * len(ids_fac))
+                    cursor.execute(f"SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
+                    pagos_por_factura = {pr[0]: (float(pr[1]) if pr[1] else 0.0) for pr in cursor.fetchall()}
                 for r in facturas_historicas:
                     id_fac, tot_b, det_m, t_doc, imp_val = r
                     tot_val, det_val, impuesto_val = float(tot_b) if tot_b else 0.0, float(det_m) if det_m else 0.0, float(imp_val) if imp_val else 0.0
                     if t_doc and "Recibo" in t_doc and "8%" in t_doc: neto_fac = tot_val - impuesto_val - det_val
                     else: neto_fac = tot_val - det_val
-                    cursor.execute("SELECT SUM(monto_pagado) FROM pagos_clientes WHERE id_factura = %s", (id_fac,))
-                    pagado = cursor.fetchone()[0]
+                    pagado = pagos_por_factura.get(id_fac, 0.0)
                     saldo = max(0.0, neto_fac - (float(pagado) if pagado else 0.0))
                     deuda_actual += saldo
                 deuda_proyectada = deuda_actual + neto_nuevo
@@ -652,7 +661,7 @@ class FacturasEmitidasTab:
 
     def _pintar_tabla_facturas(self, filas_resultado, token_actual):
         if token_actual != getattr(self, '_token_carga_tabla', token_actual): return
-        for item in self.tabla.get_children(): self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
         for row_vals in filas_resultado: self.tabla.insert("", tk.END, values=row_vals)
         if hasattr(self, 'btn_ant'):
             if self.pagina_actual > 1: self.btn_ant.configure(state="normal")
@@ -838,15 +847,21 @@ class FacturasEmitidasTab:
                     res_cli = c2.fetchone(); limite_credito = float(res_cli[0]) if (res_cli and res_cli[0] is not None) else 0.0
                     if limite_credito > 0.0:
                         c2.execute("SELECT id, total, COALESCE(det_monto, 0), tipo_documento, COALESCE(impuesto, 0) FROM facturas_emitidas WHERE TRIM(UPPER(cliente)) = %s", (cli_match,))
-                        facturas_historicas, deuda_actual = c2.fetchall(), 0.0
+                        facturas_historicas = c2.fetchall()
+                        deuda_actual = 0.0
+                        pagos_por_factura = {}
+                        if facturas_historicas:
+                            ids_fac = [r[0] for r in facturas_historicas]
+                            placeholders = ",".join(["%s"] * len(ids_fac))
+                            c2.execute(f"SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
+                            pagos_por_factura = {pr[0]: (float(pr[1]) if pr[1] else 0.0) for pr in c2.fetchall()}
                         for r in facturas_historicas:
                             f_id, tot_b, det_m, t_doc, imp_val = r
                             if str(f_id) == str(id_doc): continue
                             tot_val, det_val, impuesto_val = float(tot_b) if tot_b else 0.0, float(det_m) if det_m else 0.0, float(imp_val) if imp_val else 0.0
                             if t_doc and "Recibo" in t_doc and "8%" in t_doc: neto_fac = tot_val - impuesto_val - det_val
                             else: neto_fac = tot_val - det_val
-                            c2.execute("SELECT SUM(monto_pagado) FROM pagos_clientes WHERE id_factura = %s", (f_id,))
-                            pagado = c2.fetchone()[0]
+                            pagado = pagos_por_factura.get(f_id, 0.0)
                             saldo = max(0.0, neto_fac - (float(pagado) if pagado else 0.0)); deuda_actual += saldo
                         c2.execute("SELECT SUM(monto_pagado) FROM pagos_clientes WHERE id_factura = %s", (id_doc,))
                         pag_esta = c2.fetchone()[0]
@@ -1041,6 +1056,12 @@ class CuentasPorCobrarTab:
                 val = f"%{filtro}%"
                 cursor.execute("""SELECT id, fecha, numero_documento, cliente, evento_asociado, subtotal, impuesto, COALESCE(det_monto, 0), total, tipo_documento, descripcion, enlace_pdf_sunat, archivo_ruta, estado_sunat FROM facturas_emitidas WHERE numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s ORDER BY id DESC LIMIT %s OFFSET %s""", (val, val, val, val, self.registros_por_pagina, offset))
             registros = cursor.fetchall()
+            pagos_por_factura = {}
+            if registros:
+                ids_pagina = [r[0] for r in registros]
+                placeholders = ",".join(["%s"] * len(ids_pagina))
+                cursor.execute(f"SELECT id_factura, SUM(monto_pagado), COUNT(archivo_ruta) FROM pagos_clientes WHERE id_factura IN ({placeholders}) AND archivo_ruta != '' GROUP BY id_factura", tuple(ids_pagina))
+                pagos_por_factura = {pr[0]: pr for pr in cursor.fetchall()}
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
             for reg in registros:
                 id_factura, fecha, nro_doc, cliente, evento, sub, imp, det_monto, tot_bruto, tipo_doc, concepto, enlace_sunat, arch_ruta, est_sunat = reg
@@ -1049,8 +1070,8 @@ class CuentasPorCobrarTab:
                 sub_val, imp_val, det_monto_val, tot_bruto_val = float(sub) if sub else 0.0, float(imp) if imp else 0.0, float(det_monto) if det_monto else 0.0, float(tot_bruto) if tot_bruto else 0.0
                 if tipo_doc and "Recibo" in tipo_doc and "8%" in tipo_doc: neto_facturado = tot_bruto_val - imp_val - det_monto_val
                 else: neto_facturado = tot_bruto_val - det_monto_val
-                cursor.execute("SELECT SUM(monto_pagado), COUNT(archivo_ruta) FROM pagos_clientes WHERE id_factura = %s AND archivo_ruta != ''", (id_factura,))
-                cobrado_res, cant_archivos = cursor.fetchone()
+                res_pago = pagos_por_factura.get(id_factura)
+                cobrado_res, cant_archivos = (res_pago[1], res_pago[2]) if res_pago else (None, 0)
                 monto_cobrado = float(cobrado_res) if cobrado_res else 0.0
                 saldo_pendiente = max(0.0, neto_facturado - monto_cobrado)
                 txt_adjuntos = f"📁 {cant_archivos} archivo(s)" if cant_archivos > 0 else "❌ Sin adjuntos"
@@ -1063,7 +1084,7 @@ class CuentasPorCobrarTab:
 
     def _pintar_tabla_cobros(self, filas_resultado, total_pendiente, token_actual):
         if token_actual != getattr(self, '_token_carga_cobros', token_actual): return
-        for fila in self.tabla.get_children(): self.tabla.delete(fila)
+        self.tabla.delete(*self.tabla.get_children())
         for row_vals in filas_resultado: self.tabla.insert("", tk.END, values=row_vals)
         self.lbl_total_general.configure(text=f"Total Pendiente Filtrado: {formatear_moneda(total_pendiente)}")
         if hasattr(self, 'btn_ant'):
@@ -1163,7 +1184,7 @@ class CuentasPorCobrarTab:
         sub_tabla.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
         def refrescar_subtabla():
-            for f in sub_tabla.get_children(): sub_tabla.delete(f)
+            sub_tabla.delete(*sub_tabla.get_children())
             try:
                 conn = obtener_conexion_segura(parent=v_edit)
                 if not conn: return
@@ -1390,10 +1411,8 @@ class CuentasPorCobrarTab:
             if not conn: return
             try:
                 c = conn.cursor()
-                c.execute("SELECT id_factura, monto_pagado FROM pagos_clientes")
-                cobros_dict = {}
-                for id_f, monto in c.fetchall():
-                    cobros_dict[id_f] = cobros_dict.get(id_f, 0.0) + (float(monto) if monto else 0.0)
+                c.execute("SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes GROUP BY id_factura")
+                cobros_dict = {id_f: (float(monto) if monto else 0.0) for id_f, monto in c.fetchall()}
 
                 c.execute("SELECT id, fecha, cliente, subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento, enlace_pdf_sunat, archivo_ruta, estado_sunat FROM facturas_emitidas")
                 
@@ -1746,7 +1765,7 @@ class NotasCreditoTab:
     def _pintar_tabla_nc(self, filas_resultado, token_actual):
         if token_actual != getattr(self, '_token_carga_nc', token_actual):
             return
-        for fila in self.tabla.get_children(): self.tabla.delete(fila)
+        self.tabla.delete(*self.tabla.get_children())
         for row_vals in filas_resultado:
             self.tabla.insert("", tk.END, values=row_vals)
             

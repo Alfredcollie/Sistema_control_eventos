@@ -56,8 +56,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (280 // 2)
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
         ctk.CTkButton(self.header_frame, text="<", width=30, fg_color="transparent", command=self.prev_month).pack(side="left", padx=10, pady=10)
@@ -463,8 +464,7 @@ class CatalogoLocacionesTab:
         if hasattr(self, 'lbl_pagina'):
             self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         filtro = self.ent_buscar_catalogo.get().strip().lower() if hasattr(self, 'ent_buscar_catalogo') else ""
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
@@ -502,7 +502,7 @@ class CatalogoLocacionesTab:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_tabla(self, rows):
-        for row in self.tabla.get_children(): self.tabla.delete(row)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
             
@@ -519,8 +519,9 @@ class CatalogoLocacionesTab:
     def eliminar_locacion(self):
         sel = self.tabla.selection()
         if not sel: return messagebox.showwarning("Atención", "Seleccione una locación de la tabla.")
-        id_loc = self.tabla.item(sel[0], "values")[0]
-        nom = self.tabla.item(sel[0], "values")[1]
+        valores = self.tabla.item(sel[0], "values")
+        id_loc = valores[0]
+        nom = valores[1]
 
         if messagebox.askyesno("Confirmar", f"¿Eliminar la locación '{nom}' y TODAS sus fotos permanentemente?"):
             conn = conectar_db()
@@ -784,8 +785,9 @@ class CatalogoLocacionesTab:
         sel = self.tabla.selection()
         if not sel: return messagebox.showwarning("Atención", "Seleccione una locación para gestionar sus fotos.")
         
-        id_loc = self.tabla.item(sel[0], "values")[0]
-        nom_loc = self.tabla.item(sel[0], "values")[1]
+        valores_gal = self.tabla.item(sel[0], "values")
+        id_loc = valores_gal[0]
+        nom_loc = valores_gal[1]
 
         v_gal = ctk.CTkToplevel(self.main_root)
         v_gal.title(f"Galería de Fotos - {nom_loc}")
@@ -906,6 +908,14 @@ class CatalogoLocacionesTab:
                 
                 rutas_orig = [r[1] for r in fotos_bd if r[1] and os.path.exists(r[1])]
                 rutas_med = [r[4] for r in fotos_bd if len(r)>4 and r[4] and os.path.exists(r[4])]
+                mapa_idx_orig = {}
+                for i, r in enumerate(rutas_orig):
+                    if r not in mapa_idx_orig:
+                        mapa_idx_orig[r] = i
+                mapa_idx_med = {}
+                for i, r in enumerate(rutas_med):
+                    if r not in mapa_idx_med:
+                        mapa_idx_med[r] = i
                 
                 if not fotos_bd:
                     ctk.CTkLabel(f_lista, text="No hay fotos guardadas para esta locación.", text_color="gray").pack(pady=30)
@@ -937,7 +947,7 @@ class CatalogoLocacionesTab:
                                 lbl_img_o = ctk.CTkLabel(f_col_o, image=ctk_img_o, text="", cursor="hand2")
                                 lbl_img_o.pack()
                                 
-                                idx_orig = rutas_orig.index(ruta_orig) if ruta_orig in rutas_orig else 0
+                                idx_orig = mapa_idx_orig.get(ruta_orig, 0)
                                 lbl_img_o.bind("<Double-1>", lambda e, r_list=rutas_orig, start_idx=idx_orig: self.abrir_visor_carrusel(v_gal, r_list, start_idx))
                             except Exception: pass
                             
@@ -953,7 +963,7 @@ class CatalogoLocacionesTab:
                                 lbl_img_m = ctk.CTkLabel(f_col_m, image=ctk_img_m, text="", cursor="hand2")
                                 lbl_img_m.pack()
                                 
-                                idx_med = rutas_med.index(ruta_med) if ruta_med in rutas_med else 0
+                                idx_med = mapa_idx_med.get(ruta_med, 0)
                                 lbl_img_m.bind("<Double-1>", lambda e, r_list=rutas_med, start_idx=idx_med: self.abrir_visor_carrusel(v_gal, r_list, start_idx))
                             except Exception: pass
 
@@ -1320,8 +1330,7 @@ class ReservasLocacionesTab:
         if hasattr(self, 'lbl_pagina'):
             self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         filtro = self.ent_buscar_reservas.get().strip().lower() if hasattr(self, 'ent_buscar_reservas') else ""
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
@@ -1381,7 +1390,7 @@ class ReservasLocacionesTab:
     def _pintar_tabla(self, token, rows):
         if token != getattr(self, "_carga_res_token", 0):
             return
-        for row in self.tabla.get_children(): self.tabla.delete(row)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
             

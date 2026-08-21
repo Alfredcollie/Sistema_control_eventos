@@ -393,8 +393,7 @@ class SistemaClientes:
         if self._esta_destruido:
             return
             
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         if hasattr(self, 'btn_editar'):
             self.btn_editar.configure(state="disabled")

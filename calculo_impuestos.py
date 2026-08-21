@@ -431,8 +431,12 @@ class CalculoImpuestosApp:
                     ventas_netas = 0.0
                     igv_ventas = 0.0
                     detracciones_del_mes = 0.0
+                    cache_fechas = {}
                     for tipo, sub, imp, det, fecha in cursor.fetchall():
-                        f_dt = self.convertir_a_fecha(str(fecha))
+                        fec_str = str(fecha)
+                        if fec_str not in cache_fechas:
+                            cache_fechas[fec_str] = self.convertir_a_fecha(fec_str)
+                        f_dt = cache_fechas[fec_str]
                         if f_dt and f"{f_dt.month:02d}" == mes and str(f_dt.year) == anio:
                             tipo_str = str(tipo).lower()
                             if "factura" in tipo_str or "boleta" in tipo_str:
@@ -444,7 +448,10 @@ class CalculoImpuestosApp:
                     igv_compras = 0.0
                     detracciones_compras = 0.0
                     for tipo, sub, imp, det, fecha in cursor.fetchall():
-                        f_dt = self.convertir_a_fecha(str(fecha))
+                        fec_str = str(fecha)
+                        if fec_str not in cache_fechas:
+                            cache_fechas[fec_str] = self.convertir_a_fecha(fec_str)
+                        f_dt = cache_fechas[fec_str]
                         if f_dt and f"{f_dt.month:02d}" == mes and str(f_dt.year) == anio:
                             if "factura" in str(tipo).lower():
                                 compras_netas += float(sub or 0)
@@ -671,8 +678,7 @@ class CalculoImpuestosApp:
     def _pintar_historial(self, token, rows):
         if token != getattr(self, "_hist_token", 0):
             return
-        for item in self.tabla.get_children():
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             tiene_arch = "✅ Ver" if r[9] else "❌ No"
             self.tabla.insert("", tk.END, values=(

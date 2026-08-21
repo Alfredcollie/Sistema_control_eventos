@@ -535,7 +535,7 @@ class OrdenesCompraClienteApp:
         self.btn_arch_cli.configure(text="✅ PDF Escaneado (Memoria)", fg_color="#27ae60")
         
         try:
-            texto_completo = ""
+            texto_partes = []
             tablas_extraidas = []
             
             with pdfplumber.open(self.ruta_archivo_temp) as pdf:
@@ -543,7 +543,7 @@ class OrdenesCompraClienteApp:
                     # 1. Extracción de texto plano con espaciado
                     t_extraido = page.extract_text(layout=False) or ""
                     if t_extraido:
-                        texto_completo += t_extraido + "\n"
+                        texto_partes.append(t_extraido + "\n")
                     
                     # 2. Extracción de tablas estructuradas
                     try:
@@ -554,6 +554,8 @@ class OrdenesCompraClienteApp:
                     except Exception:
                         pass
                         
+            texto_completo = "".join(texto_partes)
+
             if not texto_completo.strip():
                 return messagebox.showwarning(
                     "Aviso OCR", 
@@ -1206,8 +1208,7 @@ class OrdenesCompraClienteApp:
         if self._esta_destruido:
             return
             
-        for f in self.tbl_cli.get_children():
-            self.tbl_cli.delete(f)
+        self.tbl_cli.delete(*self.tbl_cli.get_children())
             
         if not rows:
             self.tbl_cli.insert("", tk.END, values=("", "Sin registros", "", "", "No se encontraron órdenes registradas.", "", "", "", "", "", ""))

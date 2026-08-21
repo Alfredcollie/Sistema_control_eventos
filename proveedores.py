@@ -311,8 +311,7 @@ class SistemaProveedores:
             
         self.lbl_pagina.configure(text=f"Página {self.pagina_actual}")
 
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         if hasattr(self, 'btn_editar'):
             self.btn_editar.configure(state="disabled")
@@ -362,16 +361,15 @@ class SistemaProveedores:
             threading.Thread(target=tarea_descarga, daemon=True).start()
 
     def _pintar_datos_en_tabla(self, datos, offset):
-        for item in self.tabla.get_children():
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
 
         contador_visual = offset + 1
         for row in datos:
-            cat_final = str(row[3])
-            if row[7] and row[7] != "No seleccionada": cat_final += f" / {row[7]}"
-            if row[8] and row[8] != "No seleccionada": cat_final += f" / {row[8]}"
-            if row[9] and row[9] != "No seleccionada": cat_final += f" / {row[9]}"
-            if row[10] and row[10] != "No seleccionada": cat_final += f" / {row[10]}"
+            cat_parts = [str(row[3])]
+            for extra in (row[7], row[8], row[9], row[10]):
+                if extra and extra != "No seleccionada":
+                    cat_parts.append(f" / {extra}")
+            cat_final = "".join(cat_parts)
             
             valores = (contador_visual, row[0], row[1], row[2], cat_final, row[4], row[5], row[6])
             self.tabla.insert("", tk.END, values=valores)

@@ -230,8 +230,7 @@ class LibroDiarioApp:
     # =======================================================
     def cargar_datos_diario(self):
         self.tabla.config(displaycolumns="")
-        for fila in self.tabla.get_children():
-            self.tabla.delete(fila)
+        self.tabla.delete(*self.tabla.get_children())
 
         self._diario_token = getattr(self, "_diario_token", 0) + 1
         token = self._diario_token

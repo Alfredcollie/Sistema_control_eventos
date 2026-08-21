@@ -170,8 +170,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         except Exception:
             pass
 
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         
         self.protocol("WM_DELETE_WINDOW", self._cerrar_seguro)
         
@@ -265,8 +266,9 @@ class CalendarioDashboard(ctk.CTkToplevel):
         self.after(100, lambda: maximizar_ventana(self))
         self.protocol("WM_DELETE_WINDOW", self._cerrar_dashboard)
         
-        self.mes_actual = datetime.now().month
-        self.anio_actual = datetime.now().year
+        ahora = datetime.now()
+        self.mes_actual = ahora.month
+        self.anio_actual = ahora.year
         self.tareas_db = {}
         self.pop_detalle = None
         self._esta_destruido = False
@@ -450,12 +452,17 @@ class CalendarioDashboard(ctk.CTkToplevel):
                     # 🚀 3. INYECTAR FACTURAS PENDIENTES DE PROVEEDORES (<= 7 DÍAS)
                     if filtro_p in ["Todo", "Por Proveedor"]:
                         query_fac = "SELECT id, fecha, dias_credito, proveedor, tipo_documento, total, COALESCE(det_monto, 0), impuesto, descripcion, evento_asociado FROM facturas_recibidas"
-                        cursor.execute(query_fac)
+                        params_fac = []
+                        if filtro_p == "Por Proveedor" and filtro_s not in ("-", "Sin registros", "Cargando..."):
+                            query_fac += " WHERE proveedor = %s"
+                            params_fac.append(filtro_s)
+                        cursor.execute(query_fac, tuple(params_fac))
                         facturas = cursor.fetchall()
                         
                         cursor.execute("SELECT id_factura, SUM(monto_pagado) FROM pagos_comprobantes GROUP BY id_factura")
                         pagos_dict = {row[0]: float(row[1]) for row in cursor.fetchall()}
                         
+                        hoy = datetime.now()
                         for fac in facturas:
                             f_id, fec_str, dias_cred, prov, t_doc, tot, det, imp, desc, ev_asoc = fac
                             try:
@@ -477,7 +484,7 @@ class CalendarioDashboard(ctk.CTkToplevel):
                                 saldo = neto - pagos_dict.get(f_id, 0.0)
                                 
                                 if saldo > 0.01:
-                                    dias_restantes = (vencimiento.date() - datetime.now().date()).days
+                                    dias_restantes = (vencimiento.date() - hoy.date()).days
                                     if dias_restantes <= 7:
                                         evt_id = f"FAC_{f_id}"
                                         f_limite = vencimiento.strftime("%d/%m/%Y")
@@ -509,13 +516,9 @@ class CalendarioDashboard(ctk.CTkToplevel):
             if datos_db:
                 for t_id, f_limite, t_nombre, estado, evento, resp, notas in datos_db:
                     if f_limite:
-                        if f_limite not in self.tareas_db:
-                            self.tareas_db[f_limite] = []
-                            
                         evento_str = str(evento) if evento else "Sin Evento"
                         evento_nombre_limpio = evento_str.split(" | ")[1] if " | " in evento_str else evento_str
-                        
-                        self.tareas_db[f_limite].append({
+                        self.tareas_db.setdefault(f_limite, []).append({
                             "id": t_id,
                             "tarea": str(t_nombre) if t_nombre else "Sin nombre",
                             "estado": str(estado) if estado else "Pendiente",
@@ -594,7 +597,8 @@ class CalendarioDashboard(ctk.CTkToplevel):
                                     color_estado = "#f8d7da"
                                     text_color = "#721c24"
                                     
-                                titulo_corto = tarea_data["tarea"][:34] + ".." if len(tarea_data["tarea"]) > 34 else tarea_data["tarea"]
+                                tarea_txt = tarea_data["tarea"]
+                                titulo_corto = tarea_txt[:34] + ".." if len(tarea_txt) > 34 else tarea_txt
                                 lbl_tarea = ctk.CTkLabel(
                                     f_contenedor,
                                     text=f"• {titulo_corto}",
@@ -623,6 +627,7 @@ class CalendarioDashboard(ctk.CTkToplevel):
             "CALSCALE:GREGORIAN"
         ]
         contador_tareas = 0
+        dtstamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
         for f_limite, tareas_dia in self.tareas_db.items():
             for td in tareas_dia:
                 try:
@@ -630,7 +635,6 @@ class CalendarioDashboard(ctk.CTkToplevel):
                     dt_end = dt_start + timedelta(days=1)
                     str_start = dt_start.strftime("%Y%m%d")
                     str_end = dt_end.strftime("%Y%m%d")
-                    dtstamp = datetime.now().strftime('%Y%m%dT%H%M%SZ')
                     desc = f"📌 Evento: {td['evento_completo']}\\n👤 Responsable: {td['responsable']}\\n📊 Estado: {td['estado']}\\n📋 Notas: {td['notas']}".replace("\n", "\\n")
                     ics_content.extend([
                         "BEGIN:VEVENT",
@@ -1387,6 +1391,7 @@ class CronogramaApp:
             d_resp = {}
             d_notas = {}
             opciones = []
+            vistos = set()
             if codigo_cot != "OFICINA":
                 conn = conectar_db(silencioso=True)
                 if conn:
@@ -1398,16 +1403,18 @@ class CronogramaApp:
                             prov = str(r[1]).strip()
                             nota = str(r[2]).strip()
                             if cat:
-                                if cat not in opciones:
+                                if cat not in vistos:
                                     d_resp[cat] = prov
                                     d_notas[cat] = nota
                                     opciones.append(cat)
+                                    vistos.add(cat)
                                 elif d_resp.get(cat) != prov:
                                     cat_alt = f"{cat} ({prov})"
-                                    if cat_alt not in opciones:
+                                    if cat_alt not in vistos:
                                         d_resp[cat_alt] = prov
                                         d_notas[cat_alt] = nota
                                         opciones.append(cat_alt)
+                                        vistos.add(cat_alt)
                     except Exception:
                         pass
                     finally:
@@ -1435,10 +1442,8 @@ class CronogramaApp:
         
         if ruta_origen.lower().endswith('.pdf') and pdfplumber:
             try:
-                texto = ""
                 with pdfplumber.open(ruta_origen) as pdf:
-                    for page in pdf.pages:
-                        texto += page.extract_text() + "\n"
+                    texto = "".join(page.extract_text() + "\n" for page in pdf.pages)
                 if re.search(r"BOLETA", texto, re.IGNORECASE):
                     tipo_doc = "Boleta (Sin IGV)"
                 elif re.search(r"RECIBO", texto, re.IGNORECASE):
@@ -1620,13 +1625,14 @@ class CronogramaApp:
                 messagebox.showwarning("Atención", "La descripción de la tarea es obligatoria.", parent=v_edit)
                 return
             tarea_completa = f"{accion_select}: {t_base}"
+            codigo_evento = self.combo_evento_global.get().split(" | ")[0]
             if tp in ["50% para ejecución", "100% para ejecución"] and not ruta_temp_edit["path"] and not archivo_ya_cargado_db:
                 e = "Pendiente"
                 messagebox.showinfo("Aviso Bloqueo", f"El tipo de pago es '{tp}' pero no se ha adjuntado archivo. La tarea quedará forzada a 'Pendiente'.", parent=v_edit)
             ruta_final = archivo_ya_cargado_db
             if ruta_temp_edit["path"]:
-                ruta_final, monto_d = self.procesar_e_insertar_factura(ruta_temp_edit["path"], r, self.combo_evento_global.get().split(" | ")[0], tarea_completa)
-                if ruta_final and self.combo_evento_global.get().split(" | ")[0] != "OFICINA":
+                ruta_final, monto_d = self.procesar_e_insertar_factura(ruta_temp_edit["path"], r, codigo_evento, tarea_completa)
+                if ruta_final and codigo_evento != "OFICINA":
                     messagebox.showinfo("Factura Cargada", f"Se procesó y registró automáticamente en Facturas Recibidas (Compras).\nMonto detectado: S/. {monto_d:,.2f}", parent=v_edit)
             
             conn = conectar_db()
@@ -1834,6 +1840,7 @@ class CronogramaApp:
         estado = self.combo_estado.get()
         tipo_pago = self.combo_tipo_pago.get()
         notas = self.txt_notas.get("1.0", "end-1c").strip()
+        codigo_evento = evento.split(" | ")[0]
         if not t_base:
             messagebox.showwarning("Atención", "La descripción de la tarea es obligatoria.")
             return
@@ -1848,8 +1855,8 @@ class CronogramaApp:
             
         ruta_final = self.archivo_ya_cargado_db
         if self.ruta_temp_pago:
-            ruta_final, monto_d = self.procesar_e_insertar_factura(self.ruta_temp_pago, responsable, evento.split(" | ")[0], tarea)
-            if ruta_final and evento.split(" | ")[0] != "OFICINA":
+            ruta_final, monto_d = self.procesar_e_insertar_factura(self.ruta_temp_pago, responsable, codigo_evento, tarea)
+            if ruta_final and codigo_evento != "OFICINA":
                 messagebox.showinfo("Factura Cargada", f"Archivo procesado e insertado en Facturas Recibidas automáticamente.\nMonto detectado: S/. {monto_d:,.2f}")
                 
         conn = conectar_db()
@@ -1869,7 +1876,7 @@ class CronogramaApp:
                     SET nombre_tarea=%s, responsable=%s, fecha_limite=%s, estado=%s, notas=%s, tipo_pago=%s, archivo_pago=%s
                     WHERE id=%s
                 """, (tarea, responsable, fecha_limite, estado, notas, tipo_pago, ruta_final, self.id_tarea_seleccionada))
-                registrar_auditoria(self.usuario_activo, "Cronograma", f"Actualizó la tarea '{tarea}' del evento {evento.split(' | ')[0]}")
+                registrar_auditoria(self.usuario_activo, "Cronograma", f"Actualizó la tarea '{tarea}' del evento {codigo_evento}")
             else:
                 cursor.execute("SELECT COALESCE(MAX(orden), 0) FROM tareas_evento WHERE evento_asociado = %s", (evento,))
                 nuevo_orden = cursor.fetchone()[0] + 1
@@ -1877,7 +1884,7 @@ class CronogramaApp:
                     INSERT INTO tareas_evento (evento_asociado, nombre_tarea, responsable, fecha_limite, estado, notas, orden, tipo_pago, archivo_pago)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (evento, tarea, responsable, fecha_limite, estado, notas, nuevo_orden, tipo_pago, ruta_final))
-                registrar_auditoria(self.usuario_activo, "Cronograma", f"Creó nueva tarea '{tarea}' para el evento {evento.split(' | ')[0]}")
+                registrar_auditoria(self.usuario_activo, "Cronograma", f"Creó nueva tarea '{tarea}' para el evento {codigo_evento}")
             conn.commit()
             cache_sistema.invalidar()
             self.limpiar_formulario()
@@ -1959,8 +1966,7 @@ class CronogramaApp:
         if self._esta_destruido:
             return
             
-        for item in self.tabla.get_children():
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         if not rows:
             self.tabla.insert("", tk.END, values=("", "", "Sin tareas", "No hay tareas registradas para este evento.", "", "", ""))

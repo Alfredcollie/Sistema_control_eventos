@@ -513,8 +513,11 @@ class EstadisticasFinancieraApp:
                         pagos_proveedores_dict.setdefault(fk, []).append((m, f))
                 except Exception: conn.rollback()
 
+                cache_fechas = {}
                 def fecha_en_periodo(f_str):
-                    dt_f = self.convertir_a_fecha(f_str)
+                    if f_str not in cache_fechas:
+                        cache_fechas[f_str] = self.convertir_a_fecha(f_str)
+                    dt_f = cache_fechas[f_str]
                     if not dt_f: return False 
                     
                     if modo_fecha == "Rango":
@@ -555,8 +558,9 @@ class EstadisticasFinancieraApp:
                         ventas_periodo += neto_venta
 
                     pagado_factura_global = 0.0
-                    if v_id in pagos_clientes_dict:
-                        for monto_pago, fecha_pago in pagos_clientes_dict[v_id]:
+                    pagos_factura = pagos_clientes_dict.get(v_id)
+                    if pagos_factura:
+                        for monto_pago, fecha_pago in pagos_factura:
                             m = float(monto_pago) if monto_pago else 0.0
                             pagado_factura_global += m
                             
@@ -597,8 +601,9 @@ class EstadisticasFinancieraApp:
                         compras_periodo += neto_compra
 
                     pagado_factura_global = 0.0
-                    if c_id in pagos_proveedores_dict:
-                        for monto_pago, fecha_pago in pagos_proveedores_dict[c_id]:
+                    pagos_factura = pagos_proveedores_dict.get(c_id)
+                    if pagos_factura:
+                        for monto_pago, fecha_pago in pagos_factura:
                             m = float(monto_pago) if monto_pago else 0.0
                             pagado_factura_global += m
                             

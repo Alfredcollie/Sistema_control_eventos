@@ -179,8 +179,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
         
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
@@ -332,10 +333,11 @@ class FacturasRecibidasTab:
         try:
             self.bloquear_autocompletado_ruc = True
             
-            texto = ""
+            partes_texto = []
             with pdfplumber.open(ruta) as pdf:
-                for page in pdf.pages: 
-                    texto += page.extract_text() + "\n"
+                for page in pdf.pages:
+                    partes_texto.append(page.extract_text() + "\n")
+            texto = "".join(partes_texto)
                     
             if not texto.strip(): 
                 self.bloquear_autocompletado_ruc = False
@@ -1082,8 +1084,7 @@ class FacturasRecibidasTab:
         if datos is not None:
             self._pintar_tabla(datos, token)
         else:
-            for item in self.tabla.get_children(): 
-                self.tabla.delete(item)
+            self.tabla.delete(*self.tabla.get_children())
             self.tabla.insert("", tk.END, values=("", "", "", "Cargando datos...", "", "", "", "", "", ""))
             
             threading.Thread(
@@ -1128,7 +1129,9 @@ class FacturasRecibidasTab:
                 det_monto = r[11]
                 cat = r[13] if r[13] else "GENERAL"
                 
-                if "Recibo" in str(tipo_doc) and "8%" in str(tipo_doc):
+                tipo_str = str(tipo_doc)
+                ev_str = str(r[6])
+                if "Recibo" in tipo_str and "8%" in tipo_str:
                     neto = float(tot_bruto) - float(impuesto) - float(det_monto)
                 else:
                     neto = float(tot_bruto) - float(det_monto)
@@ -1139,10 +1142,10 @@ class FacturasRecibidasTab:
                     r[1], 
                     r[2] if r[2] else "-", 
                     r[3], 
-                    str(tipo_doc).split(" ")[0] if tipo_doc else "Desc", 
+                    tipo_str.split(" ")[0] if tipo_doc else "Desc", 
                     r[5], 
                     cat, 
-                    str(r[6]).split(" | ")[0] if " | " in str(r[6]) else r[6], 
+                    ev_str.split(" | ")[0] if " | " in ev_str else r[6], 
                     r[7], 
                     formatear_moneda(r[8]), 
                     formatear_moneda(impuesto), 
@@ -1166,8 +1169,7 @@ class FacturasRecibidasTab:
         if token != getattr(self, "_carga_facr_token", 0): 
             return
             
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         for r in rows: 
             self.tabla.insert("", tk.END, values=r)
@@ -1530,9 +1532,10 @@ class CuentasPorPagarTab:
         lbl_pagado = crear_lbl_res(f_resultados, "Total Pagado (Dinero Egresado Real):", "#27ae60")
         lbl_por_pagar = crear_lbl_res(f_resultados, "Total por Pagar (Deuda Pendiente General):", "#c0392b")
 
+        formatos_fecha = ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%m/%d/%Y"]
         def convertir_a_fecha(fecha_str):
             if not fecha_str: return None
-            for fmt in ["%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%m/%d/%Y"]:
+            for fmt in formatos_fecha:
                 try: 
                     return datetime.strptime(fecha_str.strip(), fmt)
                 except ValueError: 
@@ -1563,13 +1566,19 @@ class CuentasPorPagarTab:
                 c.execute("SELECT id, fecha, proveedor, subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento FROM facturas_recibidas")
                 tot_bruto = tot_igv = tot_det = tot_pagado = tot_deuda = 0.0
 
+                cache_fechas = {}
                 for r in c.fetchall():
                     id_fac, fecha, prov, sub, imp, tot, det, tipo_doc = r
                     
                     if prov_filtro != "Todos" and prov != prov_filtro: 
                         continue
                     
-                    f_dt = convertir_a_fecha(str(fecha))
+                    clave_fecha = str(fecha)
+                    if clave_fecha in cache_fechas:
+                        f_dt = cache_fechas[clave_fecha]
+                    else:
+                        f_dt = convertir_a_fecha(clave_fecha)
+                        cache_fechas[clave_fecha] = f_dt
                     if d_desde and d_hasta:
                         if not f_dt or not (d_desde <= f_dt <= d_hasta): continue
                     elif d_desde:
@@ -1658,8 +1667,7 @@ class CuentasPorPagarTab:
         if datos is not None:
             self._pintar_tabla_cobros(datos["filas"], datos["total"], token)
         else:
-            for item in self.tabla.get_children(): 
-                self.tabla.delete(item)
+            self.tabla.delete(*self.tabla.get_children())
                 
             self.tabla.insert("", tk.END, values=("", "", "Cargando datos...", "", "", "", ""))
             
@@ -1699,6 +1707,17 @@ class CuentasPorPagarTab:
                 
             registros = cursor.fetchall()
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
+
+            # 🚀 OPTIMIZACIÓN: una sola consulta agregada para todos los pagos de la página (elimina el N+1)
+            cursor.execute("""
+                SELECT id_factura, SUM(monto_pagado), COUNT(archivo_ruta)
+                FROM pagos_comprobantes
+                WHERE archivo_ruta != ''
+                GROUP BY id_factura
+            """)
+            pagos_lookup = {}
+            for id_f, sum_m, cnt in cursor.fetchall():
+                pagos_lookup[id_f] = (float(sum_m) if sum_m else 0.0, int(cnt) if cnt else 0)
             
             for reg in registros:
                 id_factura, fecha, nro_doc, proveedor, evento, concepto, subtotal, impuesto, tot_bruto, det_monto, tipo_doc = reg
@@ -1708,16 +1727,13 @@ class CuentasPorPagarTab:
                 tot_bruto_val = float(tot_bruto) if tot_bruto else 0.0
                 det_monto_val = float(det_monto) if det_monto else 0.0
                 
-                if tipo_doc and "Recibo" in str(tipo_doc) and "8%" in str(tipo_doc):
+                tipo_doc_str = str(tipo_doc) if tipo_doc else ""
+                if tipo_doc and "Recibo" in tipo_doc_str and "8%" in tipo_doc_str:
                     neto_facturado = tot_bruto_val - imp_val - det_monto_val
                 else:
                     neto_facturado = tot_bruto_val - det_monto_val
                 
-                cursor.execute("SELECT SUM(monto_pagado), COUNT(archivo_ruta) FROM pagos_comprobantes WHERE id_factura = %s AND archivo_ruta != ''", (id_factura,))
-                res_pagos = cursor.fetchone()
-                
-                monto_pagado = float(res_pagos[0]) if res_pagos and res_pagos[0] else 0.0
-                cant_archivos = int(res_pagos[1]) if res_pagos and res_pagos[1] else 0
+                monto_pagado, cant_archivos = pagos_lookup.get(id_factura, (0.0, 0))
                 
                 saldo_pendiente = max(0.0, neto_facturado - monto_pagado)
                 txt_adjuntos = f"📁 {cant_archivos} archivo(s)" if cant_archivos > 0 else "❌ Sin adjuntos"
@@ -1755,8 +1771,7 @@ class CuentasPorPagarTab:
         if token_actual != getattr(self, '_carga_pagos_token', token_actual):
             return
             
-        for fila in self.tabla.get_children(): 
-            self.tabla.delete(fila)
+        self.tabla.delete(*self.tabla.get_children())
             
         for row_vals in filas_resultado:
             self.tabla.insert("", tk.END, values=row_vals)
@@ -1927,7 +1942,7 @@ class CuentasPorPagarTab:
         sub_tabla.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
         def refrescar_subtabla():
-            for f in sub_tabla.get_children(): sub_tabla.delete(f)
+            sub_tabla.delete(*sub_tabla.get_children())
             try:
                 conn = obtener_conexion_segura(parent=v_edit)
                 if not conn: return

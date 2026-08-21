@@ -397,6 +397,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
             en_tope_pagina, indice_bloque = True, 0
             for bloque in bloques_items:
+                lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                 color_fondo = 0.95 if indice_bloque % 2 == 0 else 1.0
                 indice_bloque += 1
                 if not en_tope_pagina and (y_pos - filas_preparadas[bloque["indices"][0]]["altura"]) < MARGEN_INFERIOR_TABLA:
@@ -412,7 +413,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                         if not en_tope_pagina:
                             c.setFont("Helvetica-Bold", 9)
                             c.setFillColorRGB(0, 0, 0)
-                            lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                             y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
                             for linea in lineas_cat:
                                 c.drawCentredString(84, y_cat, linea)
@@ -444,7 +444,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     if i_idx == len(bloque["indices"]) - 1:
                         c.setFont("Helvetica-Bold", 9)
                         c.setFillColorRGB(0, 0, 0)
-                        lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                         y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
                         for linea in lineas_cat:
                             c.drawCentredString(84, y_cat, linea)

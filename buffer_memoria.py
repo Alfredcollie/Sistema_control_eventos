@@ -26,18 +26,16 @@ class CacheInteligente:
 
     def obtener(self, clave):
         """Devuelve el dato solo si no ha caducado. Si caducó, lo borra y devuelve None."""
-        if clave in self.almacen:
-            registro = self.almacen[clave]
+        registro = self.almacen.get(clave)
+        if registro is not None:
             # Si estamos en modo lectura offline, los datos nunca caducan
             if self.modo_lectura:
                 return registro['contenido']
-                
-            edad_dato = time.time() - registro['timestamp']
-            if edad_dato < registro['ttl']:
+
+            if time.time() - registro['timestamp'] < registro['ttl']:
                 return registro['contenido']
-            else:
-                # El dato es demasiado viejo, lo eliminamos
-                del self.almacen[clave]
+            # El dato es demasiado viejo, lo eliminamos
+            del self.almacen[clave]
         return None
 
     def invalidar(self, clave=None):
@@ -70,13 +68,10 @@ class CacheInteligente:
                 continue
                 
             ahora = time.time()
-            claves_a_borrar = []
-            for clave, registro in self.almacen.items():
+            # Eliminar en una sola pasada: sin lista intermedia ni segundo bucle
+            for clave, registro in list(self.almacen.items()):
                 if (ahora - registro['timestamp']) >= registro['ttl']:
-                    claves_a_borrar.append(clave)
-                    
-            for c in claves_a_borrar:
-                del self.almacen[c]
+                    del self.almacen[clave]
 
 # Instancia global para ser importada en otros módulos
 cache_sistema = CacheInteligente()

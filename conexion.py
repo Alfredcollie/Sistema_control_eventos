@@ -117,10 +117,11 @@ def _tarea_auditoria_asincrona(usuario, modulo, accion):
         return
     try:
         ahora = datetime.now()
+        marca_tiempo = ahora.strftime("%d/%m/%Y %H:%M:%S")
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO bitacora_auditoria (fecha, hora, usuario, modulo, accion) VALUES (%s, %s, %s, %s, %s)",
-            (ahora.strftime("%d/%m/%Y"), ahora.strftime("%H:%M:%S"), usuario, modulo, accion)
+            (marca_tiempo.split(" ")[0], marca_tiempo.split(" ")[1], usuario, modulo, accion)
         )
         conn.commit()
     except Exception as e:

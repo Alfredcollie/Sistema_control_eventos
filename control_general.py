@@ -1465,7 +1465,12 @@ class ControlGeneralEventos:
 
         def guardar_configuracion():
             def ext_ord(lb):
-                return [nombres_a_keys[lb.get(i)] for i in range(lb.size()) if lb.get(i) in nombres_a_keys]
+                resultado = []
+                for i in range(lb.size()):
+                    texto = lb.get(i)
+                    if texto in nombres_a_keys:
+                        resultado.append(nombres_a_keys[texto])
+                return resultado
             nueva_config = config_actual.copy()
             nueva_config.update({
                 "ruta_drive": ent_drive.get().strip(),
@@ -1602,8 +1607,7 @@ class ControlGeneralEventos:
         self.dict_permisos_usuarios = {}
 
         def cargar_usuarios():
-            for item in tbl_u.get_children():
-                tbl_u.delete(item)
+            tbl_u.delete(*tbl_u.get_children())
             conn = conectar_db(silencioso=True)
             if not conn:
                 return

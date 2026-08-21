@@ -124,8 +124,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
         
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
@@ -683,9 +684,10 @@ class CatalogoEquiposTab:
                         else:
                             cursor.execute("SELECT id, codigo, numero_serial, nombre, marca_modelo, categoria, cantidad_total, estado, precio_costo, depreciacion, ruta_imagen FROM inventario_equipos ORDER BY categoria, nombre LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
                             
+                        moneda_cero = formatear_moneda(0)
                         for r in cursor.fetchall():
                             row_list = list(r)
-                            row_list[8] = formatear_moneda(r[8]) if r[8] else formatear_moneda(0)
+                            row_list[8] = formatear_moneda(r[8]) if r[8] else moneda_cero
                             row_list[9] = f"{r[9]}%" if r[9] else "0%"
                             if len(row_list) == 10:
                                 row_list.append("")
@@ -701,7 +703,7 @@ class CatalogoEquiposTab:
     def _pintar_tabla(self, token, rows):
         if token != getattr(self, "_carga_cat_token", 0):
             return
-        for row in self.tabla.get_children(): self.tabla.delete(row)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
             
@@ -767,8 +769,9 @@ class CatalogoEquiposTab:
     def eliminar_equipo(self):
         sel = self.tabla.selection()
         if not sel: return messagebox.showwarning("Aviso", "Seleccione un equipo para eliminar.")
-        id_eq = self.tabla.item(sel[0], "values")[0]
-        codigo = self.tabla.item(sel[0], "values")[1]
+        valores = self.tabla.item(sel[0], "values")
+        id_eq = valores[0]
+        codigo = valores[1]
 
         if messagebox.askyesno("Confirmar", f"¿Eliminar el equipo {codigo}?\n\nSe eliminarán también las reservas asociadas a este equipo."):
             conn = conectar_db()
@@ -798,9 +801,10 @@ class CatalogoEquiposTab:
         sel = self.tabla.selection()
         if not sel: return messagebox.showwarning("Aviso", "Seleccione un equipo para ver su bitácora.")
         
-        id_eq = self.tabla.item(sel[0], "values")[0]
-        nombre_eq = self.tabla.item(sel[0], "values")[3]
-        serial_eq = self.tabla.item(sel[0], "values")[2]
+        valores = self.tabla.item(sel[0], "values")
+        id_eq = valores[0]
+        nombre_eq = valores[3]
+        serial_eq = valores[2]
         
         sn_texto = f" (SN: {serial_eq})" if serial_eq and serial_eq != "None" else ""
         
@@ -1244,8 +1248,7 @@ class ReservasTab:
             
         self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         filtro = self.ent_buscar_reservas.get().strip().lower() if hasattr(self, 'ent_buscar_reservas') else ""
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
@@ -1307,7 +1310,7 @@ class ReservasTab:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_tabla(self, rows):
-        for row in self.tabla.get_children(): self.tabla.delete(row)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
             
@@ -1693,8 +1696,7 @@ class RecepcionEquiposTab:
             
         self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tabla.get_children(): 
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
             
         filtro = self.ent_buscar_recepcion.get().strip().lower() if hasattr(self, 'ent_buscar_recepcion') else ""
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
@@ -1752,7 +1754,7 @@ class RecepcionEquiposTab:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_tabla(self, rows):
-        for row in self.tabla.get_children(): self.tabla.delete(row)
+        self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
             

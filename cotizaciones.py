@@ -156,8 +156,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         except Exception:
             pass
 
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
         ctk.CTkButton(self.header_frame, text="<", width=30, fg_color="transparent", command=self.prev_month).pack(side="left", padx=10, pady=10)
@@ -527,6 +528,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
             en_tope_pagina, indice_bloque = True, 0
             for bloque in bloques_items:
+                lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                 color_fondo = 0.95 if indice_bloque % 2 == 0 else 1.0
                 indice_bloque += 1
                 if not en_tope_pagina and (y_pos - filas_preparadas[bloque["indices"][0]]["altura"]) < MARGEN_INFERIOR_TABLA:
@@ -542,7 +544,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                         if not en_tope_pagina:
                             c.setFont("Helvetica-Bold", 9)
                             c.setFillColorRGB(0, 0, 0)
-                            lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                             y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
                             for linea in lineas_cat:
                                 c.drawCentredString(84, y_cat, linea)
@@ -574,7 +575,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     if i_idx == len(bloque["indices"]) - 1:
                         c.setFont("Helvetica-Bold", 9)
                         c.setFillColorRGB(0, 0, 0)
-                        lineas_cat = wrap_text(bloque["nombre"].strip(), "Helvetica-Bold", 9, ITEM_MAX_WIDTH)
                         y_cat = ((y_inicio_bloque + y_pos) / 2) + ((len(lineas_cat) - 1) * 5.5) - 3
                         for linea in lineas_cat:
                             c.drawCentredString(84, y_cat, linea)
@@ -892,10 +892,10 @@ class VentanaCotizaciones:
             
         self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tree_cot.get_children():
-            self.tree_cot.delete(item)
+        self.tree_cot.delete(*self.tree_cot.get_children())
 
         keyword = self.ent_buscar.get().strip().lower()
+        patron_busqueda = f"%{keyword}%"
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
 
         clave_cache = f"cotizaciones_{keyword}_pag_{self.pagina_actual}"
@@ -914,7 +914,7 @@ class VentanaCotizaciones:
                         cursor = conn.cursor()
                         if keyword:
                             query = "SELECT id, codigo_cotizacion, nombre_empresa, nombre_evento, fecha_evento, status FROM cotizaciones WHERE codigo_cotizacion ILIKE %s OR nombre_empresa ILIKE %s OR nombre_evento ILIKE %s ORDER BY id DESC LIMIT %s OFFSET %s"
-                            cursor.execute(query, (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", self.registros_por_pagina, offset))
+                            cursor.execute(query, (patron_busqueda, patron_busqueda, patron_busqueda, self.registros_por_pagina, offset))
                         else:
                             cursor.execute("SELECT id, codigo_cotizacion, nombre_empresa, nombre_evento, fecha_evento, status FROM cotizaciones ORDER BY id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
                         
@@ -930,8 +930,7 @@ class VentanaCotizaciones:
             threading.Thread(target=tarea_descarga, daemon=True).start()
 
     def _pintar_tabla_cotizaciones(self, rows):
-        for item in self.tree_cot.get_children():
-            self.tree_cot.delete(item)
+        self.tree_cot.delete(*self.tree_cot.get_children())
             
         contador = ((self.pagina_actual - 1) * self.registros_por_pagina) + 1
         for r in rows:
@@ -1187,8 +1186,7 @@ class VentanaCotizaciones:
         scroll_cat.pack(side="right", fill="y")
 
         def refrescar_tabla_categorias():
-            for item in tree_cat_asis.get_children():
-                tree_cat_asis.delete(item)
+            tree_cat_asis.delete(*tree_cat_asis.get_children())
             c_conn = conectar_db(silencioso=True)
             if not c_conn:
                 return

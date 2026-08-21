@@ -95,20 +95,24 @@ def parsear_segmentos_formato(texto):
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
+# Memoria de normalización (perf): evita recalcular el texto normalizado de cada
+# proveedor en cada cambio de categoría dentro de la misma sesión.
+_NORM_CACHE_PROVEEDORES = {}
+
 def extraer_texto_con_formato(txt_widget):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     dump = inner.dump("1.0", "end-1c")
-    res = ""
+    partes = []
     for key, value, index in dump:
         if key == "tagon":
-            if value == "bold": res += "[B]"
-            elif value == "color": res += "[M]"
+            if value == "bold": partes.append("[B]")
+            elif value == "color": partes.append("[M]")
         elif key == "tagoff":
-            if value == "bold": res += "[/B]"
-            elif value == "color": res += "[/M]"
+            if value == "bold": partes.append("[/B]")
+            elif value == "color": partes.append("[/M]")
         elif key == "text":
-            res += value
-    return res
+            partes.append(value)
+    return "".join(partes)
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
@@ -280,8 +284,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
 
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        ahora = datetime.now()
+        self.current_year = ahora.year
+        self.current_month = ahora.month
         self.meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
@@ -292,7 +297,8 @@ class CalendarioNativo(ctk.CTkToplevel):
         self.cmb_mes = ctk.CTkComboBox(self.header_frame, values=self.meses_nombres, width=100, command=self.cambiar_mes_combo)
         self.cmb_mes.pack(side="left", padx=2, pady=10)
 
-        anios = [str(y) for y in range(datetime.now().year - 80, datetime.now().year + 20)]
+        anio_actual = datetime.now().year
+        anios = [str(y) for y in range(anio_actual - 80, anio_actual + 20)]
         self.cmb_anio = ctk.CTkComboBox(self.header_frame, values=anios, width=75, command=self.cambiar_anio_combo)
         self.cmb_anio.pack(side="left", padx=2, pady=10)
 
@@ -1031,7 +1037,11 @@ class VentanaEtapaProveedores:
 
             def normalizar(t):
                 if not t: return ""
-                return ''.join(c for c in unicodedata.normalize('NFD', str(t).lower().strip()) if unicodedata.category(c) != 'Mn')
+                res = _NORM_CACHE_PROVEEDORES.get(t)
+                if res is None:
+                    res = ''.join(c for c in unicodedata.normalize('NFD', str(t).lower().strip()) if unicodedata.category(c) != 'Mn')
+                    _NORM_CACHE_PROVEEDORES[t] = res
+                return res
 
             cat_norm = normalizar(cat_sel)
             palabras_clave = [p for p in cat_norm.split() if len(p) >= 3]

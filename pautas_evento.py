@@ -363,7 +363,7 @@ class PautasEventoApp:
         sel = self.tree.selection()
         if not sel:
             return messagebox.showwarning("Aviso", "Seleccione una pauta de la tabla para eliminar.", parent=self.tab_frame.winfo_toplevel())
-        for item in sel: self.tree.delete(item)
+        self.tree.delete(*sel)
         self.limpiar_campos()
 
     def vaciar_lista(self):
@@ -371,7 +371,7 @@ class PautasEventoApp:
             self.vaciar_lista_silencioso()
 
     def vaciar_lista_silencioso(self):
-        for item in self.tree.get_children(): self.tree.delete(item)
+        self.tree.delete(*self.tree.get_children())
         self.limpiar_campos()
 
     def guardar_y_generar(self):
@@ -395,9 +395,11 @@ class PautasEventoApp:
             fecha_hoy = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cursor.execute("INSERT INTO pautas_eventos (codigo_cotizacion, fecha_creacion) VALUES (%s, %s)", (cod, fecha_hoy))
             
+            filas_pautas = []
             for item in items_tabla:
                 v = self.tree.item(item, "values")
-                cursor.execute("INSERT INTO pautas_items (codigo_cotizacion, hora, actividad, responsable) VALUES (%s, %s, %s, %s)", (cod, v[0], v[1], v[2]))
+                filas_pautas.append((cod, v[0], v[1], v[2]))
+            cursor.executemany("INSERT INTO pautas_items (codigo_cotizacion, hora, actividad, responsable) VALUES (%s, %s, %s, %s)", filas_pautas)
             conn.commit()
             cache_sistema.invalidar()
             
@@ -423,9 +425,11 @@ class PautasEventoApp:
         try:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM pautas_items WHERE codigo_cotizacion = %s", (cod,))
+            filas_pautas = []
             for item in items_tabla:
                 v = self.tree.item(item, "values")
-                cursor.execute("INSERT INTO pautas_items (codigo_cotizacion, hora, actividad, responsable) VALUES (%s, %s, %s, %s)", (cod, v[0], v[1], v[2]))
+                filas_pautas.append((cod, v[0], v[1], v[2]))
+            cursor.executemany("INSERT INTO pautas_items (codigo_cotizacion, hora, actividad, responsable) VALUES (%s, %s, %s, %s)", filas_pautas)
             conn.commit()
             cache_sistema.invalidar()
             messagebox.showinfo("Éxito", "Pautas actualizadas en la base de datos.", parent=self.tab_frame.winfo_toplevel())

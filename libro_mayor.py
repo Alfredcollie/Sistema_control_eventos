@@ -190,8 +190,7 @@ class LibroMayorApp:
     # CARGA DEL MAYOR EN SEGUNDO PLANO (HILO + TOKEN)
     # =======================================================
     def cargar_datos_mayor(self):
-        for fila in self.tabla.get_children():
-            self.tabla.delete(fila)
+        self.tabla.delete(*self.tabla.get_children())
             
         self._mayor_token = getattr(self, "_mayor_token", 0) + 1
         token = self._mayor_token
@@ -211,15 +210,16 @@ class LibroMayorApp:
                 for r in cursor.fetchall():
                     monto = float(r[0]) if r[0] else 0.0
                     cat = "COBRO CLIENTE"
-                    if cat not in agrupado: agrupado[cat] = {"debe": 0.0, "haber": 0.0}
+                    agrupado.setdefault(cat, {"debe": 0.0, "haber": 0.0})
                     agrupado[cat]["debe"] += monto
                     
                 # 2. Egresos (PROVEEDORES por categoría)
                 cursor.execute("SELECT categoria_suministro, monto_pagado FROM pagos_comprobantes")
                 for r in cursor.fetchall():
-                    cat = str(r[0]).strip().upper() if r[0] and str(r[0]).strip() else "GENERAL / NO ASIGNADO"
+                    cat_raw = str(r[0]).strip() if r[0] else ""
+                    cat = cat_raw.upper() if cat_raw else "GENERAL / NO ASIGNADO"
                     monto = float(r[1]) if r[1] else 0.0
-                    if cat not in agrupado: agrupado[cat] = {"debe": 0.0, "haber": 0.0}
+                    agrupado.setdefault(cat, {"debe": 0.0, "haber": 0.0})
                     agrupado[cat]["haber"] += monto
 
                 # 3. Anulaciones y Notas de Crédito (Auditoría visual acumulada)
@@ -236,8 +236,8 @@ class LibroMayorApp:
                     cat_rev = "ANULACIÓN DE INGRESOS (REVERSO)"
                     cat_nc = "NOTAS DE CRÉDITO EMITIDAS"
                     
-                    if cat_rev not in agrupado: agrupado[cat_rev] = {"debe": 0.0, "haber": 0.0}
-                    if cat_nc not in agrupado: agrupado[cat_nc] = {"debe": 0.0, "haber": 0.0}
+                    agrupado.setdefault(cat_rev, {"debe": 0.0, "haber": 0.0})
+                    agrupado.setdefault(cat_nc, {"debe": 0.0, "haber": 0.0})
                     
                     agrupado[cat_rev]["debe"] += neto   # Reverso visual
                     agrupado[cat_nc]["haber"] += neto   # Salida contable virtual

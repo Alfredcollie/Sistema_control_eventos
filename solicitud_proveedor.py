@@ -463,21 +463,28 @@ class SolicitudProveedorApp:
                             ORDER BY 1
                         """, (codigo,))
                         provs = [limpiar_nombre(r[0]) for r in c.fetchall()]
-                    vistos = []
+                    c.execute("""
+                        SELECT s.id, s.proveedor, s.estado, s.tipo_respuesta, s.fecha_solicitud, s.fecha_recepcion,
+                               (SELECT COUNT(*) FROM personal_proveedor pp WHERE pp.solicitud_id = s.id)
+                        FROM solicitudes_proveedor s
+                        WHERE s.codigo_cotizacion = %s
+                        ORDER BY s.id ASC
+                    """, (codigo,))
+                    sol_por_prov = {}
+                    for fila_sol in c.fetchall():
+                        if fila_sol[1] not in sol_por_prov:
+                            sol_por_prov[fila_sol[1]] = fila_sol
+                    vistos = set()
                     for p in provs:
                         if p in vistos:
                             continue
-                        vistos.append(p)
-                        c.execute("SELECT id, estado, tipo_respuesta, fecha_solicitud, fecha_recepcion FROM solicitudes_proveedor WHERE codigo_cotizacion = %s AND proveedor = %s", (codigo, p))
-                        sol = c.fetchone()
-                        estado = sol[1] if sol else "Pendiente"
-                        tipo = sol[2] if sol and sol[2] else "-"
-                        f_sol = sol[3] if sol and sol[3] else "-"
-                        f_rec = sol[4] if sol and sol[4] else "-"
-                        n_per = 0
-                        if sol:
-                            c.execute("SELECT COUNT(*) FROM personal_proveedor WHERE solicitud_id = %s", (sol[0],))
-                            n_per = c.fetchone()[0]
+                        vistos.add(p)
+                        sol = sol_por_prov.get(p)
+                        estado = sol[2] if sol else "Pendiente"
+                        tipo = sol[3] if sol and sol[3] else "-"
+                        f_sol = sol[4] if sol and sol[4] else "-"
+                        f_rec = sol[5] if sol and sol[5] else "-"
+                        n_per = sol[6] if sol else 0
                         filas.append((p, estado, tipo, f_sol, f_rec, n_per))
                 except Exception as e:
                     print("Error cargando proveedores:", e)
@@ -490,8 +497,7 @@ class SolicitudProveedorApp:
     def _pintar_proveedores(self, token, filas):
         if token != getattr(self, "_prov_token", 0):
             return
-        for item in self.tabla.get_children():
-            self.tabla.delete(item)
+        self.tabla.delete(*self.tabla.get_children())
         for f in filas:
             self.tabla.insert("", tk.END, values=f, tags=(f[1],))
 
@@ -508,8 +514,7 @@ class SolicitudProveedorApp:
             
         self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tabla_hist.get_children(): 
-            self.tabla_hist.delete(item)
+        self.tabla_hist.delete(*self.tabla_hist.get_children())
             
         filtro = ""
         if hasattr(self, 'ent_buscar_hist'):
@@ -560,12 +565,11 @@ class SolicitudProveedorApp:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_solicitudes(self, filas):
-        for item in self.tabla_hist.get_children():
-            self.tabla_hist.delete(item)
+        self.tabla_hist.delete(*self.tabla_hist.get_children())
             
         for r in filas:
             arch_raw = str(r[7] or "")
-            n_arch = len([x for x in arch_raw.split("|") if x.strip()])
+            n_arch = sum(1 for x in arch_raw.split("|") if x.strip())
             valores = (r[0], r[1], r[2], r[3], r[4] or "-", r[5] or "-", r[6] or "-", r[8], arch_raw, n_arch)
             self.tabla_hist.insert("", tk.END, values=valores, tags=(r[3],))
             
@@ -1058,8 +1062,10 @@ class SolicitudProveedorApp:
                     """, (ev["codigo"], prov, tipo, hoy, hoy, ruta_archivo_db, comp, pol, desde, hasta, repn, repd))
                     sid = c.fetchone()[0]
                 c.execute("DELETE FROM personal_proveedor WHERE solicitud_id = %s", (sid,))
-                for nom, dni, car in personal:
-                    c.execute("INSERT INTO personal_proveedor (solicitud_id, nombre_completo, dni, cargo) VALUES (%s, %s, %s, %s)", (sid, nom, dni, car))
+                c.executemany(
+                    "INSERT INTO personal_proveedor (solicitud_id, nombre_completo, dni, cargo) VALUES (%s, %s, %s, %s)",
+                    [(sid, nom, dni, car) for nom, dni, car in personal]
+                )
                 conn.commit()
                 cache_sistema.invalidar()
                 registrar_auditoria(self.usuario_activo, "Solicitud Proveedores", f"Registró información recibida de {prov} ({tipo}, {len(rutas_finales)} adjunto(s)) para el evento {ev['codigo']}")
@@ -1091,9 +1097,18 @@ class SolicitudProveedorApp:
             if not sols:
                 messagebox.showwarning("Aviso", "Aún no hay proveedores con solicitudes para este evento.\nEnvíe primero las solicitudes.")
                 return
+            ids_sols = [s[0] for s in sols]
+            personal_por_sol = {}
+            if ids_sols:
+                c.execute("""
+                    SELECT solicitud_id, nombre_completo, dni, cargo FROM personal_proveedor
+                    WHERE solicitud_id = ANY(%s) ORDER BY solicitud_id, id
+                """, (ids_sols,))
+                for sid_p, nom_p, dni_p, car_p in c.fetchall():
+                    personal_por_sol.setdefault(sid_p, []).append((nom_p, dni_p, car_p))
+
             for sid, prov, tipo, estado, comp, pol, desde, hasta, repn, repd, arch in sols:
-                c.execute("SELECT nombre_completo, dni, cargo FROM personal_proveedor WHERE solicitud_id = %s ORDER BY id", (sid,))
-                personal = c.fetchall()
+                personal = personal_por_sol.get(sid, [])
                 ruc_prov = ""
                 try:
                     c.execute("SELECT ruc FROM proveedores WHERE nombre ILIKE %s LIMIT 1", (prov,))

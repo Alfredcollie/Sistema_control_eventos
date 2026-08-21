@@ -260,8 +260,9 @@ class CalendarioNativo(ctk.CTkToplevel):
         x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (280 // 2)
         y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (320 // 2)
         self.geometry(f"+{x}+{y}")
-        self.current_year = datetime.now().year
-        self.current_month = datetime.now().month
+        _ahora_cal = datetime.now()
+        self.current_year = _ahora_cal.year
+        self.current_month = _ahora_cal.month
         self.header_frame = ctk.CTkFrame(self, fg_color="#1f538d", corner_radius=0)
         self.header_frame.pack(fill="x")
         ctk.CTkButton(self.header_frame, text="<", width=30, fg_color="transparent", command=self.prev_month).pack(side="left", padx=10, pady=10)
@@ -547,8 +548,7 @@ class OrdenesCompraApp:
             
         self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
 
-        for item in self.tree_historial.get_children():
-            self.tree_historial.delete(item)
+        self.tree_historial.delete(*self.tree_historial.get_children())
             
         filtro = ""
         if hasattr(self, 'ent_buscar_historial'):
@@ -607,8 +607,7 @@ class OrdenesCompraApp:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_historial(self, rows):
-        for item in self.tree_historial.get_children():
-            self.tree_historial.delete(item)
+        self.tree_historial.delete(*self.tree_historial.get_children())
             
         for row_vals in rows:
             self.tree_historial.insert("", tk.END, values=row_vals)
@@ -734,8 +733,7 @@ class OrdenesCompraApp:
         codigo_cot = choice.split(" | ")[0].strip()
         
         # Limpiamos interfaz
-        for item in self.tabla_servicios.get_children():
-            self.tabla_servicios.delete(item)
+        self.tabla_servicios.delete(*self.tabla_servicios.get_children())
         self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
         self.txt_detalles.delete("1.0", tk.END)
         
@@ -764,7 +762,8 @@ class OrdenesCompraApp:
             cursor.execute("SELECT proveedor FROM ordenes_compra WHERE codigo_cotizacion = %s AND (estado != 'Anulada' OR estado IS NULL)", (codigo_cot,))
             provs_listos = [str(r[0]) for r in cursor.fetchall()]
             
-            provs_pendientes = [p for p in provs_totales if p not in provs_listos]
+            provs_listos_set = set(provs_listos)
+            provs_pendientes = [p for p in provs_totales if p not in provs_listos_set]
             
             if provs_pendientes:
                 self.cmb_proveedor.configure(values=provs_pendientes)
@@ -786,8 +785,7 @@ class OrdenesCompraApp:
             return
         codigo_cot = self.cmb_cotizacion.get().split(" | ")[0].strip()
         proveedor = choice.strip()
-        for item in self.tabla_servicios.get_children():
-            self.tabla_servicios.delete(item)
+        self.tabla_servicios.delete(*self.tabla_servicios.get_children())
         self.txt_detalles.delete("1.0", tk.END)
         conn = conectar_db(silencioso=True)
         if not conn:

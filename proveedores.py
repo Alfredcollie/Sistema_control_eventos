@@ -7,6 +7,7 @@ import ctypes
 import urllib.request
 import json
 import sys
+import os
 import threading
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
@@ -40,6 +41,17 @@ def maximizar_ventana(ventana):
             ventana.geometry(f"{w}x{h}+0+0")
         except Exception:
             pass
+
+def abrir_documento(ruta):
+    try:
+        if sys.platform == "win32":
+            os.startfile(ruta)
+        elif sys.platform == "darwin": 
+            subprocess.call(["open", ruta])
+        else: 
+            subprocess.call(["xdg-open", ruta])
+    except Exception as e:
+        messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
 
 ZONAS_LIMA = [
     "Lima Centro (Cercado, Breña, Victoria, Rímac, San Luis)",
@@ -86,7 +98,6 @@ def inicializar_db_proveedores():
                 except Exception:
                     conn.rollback() 
                 
-                # 🚀 FIX: Se añadió catalogo_pdf a la estructura de la base de datos
                 columnas_extra = {
                     "direccion_fiscal": "TEXT",
                     "contacto_2": "VARCHAR(150)",
@@ -195,6 +206,22 @@ class SistemaProveedores:
     def ejecutar_en_ui(self, fn, *args):
         if hasattr(self, 'root') and self.root.winfo_exists():
             self.root.after(0, lambda: fn(*args))
+
+    def buscar_catalogo_pdf(self, entry_widget):
+        ruta = filedialog.askopenfilename(title="Seleccionar Catálogo PDF", filetypes=[("Archivos PDF", "*.pdf")])
+        if ruta:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, ruta)
+
+    def ver_catalogo_pdf(self, entry_widget):
+        ruta = entry_widget.get().strip()
+        if not ruta:
+            messagebox.showwarning("Aviso", "Primero debe ingresar o buscar una ruta para el archivo PDF.")
+            return
+        if not os.path.exists(ruta):
+            messagebox.showwarning("Aviso", f"El archivo no existe en la ruta indicada:\n{ruta}")
+            return
+        abrir_documento(ruta)
 
     def crear_tab_buscar(self):
         self.frame_flash_buscar = ctk.CTkFrame(self.tab_buscar, fg_color="#e74c3c", corner_radius=8, border_width=2, border_color="#c0392b")
@@ -602,7 +629,6 @@ class SistemaProveedores:
             link_w = fields.get("link_web", {}).get("/V", "").strip()
             zona_dist = fields.get("zona_distrito", {}).get("/V", "").strip()
             enlace_c = fields.get("enlace_catalogo", {}).get("/V", "").strip()
-            # 🚀 Se extrae catalogo_pdf si existe en la ficha, si no lo deja en blanco
             cat_pdf = fields.get("catalogo_pdf", {}).get("/V", "").strip()
             whats_p = fields.get("whatsapp_principal", {}).get("/V", "").strip()
             whats_a = fields.get("whatsapp_alternativo", {}).get("/V", "").strip()
@@ -839,11 +865,18 @@ class SistemaProveedores:
         self.ent_catalogo_link.grid(row=5, column=1, sticky="ew", pady=8)
         self.crear_botones_cp(f2, 5, 2, self.ent_catalogo_link, "el Catálogo")
 
-        # 🚀 AÑADIDO: Catálogo PDF debajo del Enlace Catálogo
+        # 🚀 AÑADIDO: Catálogo PDF con Botones de Buscar y Ver
         ctk.CTkLabel(f2, text="Catálogo PDF:", font=("Arial", 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
-        self.ent_catalogo_pdf = ctk.CTkEntry(f2)
+        self.ent_catalogo_pdf = ctk.CTkEntry(f2, placeholder_text="Ruta del archivo PDF local")
         self.ent_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)
         self.crear_botones_cp(f2, 6, 2, self.ent_catalogo_pdf, "el Catálogo PDF")
+        
+        f_pdf_btns = ctk.CTkFrame(f2, fg_color="transparent")
+        f_pdf_btns.grid(row=6, column=3, columnspan=2, sticky="w", padx=(30, 5), pady=8)
+        btn_buscar_pdf = ctk.CTkButton(f_pdf_btns, text="📂 Buscar PDF", width=110, command=lambda: self.buscar_catalogo_pdf(self.ent_catalogo_pdf))
+        btn_buscar_pdf.pack(side="left", padx=(0, 5))
+        btn_ver_pdf = ctk.CTkButton(f_pdf_btns, text="👁️ Ver PDF", width=110, fg_color="#8e44ad", hover_color="#732d91", command=lambda: self.ver_catalogo_pdf(self.ent_catalogo_pdf))
+        btn_ver_pdf.pack(side="left")
 
         f3 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)
@@ -1229,12 +1262,19 @@ class SistemaProveedores:
         ent_e_catalogo_link.insert(0, str(p[11]) if p[11] else "")
         self.crear_botones_cp(f2, 5, 2, ent_e_catalogo_link, "el Catálogo")
 
-        # 🚀 AÑADIDO: Catálogo PDF en ventana de edición
+        # 🚀 AÑADIDO: Catálogo PDF con Botones de Buscar y Ver en Edición
         ctk.CTkLabel(f2, text="Catálogo PDF:", font=(familia_fuente, 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
-        ent_e_catalogo_pdf = ctk.CTkEntry(f2)
+        ent_e_catalogo_pdf = ctk.CTkEntry(f2, placeholder_text="Ruta del archivo PDF local")
         ent_e_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)
         ent_e_catalogo_pdf.insert(0, str(p[26]) if len(p) > 26 and p[26] else "")
         self.crear_botones_cp(f2, 6, 2, ent_e_catalogo_pdf, "el Catálogo PDF")
+        
+        f_e_pdf_btns = ctk.CTkFrame(f2, fg_color="transparent")
+        f_e_pdf_btns.grid(row=6, column=3, columnspan=2, sticky="w", padx=(30, 5), pady=8)
+        btn_e_buscar_pdf = ctk.CTkButton(f_e_pdf_btns, text="📂 Buscar PDF", width=110, command=lambda: self.buscar_catalogo_pdf(ent_e_catalogo_pdf))
+        btn_e_buscar_pdf.pack(side="left", padx=(0, 5))
+        btn_e_ver_pdf = ctk.CTkButton(f_e_pdf_btns, text="👁️ Ver PDF", width=110, fg_color="#8e44ad", hover_color="#732d91", command=lambda: self.ver_catalogo_pdf(ent_e_catalogo_pdf))
+        btn_e_ver_pdf.pack(side="left")
 
         f3 = ctk.CTkFrame(scroll_frame_e, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)

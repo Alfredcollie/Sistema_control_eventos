@@ -223,6 +223,36 @@ class SistemaProveedores:
             return
         abrir_documento(ruta)
 
+    def ver_pdf_desde_tabla(self):
+        seleccion = self.tabla.selection()
+        if not seleccion: return
+        
+        valores = self.tabla.item(seleccion[0], "values")
+        id_prov = valores[1] 
+        
+        conn = conectar_db(silencioso=True)
+        if not conn: 
+            messagebox.showwarning("Modo Lectura", "Estás sin conexión a internet.")
+            return
+            
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT catalogo_pdf FROM proveedores WHERE id = %s", (id_prov,))
+            res = cursor.fetchone()
+            
+            if res and res[0] and str(res[0]).strip():
+                ruta_pdf = str(res[0]).strip()
+                if os.path.exists(ruta_pdf):
+                    abrir_documento(ruta_pdf)
+                else:
+                    messagebox.showwarning("Aviso", f"El archivo PDF ya no existe en la ruta registrada:\n{ruta_pdf}")
+            else:
+                messagebox.showinfo("Información", "Este proveedor no tiene un catálogo PDF registrado.")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo consultar el PDF:\n{e}")
+        finally:
+            liberar_conexion(conn)
+
     def crear_tab_buscar(self):
         self.frame_flash_buscar = ctk.CTkFrame(self.tab_buscar, fg_color="#e74c3c", corner_radius=8, border_width=2, border_color="#c0392b")
         self.lbl_flash_buscar = ctk.CTkLabel(self.frame_flash_buscar, text="❌ Proveedor eliminado correctamente", font=("Arial", 14, "bold"), text_color="white")
@@ -247,6 +277,10 @@ class SistemaProveedores:
         
         frame_acciones = ctk.CTkFrame(frame_busqueda, fg_color="transparent")
         frame_acciones.pack(side="right", padx=10)
+
+        # 🚀 AÑADIDO: Botón para Ver PDF directo desde la tabla
+        self.btn_ver_pdf_tabla = ctk.CTkButton(frame_acciones, text="👁️ Ver PDF", width=100, font=("Arial", 12, "bold"), fg_color="#8e44ad", hover_color="#732d91", command=self.ver_pdf_desde_tabla, state="disabled")
+        self.btn_ver_pdf_tabla.pack(side="left", padx=5)
 
         self.btn_editar = ctk.CTkButton(frame_acciones, text="✏️ Editar", width=100, font=("Arial", 12, "bold"), fg_color="#34495e", hover_color="#2c3e50", command=self.abrir_ventana_editar, state="disabled")
         self.btn_editar.pack(side="left", padx=5)
@@ -342,6 +376,7 @@ class SistemaProveedores:
         self.tabla.delete(*self.tabla.get_children())
             
         if hasattr(self, 'btn_editar'):
+            self.btn_ver_pdf_tabla.configure(state="disabled")
             self.btn_editar.configure(state="disabled")
             self.btn_eliminar_p.configure(state="disabled")
             
@@ -430,9 +465,11 @@ class SistemaProveedores:
 
     def on_fila_seleccionada(self, event):
         if self.tabla.selection():
+            self.btn_ver_pdf_tabla.configure(state="normal")
             self.btn_editar.configure(state="normal")
             self.btn_eliminar_p.configure(state="normal")
         else:
+            self.btn_ver_pdf_tabla.configure(state="disabled")
             self.btn_editar.configure(state="disabled")
             self.btn_eliminar_p.configure(state="disabled")
 
@@ -865,7 +902,6 @@ class SistemaProveedores:
         self.ent_catalogo_link.grid(row=5, column=1, sticky="ew", pady=8)
         self.crear_botones_cp(f2, 5, 2, self.ent_catalogo_link, "el Catálogo")
 
-        # 🚀 AÑADIDO: Catálogo PDF con Botones de Buscar y Ver
         ctk.CTkLabel(f2, text="Catálogo PDF:", font=("Arial", 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
         self.ent_catalogo_pdf = ctk.CTkEntry(f2, placeholder_text="Ruta del archivo PDF local")
         self.ent_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)
@@ -1262,7 +1298,6 @@ class SistemaProveedores:
         ent_e_catalogo_link.insert(0, str(p[11]) if p[11] else "")
         self.crear_botones_cp(f2, 5, 2, ent_e_catalogo_link, "el Catálogo")
 
-        # 🚀 AÑADIDO: Catálogo PDF con Botones de Buscar y Ver en Edición
         ctk.CTkLabel(f2, text="Catálogo PDF:", font=(familia_fuente, 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
         ent_e_catalogo_pdf = ctk.CTkEntry(f2, placeholder_text="Ruta del archivo PDF local")
         ent_e_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)

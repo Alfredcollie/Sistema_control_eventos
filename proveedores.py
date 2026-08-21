@@ -86,6 +86,7 @@ def inicializar_db_proveedores():
                 except Exception:
                     conn.rollback() 
                 
+                # 🚀 FIX: Se añadió catalogo_pdf a la estructura de la base de datos
                 columnas_extra = {
                     "direccion_fiscal": "TEXT",
                     "contacto_2": "VARCHAR(150)",
@@ -93,6 +94,7 @@ def inicializar_db_proveedores():
                     "correo": "VARCHAR(150)",
                     "web": "VARCHAR(255)",
                     "catalogo": "VARCHAR(255)",
+                    "catalogo_pdf": "VARCHAR(255)",
                     "banco_1": "VARCHAR(100)",
                     "cuenta_1": "VARCHAR(100)",
                     "cci_1": "VARCHAR(100)",
@@ -195,11 +197,10 @@ class SistemaProveedores:
             self.root.after(0, lambda: fn(*args))
 
     def crear_tab_buscar(self):
-        # 🚀 MENSAJE FLASH FLOTANTE PARA ELIMINACIÓN (ROJO) EN LA PARTE INFERIOR
         self.frame_flash_buscar = ctk.CTkFrame(self.tab_buscar, fg_color="#e74c3c", corner_radius=8, border_width=2, border_color="#c0392b")
         self.lbl_flash_buscar = ctk.CTkLabel(self.frame_flash_buscar, text="❌ Proveedor eliminado correctamente", font=("Arial", 14, "bold"), text_color="white")
         self.lbl_flash_buscar.pack(padx=30, pady=12)
-        self.frame_flash_buscar.pack_forget() # Oculto por defecto
+        self.frame_flash_buscar.pack_forget()
 
         frame_busqueda = ctk.CTkFrame(self.tab_buscar, corner_radius=8, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0")
         frame_busqueda.pack(fill="x", padx=10, pady=10, ipady=5)
@@ -415,7 +416,6 @@ class SistemaProveedores:
         id_prov = valores[1]
         nombre_prov = valores[3]
         
-        # 🚀 PREGUNTA DE CONFIRMACIÓN ANTES DE ELIMINAR
         if not messagebox.askyesno("Confirmar Eliminación", f"¿Desea eliminar permanentemente al proveedor:\n\n'{nombre_prov}' (Ref. Interna: {id_prov})?"):
             return
 
@@ -433,7 +433,6 @@ class SistemaProveedores:
             
             self.cargar_proveedores_tabla(reset_pagina=True)
             
-            # 🚀 MENSAJE FLASH FLOTANTE DE ELIMINACIÓN (ROJO) EN LA PARTE INFERIOR
             self.frame_flash_buscar.place(relx=0.5, rely=0.95, anchor="s")
             self.frame_flash_buscar.lift()
             self.root.update_idletasks()
@@ -472,7 +471,6 @@ class SistemaProveedores:
         btn_c = ctk.CTkButton(f_btn, text="↗", width=32, height=32, font=("Arial", 12), fg_color="#e0e0e0", hover_color="#c8c8c8", text_color="black", command=lambda: self.portapapeles_copiar(widget, nombre_campo))
         btn_c.pack(side="left", padx=2)
 
-    # 🚀 FIX SCROLL: Velocidad aumentada (delta/6 en Win, +-3 en Linux)
     def _propagar_scroll_incluir(self, event):
         try:
             if sys.platform == 'win32':
@@ -486,9 +484,6 @@ class SistemaProveedores:
             pass
         return "break"
 
-    # =======================================================
-    # ⚡ CONSULTA DE RUC (SUNAT) ASÍNCRONA (BYPASS SSL)
-    # =======================================================
     def consultar_ruc_api(self, ruc_entry, nombre_entry, dir_entry):
         ruc = ruc_entry.get().strip()
         if len(ruc) != 11 or not ruc.isdigit():
@@ -502,7 +497,6 @@ class SistemaProveedores:
                 import urllib.error
                 import os
                 
-                # 🚀 SUPER FIX SSL: Ignorar certificados defectuosos de la SUNAT
                 try:
                     ctx = ssl._create_unverified_context()
                 except AttributeError:
@@ -535,7 +529,6 @@ class SistemaProveedores:
                         self.ejecutar_en_ui(self._aplicar_datos_ruc, data, nombre_entry, dir_entry)
             
             except urllib.error.HTTPError as e:
-                # 🚀 FIX API: Omitir cartel rojo en caso de RUC falso o no encontrado.
                 if e.code in [404, 422]:
                     self.ejecutar_en_ui(messagebox.showwarning, "RUC Inválido", "El RUC ingresado no existe en SUNAT o no es válido.")
                 elif e.code in [401, 403]:
@@ -583,7 +576,6 @@ class SistemaProveedores:
             direccion = "Dirección no pública o no registrada en SUNAT"
         
         dir_entry.insert(0, direccion)
-        # 🚀 SILENCIADO: Autocompleta directo sin MessageBox
 
     def ejecutar_importacion_pdf(self):
         try:
@@ -610,6 +602,8 @@ class SistemaProveedores:
             link_w = fields.get("link_web", {}).get("/V", "").strip()
             zona_dist = fields.get("zona_distrito", {}).get("/V", "").strip()
             enlace_c = fields.get("enlace_catalogo", {}).get("/V", "").strip()
+            # 🚀 Se extrae catalogo_pdf si existe en la ficha, si no lo deja en blanco
+            cat_pdf = fields.get("catalogo_pdf", {}).get("/V", "").strip()
             whats_p = fields.get("whatsapp_principal", {}).get("/V", "").strip()
             whats_a = fields.get("whatsapp_alternativo", {}).get("/V", "").strip()
             b1 = fields.get("banco_1", {}).get("/V", "").strip()
@@ -651,6 +645,7 @@ class SistemaProveedores:
             self.ent_web.insert(0, link_w)
             self.ent_catalogo.insert(0, zona_dist)
             self.ent_catalogo_link.insert(0, enlace_c)
+            self.ent_catalogo_pdf.insert(0, cat_pdf)
             
             if b1 in BANCOS_PERU: self.cmb_banco_1.set(b1)
             self.ent_cuenta_1.insert(0, c1)
@@ -676,14 +671,13 @@ class SistemaProveedores:
         self.scroll_frame = ctk.CTkScrollableFrame(self.tab_incluir, fg_color="transparent")
         self.scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # 🚀 CONTENEDOR SEGURO Y PERMANENTE PARA EL MENSAJE FLASH
         self.flash_container = ctk.CTkFrame(self.scroll_frame, fg_color="transparent", height=0)
         self.flash_container.pack(fill="x", pady=0)
         
         self.frame_flash = ctk.CTkFrame(self.flash_container, fg_color="#27ae60", corner_radius=8)
         self.lbl_flash = ctk.CTkLabel(self.frame_flash, text="✅ Proveedor guardado correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
         self.lbl_flash.pack(padx=20, pady=10)
-        self.frame_flash.pack_forget() # Oculto por defecto
+        self.frame_flash.pack_forget() 
         
         f_pdf = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f_pdf.pack(fill="x", padx=10, pady=(0, 10))
@@ -715,7 +709,6 @@ class SistemaProveedores:
         self.ent_direccion = ctk.CTkEntry(f1)
         self.ent_direccion.grid(row=2, column=1, columnspan=2, sticky="ew", pady=8)
         
-        # 🚀 APLICAMOS EL FIX DE SCROLL A TODAS LAS CAJAS BLANCAS (f1, f2, f3)
         for frame_caja in [f1]:
             frame_caja.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
             frame_caja.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
@@ -767,7 +760,6 @@ class SistemaProveedores:
         self.txt_descripcion.grid(row=8, column=1, columnspan=4, sticky="ew", pady=12)
         self.crear_botones_cp(f1, 8, 5, self.txt_descripcion, "la Descripción")
         
-        # 🚀 ACTIVANDO SCROLL PARA LA CAJA DE TEXTO
         self.txt_descripcion._textbox.bind("<MouseWheel>", self._propagar_scroll_incluir, add="+")
         self.txt_descripcion._textbox.bind("<Button-4>", self._propagar_scroll_incluir, add="+")
         self.txt_descripcion._textbox.bind("<Button-5>", self._propagar_scroll_incluir, add="+")
@@ -846,6 +838,12 @@ class SistemaProveedores:
         self.ent_catalogo_link = ctk.CTkEntry(f2)
         self.ent_catalogo_link.grid(row=5, column=1, sticky="ew", pady=8)
         self.crear_botones_cp(f2, 5, 2, self.ent_catalogo_link, "el Catálogo")
+
+        # 🚀 AÑADIDO: Catálogo PDF debajo del Enlace Catálogo
+        ctk.CTkLabel(f2, text="Catálogo PDF:", font=("Arial", 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
+        self.ent_catalogo_pdf = ctk.CTkEntry(f2)
+        self.ent_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)
+        self.crear_botones_cp(f2, 6, 2, self.ent_catalogo_pdf, "el Catálogo PDF")
 
         f3 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)
@@ -927,6 +925,8 @@ class SistemaProveedores:
         ubicacion = self.cmb_ubicacion.get()
         web = self.ent_web.get().strip()
         catalogo = self.ent_catalogo.get().strip()
+        catalogo_link = self.ent_catalogo_link.get().strip()
+        catalogo_pdf = self.ent_catalogo_pdf.get().strip()
         banco_1 = self.cmb_banco_1.get()
         cuenta_1 = self.ent_cuenta_1.get().strip()
         cci_1 = self.ent_cci_1.get().strip()
@@ -951,9 +951,9 @@ class SistemaProveedores:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO proveedores (ruc, nombre, direccion_fiscal, categoria, contacto, whatsapp, contacto_2, whatsapp_2, correo, ubicacion, web, catalogo, banco_1, cuenta_1, cci_1, banco_2, cuenta_2, cci_2, cuenta_detraccion, porcentaje_detraccion, descripcion, categoria_2, categoria_3, categoria_4, categoria_5)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ''', (ruc, nombre, direccion_fiscal, categoria, contacto, whatsapp, contacto_2, whatsapp_2, correo, ubicacion, web, catalogo, banco_1, cuenta_1, cci_1, banco_2, cuenta_2, cci_2, cuenta_det, porcentaje_det, desc, categoria_2, categoria_3, categoria_4, categoria_5))
+                INSERT INTO proveedores (ruc, nombre, direccion_fiscal, categoria, contacto, whatsapp, contacto_2, whatsapp_2, correo, ubicacion, web, catalogo, catalogo_pdf, banco_1, cuenta_1, cci_1, banco_2, cuenta_2, cci_2, cuenta_detraccion, porcentaje_detraccion, descripcion, categoria_2, categoria_3, categoria_4, categoria_5)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (ruc, nombre, direccion_fiscal, categoria, contacto, whatsapp, contacto_2, whatsapp_2, correo, ubicacion, web, catalogo, catalogo_pdf, banco_1, cuenta_1, cci_1, banco_2, cuenta_2, cci_2, cuenta_det, porcentaje_det, desc, categoria_2, categoria_3, categoria_4, categoria_5))
             conn.commit()
             
             cache_sistema.invalidar()
@@ -962,7 +962,6 @@ class SistemaProveedores:
             self.limpiar_formulario_incluir()
             self.cargar_proveedores_tabla(reset_pagina=True)
             
-            # 🚀 MENSAJE FLASH FLOTANTE EN LA PARTE INFERIOR
             self.scroll_frame._parent_canvas.yview_moveto(0.0) 
             self.frame_flash.place(relx=0.5, rely=0.95, anchor="s")
             self.frame_flash.lift()
@@ -996,6 +995,7 @@ class SistemaProveedores:
         self.ent_web.delete(0, tk.END)
         self.ent_catalogo.delete(0, tk.END)
         self.ent_catalogo_link.delete(0, tk.END)
+        self.ent_catalogo_pdf.delete(0, tk.END)
         self.cmb_banco_1.set("BCP")
         self.ent_cuenta_1.delete(0, tk.END)
         self.ent_cci_1.delete(0, tk.END)
@@ -1022,7 +1022,7 @@ class SistemaProveedores:
                 SELECT id, ruc, nombre, categoria, contacto, whatsapp, contacto_2, whatsapp_2, 
                        correo, ubicacion, web, catalogo, banco_1, cuenta_1, cci_1, 
                        banco_2, cuenta_2, cci_2, cuenta_detraccion, porcentaje_detraccion, descripcion,
-                       categoria_2, categoria_3, categoria_4, categoria_5, direccion_fiscal
+                       categoria_2, categoria_3, categoria_4, categoria_5, direccion_fiscal, catalogo_pdf
                 FROM proveedores WHERE id = %s
             ''', (id_prov,))
             p = cursor.fetchone()
@@ -1043,7 +1043,6 @@ class SistemaProveedores:
         v_edit.after(0, lambda: maximizar_ventana(v_edit))
         v_edit.grab_set()
         
-        # 🚀 MENSAJE FLASH FLOTANTE EN EDICIÓN
         frame_flash_edit = ctk.CTkFrame(v_edit, fg_color="#27ae60", corner_radius=8, border_width=2, border_color="#2ecc71")
         lbl_flash_edit = ctk.CTkLabel(frame_flash_edit, text="✅ Cambios guardados correctamente", font=(familia_fuente, 14, "bold"), text_color="white")
         lbl_flash_edit.pack(padx=30, pady=12)
@@ -1051,7 +1050,6 @@ class SistemaProveedores:
         scroll_frame_e = ctk.CTkScrollableFrame(v_edit, fg_color="transparent")
         scroll_frame_e.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # 🚀 PUENTE DE SCROLL PARA LA VENTANA DE EDICIÓN
         def _propagar_scroll_editar(event):
             try:
                 if sys.platform == 'win32':
@@ -1144,7 +1142,6 @@ class SistemaProveedores:
         txt_e_descripcion.insert("1.0", str(p[20]) if p[20] else "")
         self.crear_botones_cp(f1, 8, 5, txt_e_descripcion, "la Descripción")
         
-        # 🚀 APLICAMOS EL PUENTE DE SCROLL TAMBIÉN A LA CAJA DE EDICIÓN
         txt_e_descripcion._textbox.bind("<MouseWheel>", _propagar_scroll_editar, add="+")
         txt_e_descripcion._textbox.bind("<Button-4>", _propagar_scroll_editar, add="+")
         txt_e_descripcion._textbox.bind("<Button-5>", _propagar_scroll_editar, add="+")
@@ -1232,6 +1229,13 @@ class SistemaProveedores:
         ent_e_catalogo_link.insert(0, str(p[11]) if p[11] else "")
         self.crear_botones_cp(f2, 5, 2, ent_e_catalogo_link, "el Catálogo")
 
+        # 🚀 AÑADIDO: Catálogo PDF en ventana de edición
+        ctk.CTkLabel(f2, text="Catálogo PDF:", font=(familia_fuente, 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
+        ent_e_catalogo_pdf = ctk.CTkEntry(f2)
+        ent_e_catalogo_pdf.grid(row=6, column=1, sticky="ew", pady=8)
+        ent_e_catalogo_pdf.insert(0, str(p[26]) if len(p) > 26 and p[26] else "")
+        self.crear_botones_cp(f2, 6, 2, ent_e_catalogo_pdf, "el Catálogo PDF")
+
         f3 = ctk.CTkFrame(scroll_frame_e, corner_radius=12)
         f3.pack(fill="x", padx=10, pady=10, ipady=15)
         
@@ -1312,13 +1316,13 @@ class SistemaProveedores:
                 cursor_u = conn_u.cursor()
                 cursor_u.execute('''
                     UPDATE proveedores 
-                    SET ruc=%s, nombre=%s, direccion_fiscal=%s, categoria=%s, contacto=%s, whatsapp=%s, contacto_2=%s, whatsapp_2=%s, correo=%s, ubicacion=%s, web=%s, catalogo=%s, 
+                    SET ruc=%s, nombre=%s, direccion_fiscal=%s, categoria=%s, contacto=%s, whatsapp=%s, contacto_2=%s, whatsapp_2=%s, correo=%s, ubicacion=%s, web=%s, catalogo=%s, catalogo_pdf=%s, 
                         banco_1=%s, cuenta_1=%s, cci_1=%s, banco_2=%s, cuenta_2=%s, cci_2=%s, cuenta_detraccion=%s, porcentaje_detraccion=%s, descripcion=%s,
                         categoria_2=%s, categoria_3=%s, categoria_4=%s, categoria_5=%s
                     WHERE id=%s
                 ''', (ent_e_ruc.get().strip(), ent_e_nombre.get().strip(), ent_e_direccion.get().strip(), var_e_cat.get(), ent_e_contacto.get().strip(),
                       ent_e_whatsapp.get().strip(), ent_e_contacto_2.get().strip(), ent_e_whatsapp_2.get().strip(), ent_e_correo.get().strip(), 
-                      cmb_e_ubicacion.get(), ent_e_web.get().strip(), ent_e_catalogo.get().strip(), cmb_e_banco_1.get(), 
+                      cmb_e_ubicacion.get(), ent_e_web.get().strip(), ent_e_catalogo.get().strip(), ent_e_catalogo_pdf.get().strip(), cmb_e_banco_1.get(), 
                       ent_e_cuenta_1.get().strip(), ent_e_cci_1.get().strip(), cmb_e_banco_2.get(), ent_e_cuenta_2.get().strip(), 
                       ent_e_cci_2.get().strip(), ent_e_detraccion.get().strip(), ent_e_porcentaje_detraccion.get().strip(), 
                       txt_e_descripcion.get("1.0", "end-1c").strip(), var_e_cat_2.get(), var_e_cat_3.get(), var_e_cat_4.get(), var_e_cat_5.get(), id_prov))
@@ -1328,7 +1332,6 @@ class SistemaProveedores:
                 
                 self.cargar_proveedores_tabla(reset_pagina=True)
                 
-                # 🚀 MENSAJE FLASH FLOTANTE EN EDICIÓN EN LA PARTE INFERIOR
                 scroll_frame_e._parent_canvas.yview_moveto(0.0)
                 frame_flash_edit.place(relx=0.5, rely=0.95, anchor="s")
                 frame_flash_edit.lift()

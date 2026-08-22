@@ -11,8 +11,13 @@ Cómo funciona:
      también se active cuando el puntero está sobre un CTkTextbox (customtkinter
      lo excluía por defecto, por eso el scroll "se detenía" sobre texto).
   2. Instala (una sola vez, a nivel de la ventana raíz) un manejador global de
-     rueda que desplaza tablas (ttk.Treeview), listas (tk.Listbox) y textos
-     independientes (tk.Text) cuando el puntero está sobre ellas.
+     rueda con lógica inteligente:
+       - Tablas (ttk.Treeview), listas (tk.Listbox) y textos independientes
+         (tk.Text): se desplazan directamente.
+       - Cajas de texto DENTRO de un CTkScrollableFrame: primero se desplaza el
+         CONTENIDO de la caja y, cuando la caja llega a su límite (arriba/abajo),
+         se desplaza el FRAME. Esto evita el doble scroll (que se movían la nota
+         y la matriz a la vez) y evita que las notas largas queden congeladas.
 
 Funciona en Windows (<MouseWheel>) y macOS/Linux (<Button-4>/<Button-5>).
 """
@@ -55,26 +60,77 @@ def _paso_de_scroll(event):
     return -int(delta / 120) * 3
 
 
-def _manejador_wheel_global(event):
-    """Desplaza tablas / listas / texto independiente cuando el puntero está sobre ellas."""
+def _cantidad_frame(event):
+    """Velocidad de desplazamiento del frame (igual a la nativa de customtkinter:
+    Windows = delta/6, macOS = delta, Linux = 1 unidad por muesca)."""
     try:
-        nodo = event.widget
-        # Si existe un CTkScrollableFrame ancestro, customtkinter (ya parcheado)
-        # se encarga del scroll del frame. No duplicamos nada.
-        while nodo is not None:
-            if isinstance(nodo, ctk.CTkScrollableFrame):
-                return None
-            nodo = nodo.master
+        if sys.platform.startswith("win"):
+            return -int(event.delta / 6)
+        if sys.platform == "darwin":
+            return -int(event.delta)
+        return -1 if getattr(event, "num", None) == 4 else 1
+    except Exception:
+        return 3
+
+
+def _manejador_wheel_global(event):
+    """Desplaza tablas / listas / texto cuando el puntero está sobre ellas.
+
+    Reglas:
+      - Sobre un CTkScrollableFrame:
+          * Si el puntero está sobre un tk.Text (caja de texto): el binding de
+            clase de tkinter ya desplazó el contenido del texto; aquí solo
+            desplazamos el FRAME cuando el texto ya llegó a su límite, y
+            devolvemos "break" para que customtkinter NO lo desplace también
+            (evita el doble scroll).
+          * Si el puntero está sobre etiquetas/vacío del frame: desplazamos el
+            frame directamente y devolvemos "break".
+      - Fuera de un frame scrolleable: desplazamos la tabla / lista / texto
+        independiente que esté bajo el puntero.
+    """
+    try:
+        cantidad = _paso_de_scroll(event)
+        if not cantidad:
+            return None
+
+        nodo_text = None
+        frame_scrolleable = None
+        n = event.widget
+        while n is not None:
+            if nodo_text is None and isinstance(n, tk.Text):
+                nodo_text = n
+            if isinstance(n, ctk.CTkScrollableFrame):
+                frame_scrolleable = n
+                break
+            n = n.master
+
+        if frame_scrolleable is not None:
+            canvas = frame_scrolleable._parent_canvas
+            if nodo_text is not None:
+                try:
+                    pos = nodo_text.yview()
+                    en_top = pos[0] <= 0.001
+                    en_bottom = pos[1] >= 0.999
+                    # ¿El texto aún tiene contenido por desplazar en esa dirección?
+                    if (cantidad < 0 and not en_top) or (cantidad > 0 and not en_bottom):
+                        # El binding de clase de tk.Text ya movió el texto: no duplicamos.
+                        pass
+                    elif canvas.yview() != (0.0, 1.0):
+                        canvas.yview_scroll(_cantidad_frame(event), "units")
+                except Exception:
+                    if canvas.yview() != (0.0, 1.0):
+                        canvas.yview_scroll(_cantidad_frame(event), "units")
+            elif canvas.yview() != (0.0, 1.0):
+                canvas.yview_scroll(_cantidad_frame(event), "units")
+            return "break"
 
         # No hay frame scrolleable: desplazar la tabla / lista / texto directamente.
-        nodo = event.widget
-        while nodo is not None:
-            if isinstance(nodo, (ttk.Treeview, tk.Listbox, tk.Text)):
-                cantidad = _paso_de_scroll(event)
-                if cantidad:
-                    nodo.yview_scroll(cantidad, "units")
+        n = event.widget
+        while n is not None:
+            if isinstance(n, (ttk.Treeview, tk.Listbox, tk.Text)):
+                n.yview_scroll(cantidad, "units")
                 return "break"
-            nodo = nodo.master
+            n = n.master
     except Exception:
         pass
     return None

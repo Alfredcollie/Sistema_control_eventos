@@ -389,6 +389,14 @@ class VentanaEtapaProveedores:
         self.v_prov.after(100, lambda: maximizar_ventana(self.v_prov))
         self.v_prov.protocol("WM_DELETE_WINDOW", self._cerrar_ventana)
 
+        # Scroll de rueda global sobre la matriz y las notas (idempotente: solo
+        # se instala una vez por sesión). Vive en scroll_utils.py.
+        try:
+            from scroll_utils import instalar_scroll_global
+            instalar_scroll_global(self.v_prov)
+        except Exception:
+            pass
+
         self.fila_matriz_seleccionada = None
         self.lista_widgets_filas = []
         self.matriz_expandida = False
@@ -553,7 +561,15 @@ class VentanaEtapaProveedores:
         self.lbl_tot_gran = ctk.CTkLabel(f_totales_centro, text="Gran Total: S/ 0.00", font=("Arial", 14, "bold"), text_color="#e62060")
         self.lbl_tot_gran.pack(anchor="w", padx=15, pady=2)
         self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
-        self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(5, 10))
+        self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(5, 2))
+
+        # Ganancia total de la cotización (venta − costo − imp. renta mensual de la Config. General)
+        self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Costo (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555")
+        self.lbl_tot_costo.pack(anchor="w", padx=15, pady=2)
+        self.lbl_tot_imp_renta = ctk.CTkLabel(f_totales_centro, text="Imp. Renta Mensual (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_tot_imp_renta.pack(anchor="w", padx=15, pady=2)
+        self.lbl_tot_gan = ctk.CTkLabel(f_totales_centro, text="GANANCIA TOTAL: S/ 0.00", font=("Arial", 15, "bold"), text_color="#1e8449")
+        self.lbl_tot_gan.pack(anchor="w", padx=15, pady=(6, 12))
 
         self.cargar_ajustes_globales()
 
@@ -610,7 +626,7 @@ class VentanaEtapaProveedores:
         f_headers = ctk.CTkFrame(self.f_grid, fg_color="#e0e0e0", corner_radius=5)
         f_headers.pack(fill="x", padx=10, pady=(0, 5))
         
-        anchos_encabezado = [("ID", 30), ("Categoría", 130), ("Proveedor", 140), ("Cant.", 40), ("P. Lista", 70), ("Dscto", 50), ("P. Venta", 80)]
+        anchos_encabezado = [("ID", 30), ("Categoría", 130), ("Proveedor", 140), ("Cant.", 40), ("P. Lista", 70), ("Dscto", 50), ("P. Venta", 80), ("Ganancia", 85)]
         for text, w in anchos_encabezado:
             ctk.CTkLabel(f_headers, text=text, font=("Arial", 11, "bold"), width=w, anchor="center").pack(side="left", padx=2, pady=5)
         
@@ -915,21 +931,40 @@ class VentanaEtapaProveedores:
 
         def tarea():
             subtotal = 0.0
+            costo_total = 0.0
             conn = conectar_db(silencioso=True)
             if conn:
                 try:
                     c = conn.cursor()
-                    c.execute("SELECT precio_final_venta FROM cotizacion_proveedores WHERE codigo_cotizacion = %s", (codigo,))
-                    subtotal = sum(float(r[0]) for r in c.fetchall() if r and r[0])
+                    c.execute("SELECT precio_lista, precio_descuento, precio_final_venta, cantidad FROM cotizacion_proveedores WHERE codigo_cotizacion = %s", (codigo,))
+                    for r in c.fetchall():
+                        if not r:
+                            continue
+                        pl_r, pd_r, pf_r, cant_r = r[0], r[1], r[2], (r[3] if len(r) > 3 and r[3] else 1)
+                        if pf_r:
+                            subtotal += float(pf_r)
+                        costo_u = float(pd_r) if pd_r and float(pd_r) > 0 else float(pl_r or 0)
+                        costo_total += costo_u * float(cant_r or 1)
                 except Exception:
                     subtotal = 0.0
+                    costo_total = 0.0
                 finally:
                     liberar_conexion(conn)
-            self.root.after(0, lambda s=subtotal, t=tc: self._pintar_totales(s, t))
+            self.root.after(0, lambda s=subtotal, t=tc, ct=costo_total: self._pintar_totales(s, t, ct))
 
         threading.Thread(target=tarea, daemon=True).start()
 
-    def _pintar_totales(self, subtotal, tc):
+    def _obtener_renta_mensual_pct(self):
+        """% de impuesto a la renta mensual, tomado de la Configuración General
+        (control_general.py -> clave 'renta_mensual_porcentaje'). Por defecto 1.5."""
+        try:
+            with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            return float(cfg.get("renta_mensual_porcentaje", "1.5") or 0)
+        except Exception:
+            return 1.5
+
+    def _pintar_totales(self, subtotal, tc, costo_total=0.0):
         try:
             if not self.v_prov.winfo_exists():
                 return
@@ -953,6 +988,17 @@ class VentanaEtapaProveedores:
             
         self.lbl_tot_gran.configure(text=f"Gran Total: S/ {subtotal + fee:,.2f}")
         self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
+
+        # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
+        # = (Total Venta sin IGV − Total Costo sin IGV) − Imp. Renta Mensual
+        ganancia_bruta = subtotal - costo_total
+        renta_pct = self._obtener_renta_mensual_pct()
+        impuesto_renta = ganancia_bruta * renta_pct / 100.0
+        ganancia_neta = ganancia_bruta - impuesto_renta
+
+        self.lbl_tot_costo.configure(text=f"Total Costo (sin IGV): S/ {costo_total:,.2f}")
+        self.lbl_tot_imp_renta.configure(text=f"Imp. Renta Mensual ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
+        self.lbl_tot_gan.configure(text=f"GANANCIA TOTAL: S/ {ganancia_neta:,.2f}")
 
     # =======================================================
     # VISTAS Y NAVEGACIÓN
@@ -1312,26 +1358,12 @@ class VentanaEtapaProveedores:
                 f_row = self.lista_widgets_filas[start_idx]
                 f_row.configure(border_color="#e0e0e0", border_width=1)
 
-    # 🚀 FIX SCROLL: PUENTE DE EVENTOS PARA LAS CAJAS DE TEXTO
-    def _propagar_scroll(self, event):
-        try:
-            if sys.platform == 'win32':
-                # CustomTkinter usa internamente una velocidad de event.delta / 6 (es decir, 20 unidades)
-                self.f_rows_dinamicas._parent_canvas.yview_scroll(int(-1*(event.delta/6)), "units")
-            elif sys.platform == 'darwin':
-                self.f_rows_dinamicas._parent_canvas.yview_scroll(int(-1 * event.delta), "units")
-            else:
-                if event.num == 4:
-                    self.f_rows_dinamicas._parent_canvas.yview_scroll(-3, "units")
-                elif event.num == 5:
-                    self.f_rows_dinamicas._parent_canvas.yview_scroll(3, "units")
-        except Exception:
-            pass
-        return "break"
-
     # =======================================================
     # PINTADO DE LA MATRIZ (GRILLA RESTRINGIDA CON WRAP)
     # =======================================================
+    # Nota scroll: el scroll de la matriz y de las cajas de notas se maneja de
+    # forma global e inteligente en scroll_utils.py (la rueda desplaza primero
+    # el contenido de la nota y, al llegar a su límite, desplaza la matriz).
     def cargar_grid_proveedores(self, id_a_seleccionar=None):
         if not self.conn:
             return
@@ -1384,6 +1416,11 @@ class VentanaEtapaProveedores:
 
             f_row.bind("<Button-1>", marcar_seleccion_f)
             
+            # Ganancia por ítem = (P. Venta total) − (costo real unitario × cantidad).
+            # El costo real es el P. Dscto si existe (> 0); si no, el P. Lista.
+            costo_unit_real = float(pd_r) if pd_r and float(pd_r) > 0 else float(pl_r)
+            ganancia_item = float(pf_r) - costo_unit_real * float(cant_r)
+
             anchos_row = [
                 (str(i), 30, "center"), 
                 (cat_limpia, 130, "w"), 
@@ -1391,13 +1428,16 @@ class VentanaEtapaProveedores:
                 (str(cant_r), 40, "center"), 
                 (f"S/. {pl_r:.2f}", 70, "e"), 
                 (f"S/. {pd_r:.2f}", 50, "e"), 
-                (f"S/. {pf_r:.2f}", 80, "e")
+                (f"S/. {pf_r:.2f}", 80, "e"), 
+                (f"S/. {ganancia_item:,.2f}", 85, "e", "#1e8449")
             ]
             
-            for text, w, align in anchos_row:
+            for item in anchos_row:
+                text, w, align = item[0], item[1], item[2]
+                color = item[3] if len(item) > 3 else None
                 just = "left" if align == "w" else ("right" if align == "e" else "center")
                 wrap_val = w - 5 if w > 50 else 0 
-                lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, wraplength=wrap_val, anchor=align, justify=just)
+                lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, wraplength=wrap_val, anchor=align, justify=just, text_color=color if color else None)
                 lbl.pack(side="left", padx=2, fill="y")
                 lbl.bind("<Button-1>", marcar_seleccion_f)
                 bind_drag(lbl)
@@ -1418,11 +1458,6 @@ class VentanaEtapaProveedores:
             bind_drag(txt_notas)
             bind_drag(txt_notas._textbox)
             
-            # 🚀 APLICANDO EL FIX DE SCROLL AL TEXTBOX CLIENTE
-            txt_notas._textbox.bind("<MouseWheel>", self._propagar_scroll, add="+")
-            txt_notas._textbox.bind("<Button-4>", self._propagar_scroll, add="+")
-            txt_notas._textbox.bind("<Button-5>", self._propagar_scroll, add="+")
-            
             # --- NOTAS INTERNAS ---
             texto_nota_int = str(notas_int_r) if notas_int_r else ""
             txt_notas_int = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
@@ -1433,11 +1468,6 @@ class VentanaEtapaProveedores:
             txt_notas_int._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
             bind_drag(txt_notas_int)
             bind_drag(txt_notas_int._textbox)
-            
-            # 🚀 APLICANDO EL FIX DE SCROLL AL TEXTBOX INTERNO
-            txt_notas_int._textbox.bind("<MouseWheel>", self._propagar_scroll, add="+")
-            txt_notas_int._textbox.bind("<Button-4>", self._propagar_scroll, add="+")
-            txt_notas_int._textbox.bind("<Button-5>", self._propagar_scroll, add="+")
 
             if id_a_seleccionar == id_real:
                 marcar_seleccion_f(None, f_row, data_pack)

@@ -53,7 +53,7 @@ jobs:
         mkdir -p Instalador_Temp
         cp -R "dist/BlackCube.app" Instalador_Temp/
         ln -s /Applications Instalador_Temp/Applications
-        hdiutil create -volname "BlackCube" -srcfolder Instalador_Temp -ov -format UDZO "Instalador.Black.Cube.dmg"
+        hdiutil create -volname "BlackCube" -srcfolder Instalador_Temp -ov -format UDZO "Instalador.Control.Evento.dmg"
 
     - name: 🚀 Publicar Automáticamente en Releases
       uses: softprops/action-gh-release@v2

@@ -23,7 +23,24 @@ import threading
 import webbrowser
 from datetime import datetime, timedelta
 
-VERSION_ACTUAL = "v1.5.5"
+VERSION_ACTUAL = "v1.5.6"
+
+
+def _version_a_tupla(v):
+    """Convierte 'v1.5.6' en (1, 5, 6) para comparar versiones numéricamente."""
+    v = (v or "").strip().lstrip("vV")
+    partes = []
+    for segmento in v.split("."):
+        digitos = ""
+        for c in segmento:
+            if c.isdigit():
+                digitos += c
+            else:
+                break
+        if not digitos:
+            break
+        partes.append(int(digitos))
+    return tuple(partes)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -1732,7 +1749,7 @@ class ControlGeneralEventos:
                         data = json.loads(response.read().decode())
                         version_github = data.get("tag_name", "")
                         
-                        if version_github and version_github != VERSION_ACTUAL:
+                        if version_github and _version_a_tupla(version_github) > _version_a_tupla(VERSION_ACTUAL):
                             def preguntar_actualizacion():
                                 respuesta = messagebox.askyesno(
                                     "🚀 Nueva Actualización Disponible",

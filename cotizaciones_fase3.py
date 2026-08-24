@@ -563,11 +563,21 @@ class VentanaEtapaProveedores:
         self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
         self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(5, 2))
 
-        # Ganancia total de la cotización (venta − costo − imp. renta mensual de la Config. General)
-        self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Costo (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555")
+        # Ganancia total de la cotización:
+        # (Venta + IGV) − (Compra + IGV) − Diferencial IGV − Renta
+        # Renta = (Venta sin IGV − Detracción) × % Renta Mensual (Config. General)
+        self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Compra (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555")
         self.lbl_tot_costo.pack(anchor="w", padx=15, pady=2)
-        self.lbl_tot_imp_renta = ctk.CTkLabel(f_totales_centro, text="Imp. Renta Mensual (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
-        self.lbl_tot_imp_renta.pack(anchor="w", padx=15, pady=2)
+        self.lbl_igv_ventas = ctk.CTkLabel(f_totales_centro, text="IGV Ventas (18%): S/ 0.00", font=("Arial", 11), text_color="#7f8c8d")
+        self.lbl_igv_ventas.pack(anchor="w", padx=15, pady=1)
+        self.lbl_igv_compras = ctk.CTkLabel(f_totales_centro, text="IGV Compras (18%): S/ 0.00", font=("Arial", 11), text_color="#7f8c8d")
+        self.lbl_igv_compras.pack(anchor="w", padx=15, pady=1)
+        self.lbl_dif_igv = ctk.CTkLabel(f_totales_centro, text="Diferencial IGV (V−C): S/ 0.00", font=("Arial", 11), text_color="#34495e")
+        self.lbl_dif_igv.pack(anchor="w", padx=15, pady=1)
+        self.lbl_detraccion = ctk.CTkLabel(f_totales_centro, text="Detracción (12%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_detraccion.pack(anchor="w", padx=15, pady=1)
+        self.lbl_imp_renta = ctk.CTkLabel(f_totales_centro, text="Imp. Renta Mensual (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_imp_renta.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_gan = ctk.CTkLabel(f_totales_centro, text="GANANCIA TOTAL: S/ 0.00", font=("Arial", 15, "bold"), text_color="#1e8449")
         self.lbl_tot_gan.pack(anchor="w", padx=15, pady=(6, 12))
 
@@ -954,15 +964,17 @@ class VentanaEtapaProveedores:
 
         threading.Thread(target=tarea, daemon=True).start()
 
-    def _obtener_renta_mensual_pct(self):
-        """% de impuesto a la renta mensual, tomado de la Configuración General
-        (control_general.py -> clave 'renta_mensual_porcentaje'). Por defecto 1.5."""
+    def _obtener_porcentaje_config(self, clave, defecto):
+        """Lee un porcentaje de la Configuración General (control_general.py).
+        Claves: igv_porcentaje, retencion_porcentaje, detraccion_porcentaje,
+        renta_mensual_porcentaje, renta_anual_porcentaje."""
         try:
             with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            return float(cfg.get("renta_mensual_porcentaje", "1.5") or 0)
+            val = cfg.get(clave)
+            return float(val) if val not in (None, "") else float(defecto)
         except Exception:
-            return 1.5
+            return float(defecto)
 
     def _pintar_totales(self, subtotal, tc, costo_total=0.0):
         try:
@@ -990,14 +1002,28 @@ class VentanaEtapaProveedores:
         self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
-        # = (Total Venta sin IGV − Total Costo sin IGV) − Imp. Renta Mensual
-        ganancia_bruta = subtotal - costo_total
-        renta_pct = self._obtener_renta_mensual_pct()
-        impuesto_renta = ganancia_bruta * renta_pct / 100.0
-        ganancia_neta = ganancia_bruta - impuesto_renta
+        # Fórmula: (Venta + IGV) − (Compra + IGV) − Diferencial IGV − Renta
+        # Renta = (Venta sin IGV − Detracción) × % Renta Mensual
+        # Los porcentajes salen de la Configuración General (control_general.py).
+        igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
+        detraccion_pct = self._obtener_porcentaje_config("detraccion_porcentaje", 12)
+        renta_pct = self._obtener_porcentaje_config("renta_mensual_porcentaje", 1.5)
 
-        self.lbl_tot_costo.configure(text=f"Total Costo (sin IGV): S/ {costo_total:,.2f}")
-        self.lbl_tot_imp_renta.configure(text=f"Imp. Renta Mensual ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
+        venta_sin_igv = subtotal
+        compra_sin_igv = costo_total
+        igv_ventas = venta_sin_igv * igv_pct / 100.0
+        igv_compras = compra_sin_igv * igv_pct / 100.0
+        dif_igv = igv_ventas - igv_compras
+        detraccion = venta_sin_igv * detraccion_pct / 100.0
+        impuesto_renta = (venta_sin_igv - detraccion) * renta_pct / 100.0
+        ganancia_neta = (venta_sin_igv + igv_ventas) - (compra_sin_igv + igv_compras) - dif_igv - impuesto_renta
+
+        self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")
+        self.lbl_igv_ventas.configure(text=f"IGV Ventas ({igv_pct:g}%): S/ {igv_ventas:,.2f}")
+        self.lbl_igv_compras.configure(text=f"IGV Compras ({igv_pct:g}%): S/ {igv_compras:,.2f}")
+        self.lbl_dif_igv.configure(text=f"Diferencial IGV (V−C): S/ {dif_igv:,.2f}")
+        self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {detraccion:,.2f}")
+        self.lbl_imp_renta.configure(text=f"Imp. Renta Mensual ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
         self.lbl_tot_gan.configure(text=f"GANANCIA TOTAL: S/ {ganancia_neta:,.2f}")
 
     # =======================================================

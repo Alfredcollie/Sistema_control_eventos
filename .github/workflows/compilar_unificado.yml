@@ -43,7 +43,7 @@ jobs:
         Add-Content -Path $env:GITHUB_ENV -Value "RCLONE_BIN=$RCLONE_BIN"
 
     - name: Compilar con PyInstaller (Windows)
-      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring control_general.py
+      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring control_general.py
 
     - name: Comprimir en ZIP (Windows)
       run: Compress-Archive -Path "dist/Instalador-ControlEventos-Windows" -DestinationPath "dist/Instalador-ControlEventos-Windows.zip" -Force
@@ -88,7 +88,7 @@ jobs:
         echo "RCLONE_BIN=$RCLONE_BIN" >> "$GITHUB_ENV"
 
     - name: Compilar con PyInstaller (macOS)
-      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring control_general.py
+      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring control_general.py
 
     - name: Comprimir en ZIP (macOS)
       run: |

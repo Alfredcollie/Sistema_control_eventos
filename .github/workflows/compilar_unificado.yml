@@ -29,6 +29,9 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Inyectar versión del tag
+      run: python injectar_version.py
+
     - name: Instalar dependencias
       run: |
         python -m pip install --upgrade pip
@@ -66,6 +69,9 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+
+    - name: Inyectar versión del tag
+      run: python injectar_version.py
 
     - name: Instalar dependencias
       run: |
@@ -118,15 +124,27 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name != '')
 
     steps:
-    - name: Descargar artifacts
+    - name: Descargar artifact Windows
       uses: actions/download-artifact@v4
       with:
+        name: windows
         path: release-assets
+
+    - name: Descargar artifact macOS
+      uses: actions/download-artifact@v4
+      with:
+        name: mac
+        path: release-assets
+
+    - name: Ver archivos a publicar
+      run: ls -la release-assets
 
     - name: Publicar en GitHub Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
-        files: release-assets/**
+        files: |
+          release-assets/*.zip
+          release-assets/*.dmg
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

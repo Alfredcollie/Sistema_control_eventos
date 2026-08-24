@@ -1739,6 +1739,10 @@ class ControlGeneralEventos:
         cargar_usuarios()
 
     def buscar_actualizaciones_github(self):
+        # En macOS no se revisan actualizaciones: el cliente se actualiza
+        # ejecutando el archivo .command del instalador.
+        if sys.platform == "darwin":
+            return
         def tarea_check():
             try:
                 ctx = crear_contexto_ssl_seguro()

@@ -966,8 +966,8 @@ class VentanaEtapaProveedores:
 
     def _obtener_porcentaje_config(self, clave, defecto):
         """Lee un porcentaje de la Configuración General (control_general.py).
-        Claves: igv_porcentaje, retencion_porcentaje, detraccion_porcentaje,
-        renta_mensual_porcentaje, renta_anual_porcentaje."""
+        Claves: igv_porcentaje, detraccion_porcentaje, renta_mensual_porcentaje,
+        renta_anual_porcentaje."""
         try:
             with open(RUTA_CONFIG, "r", encoding="utf-8") as f:
                 cfg = json.load(f)

@@ -57,6 +57,29 @@ def parsear_segmentos_formato(texto):
 def texto_plano_sin_marcado(texto):
     return _PATRON_ETIQUETAS.sub("", str(texto))
 
+def tamano_natural_puntos(ruta_imagen):
+    """
+    Tamaño (ancho, alto) en puntos a tamaño natural del logo,
+    respetando los DPI reales del archivo si existen.
+    Si no se puede leer (sin PIL o sin info de DPI), usa px = pt (72 DPI).
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(ruta_imagen) as im:
+            w_px, h_px = im.size
+            dpi = im.info.get("dpi")
+            if dpi and len(dpi) >= 2 and dpi[0] and dpi[1]:
+                dx = float(dpi[0]) if float(dpi[0]) > 0 else 72.0
+                dy = float(dpi[1]) if float(dpi[1]) > 0 else 72.0
+                return (w_px * 72.0 / dx, h_px * 72.0 / dy)
+            return (float(w_px), float(h_px))
+    except Exception:
+        return None
+
+
 _SCHEMA_PDF_OK = False
 
 def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
@@ -273,31 +296,39 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         offset = 0
         if mostrar_logo and ruta_usar:
             try:
-                img = ImageReader(ruta_usar)
-                img_w, img_h = img.getSize()
-                
-                if img_w == 0: img_w = 1
-                if img_h == 0: img_h = 1
-                
-                ratio = ancho_util / float(img_w)
-                
-                final_w = ancho_util
-                final_h = img_h * ratio
+                nat = tamano_natural_puntos(ruta_usar)
+                if nat:
+                    final_w, final_h = nat
+                else:
+                    img = ImageReader(ruta_usar)
+                    iw, ih = img.getSize()
+                    final_w = float(iw)
+                    final_h = float(ih)
+                if final_w <= 0: final_w = 1
+                if final_h <= 0: final_h = 1
                 y_logo = 792 - 40 - final_h
                 
-                c.drawImage(ruta_usar, margen_izq, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
+                # Logo a TAMAÑO NATURAL (sin escalar ni modificar), centrado
+                x_logo = margen_izq + (ancho_util - final_w) / 2.0
+                if x_logo < margen_izq:
+                    x_logo = margen_izq
+                c.drawImage(ruta_usar, x_logo, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
                 
                 techo_textos = 685
                 margen_inferior_logo = y_logo - 25
                 offset = (margen_inferior_logo - techo_textos) if margen_inferior_logo < techo_textos else 0
             except Exception as e:
                 try:
-                    c.drawImage(ruta_usar, 40, 685, width=150, height=80, preserveAspectRatio=True)
+                    img_t = ImageReader(ruta_usar)
+                    wt_t, ht_t = img_t.getSize()
+                    if wt_t == 0: wt_t = 1
+                    if ht_t == 0: ht_t = 1
+                    c.drawImage(ruta_usar, 40, 685, width=wt_t, height=ht_t, preserveAspectRatio=True)
                 except Exception:
                     pass
                 offset = 0
 
-        c.setFont("Helvetica-Bold", 26)
+        c.setFont("Helvetica-Bold", 45)
         c.drawString(40, 650 + offset, "Cotización")
         c.setFont("Helvetica-Bold", 10.5)
         c.drawRightString(570, 665 + offset, f"No.: {codigo_impresion}")
@@ -305,60 +336,64 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.drawRightString(570, 650 + offset, f"Fecha: {fecha_actual}")
         c.drawRightString(570, 635 + offset, f"Moneda: {moneda}")
 
-        # RECUADRO GRIS
+        # ------------------------------------------------------
+        # ENCABEZADO: recuadro gris con CLIENTE / NOMBRE / PROYECTO
+        # y DESCRIPCIÓN, justificados a la izquierda, con margen
+        # interno de 10 mm a ambos lados de la caja
+        # ------------------------------------------------------
+        GRIS_X, GRIS_W = 40, 530
+        GRIS_TOP = 620 + offset
+        GRIS_H = 95
+        GRIS_BOT = GRIS_TOP - GRIS_H
+        MM = 72.0 / 25.4
+        MARGEN_LATERAL = 10 * MM
+        IZQ = GRIS_X + MARGEN_LATERAL
+        DER = GRIS_X + GRIS_W - MARGEN_LATERAL
+        CONTENIDO_W = DER - IZQ
+
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.88, 0.88, 0.88)
         c.setFillColorRGB(0.98, 0.98, 0.98)
-        c.roundRect(40, 540 + offset, 530, 80, 2, stroke=1, fill=1)
-        
+        c.roundRect(GRIS_X, GRIS_BOT, GRIS_W, GRIS_H, 2, stroke=1, fill=1)
+
+        ancho_col = CONTENIDO_W / 3.0
+        col_left = [IZQ, IZQ + ancho_col, IZQ + 2 * ancho_col]
+
+        cols = []
+        for etiq, valor in (("CLIENTE:", cliente), ("NOMBRE:", contacto_cliente), ("PROYECTO:", proyecto)):
+            lv = wrap_text(str(valor), "Helvetica", 9.5, ancho_col - 6)[:2]
+            cols.append((etiq, lv))
+
+        altura_fila_superior = max(17 + 11 * len(lv) for _, lv in cols)
+
+        lineas_desc = wrap_text(str(descripcion_proyecto), "Helvetica", 9, CONTENIDO_W)[:2]
+        altura_desc = 17 + 11 * len(lineas_desc)
+
+        altura_total = altura_fila_superior + 12 + altura_desc
+        y_superior = GRIS_TOP - (GRIS_H - altura_total) / 2.0 - 17
+
+        # Tres columnas justificadas a la izquierda
+        for (etiq, lv), cx in zip(cols, col_left):
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColorRGB(0.1, 0.1, 0.1)
+            c.drawString(cx, y_superior, etiq)
+            y = y_superior - 13
+            c.setFont("Helvetica", 9.5)
+            for linea in lv:
+                c.drawString(cx, y, linea)
+                y -= 11
+
+        # Descripción del proyecto, justificada a la izquierda al margen de 10 mm
+        y_desc_lab = y_superior - altura_fila_superior - 12
         c.setFont("Helvetica-Bold", 9)
         c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(50, 603 + offset, "CLIENTE:")
-        c.drawString(50, 570 + offset, "CONTACTO:")
-        c.drawString(365, 603 + offset, "PROYECTO:")
-
-        # 🚀 FIX: AJUSTE DINÁMICO DE TEXTOS EN ENCABEZADO PARA EVITAR DESBORDAMIENTO
-        # PROYECTO
-        c.setFont("Helvetica-Bold", 9)
-        lineas_proyecto = wrap_text(proyecto, "Helvetica-Bold", 9, 130)
-        y_cursor = 603 + offset
-        for linea in lineas_proyecto[:2]: 
-            c.drawString(435, y_cursor, linea)
-            y_cursor -= 11
-
-        if len(lineas_proyecto) > 1:
-            y_etiqueta_desc, y_texto_desc = 573 + offset, 560 + offset
-        else:
-            y_etiqueta_desc, y_texto_desc = 585 + offset, 572 + offset
-
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawString(365, y_etiqueta_desc, "DESCRIPCIÓN DEL PROYECTO:")
-        
-        # DESCRIPCIÓN DEL PROYECTO
+        c.drawString(IZQ, y_desc_lab, "DESCRIPCIÓN DEL PROYECTO:")
+        y = y_desc_lab - 13
         c.setFont("Helvetica", 9)
         c.setFillColorRGB(0.3, 0.3, 0.3)
-        lineas_desc_proy = wrap_text(descripcion_proyecto, "Helvetica", 9, 195)
-        y_cursor = y_texto_desc
-        for linea in lineas_desc_proy[:3]: 
-            c.drawString(365, y_cursor, linea)
-            y_cursor -= 11
-
-        # CLIENTE
-        c.setFont("Helvetica", 9.5)
-        c.setFillColorRGB(0.1, 0.1, 0.1)
-        lineas_cliente = wrap_text(cliente, "Helvetica", 9.5, 250)
-        y_cursor = 603 + offset
-        for linea in lineas_cliente[:2]:
-            c.drawString(105, y_cursor, linea)
-            y_cursor -= 11
-            
-        # CONTACTO
-        lineas_contacto = wrap_text(contacto_cliente, "Helvetica", 9.5, 240)
-        y_cursor = 570 + offset
-        for linea in lineas_contacto[:2]:
-            c.drawString(115, y_cursor, linea)
-            y_cursor -= 11
-
+        for linea in lineas_desc:
+            c.drawString(IZQ, y, linea)
+            y -= 11
         TABLE_LEFT, TABLE_RIGHT, DESC_X, DESC_MAX_WIDTH, ITEM_MAX_WIDTH, HEADER_H, MARGEN_INFERIOR_TABLA, Y_INICIO_PAGINA_CONTINUACION = 40, 570, 135, 205, 88, 20, 55, 745
 
         def dibujar_encabezado_tabla(y):

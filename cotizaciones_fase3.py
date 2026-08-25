@@ -996,9 +996,9 @@ class VentanaEtapaProveedores:
         self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
-        # Fórmula: (Venta + IGV) − (Compra + IGV) − Diferencial IGV − ISR = Venta − Compra − ISR
-        # Detracción = (Gran Total + IGV) × % Detracción  (solo informativa)
-        # ISR Mensual = Gran Total sin IGV × % Renta Mensual
+        # Fórmula: (Venta + Fee + IGV) − (Compras + IGV) − Detracción − ISR − (IGV Venta − IGV Compra)
+        # (Venta + Fee) = Gran Total.
+        # ISR Mensual = Gran Total sin IGV × % Renta Mensual.
         # Los porcentajes salen de la Configuración General (control_general.py).
         igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
         detraccion_pct = self._obtener_porcentaje_config("detraccion_porcentaje", 12)
@@ -1006,11 +1006,15 @@ class VentanaEtapaProveedores:
 
         venta_sin_igv = subtotal
         compra_sin_igv = costo_total
-        gran_total_sin_igv = subtotal + fee
-        base_detraccion = gran_total_sin_igv * (1 + igv_pct / 100.0)
+        gran_total_sin_igv = subtotal + fee                         # Venta + Fee (sin IGV)
+        venta_fee_igv = gran_total_sin_igv * (1 + igv_pct / 100.0)  # (Venta + Fee + IGV)
+        compras_igv = compra_sin_igv * (1 + igv_pct / 100.0)        # (Compras + IGV)
+        igv_venta = gran_total_sin_igv * igv_pct / 100.0            # IGV sobre (Venta + Fee)
+        igv_compra = compra_sin_igv * igv_pct / 100.0               # IGV sobre Compras
+        base_detraccion = venta_fee_igv
         detraccion = base_detraccion * detraccion_pct / 100.0
         impuesto_renta = gran_total_sin_igv * renta_pct / 100.0
-        ganancia_neta = venta_sin_igv - compra_sin_igv - impuesto_renta
+        ganancia_neta = venta_fee_igv - compras_igv - detraccion - impuesto_renta - (igv_venta - igv_compra)
 
         self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")
         self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {detraccion:,.2f}")

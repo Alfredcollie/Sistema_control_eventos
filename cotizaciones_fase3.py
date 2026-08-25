@@ -75,6 +75,7 @@ def abrir_documento(ruta):
 # HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG MAC FIX
 # =========================================================
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
+_PATRON_TAMANO = re.compile(r'\[S(\d+)\]', re.IGNORECASE)
 
 def parsear_segmentos_formato(texto):
     resultado, negrita, color_p = [], False, False
@@ -93,7 +94,8 @@ def parsear_segmentos_formato(texto):
     return resultado
 
 def texto_plano_sin_marcado(texto):
-    return _PATRON_ETIQUETAS.sub("", str(texto))
+    t = _PATRON_TAMANO.sub("", str(texto))
+    return _PATRON_ETIQUETAS.sub("", t)
 
 # Memoria de normalización (perf): evita recalcular el texto normalizado de cada
 # proveedor en cada cambio de categoría dentro de la misma sesión.
@@ -112,7 +114,14 @@ def extraer_texto_con_formato(txt_widget):
             elif value == "color": partes.append("[/M]")
         elif key == "text":
             partes.append(value)
-    return "".join(partes)
+    texto = "".join(partes)
+    try:
+        tam = int(getattr(inner, "_tam_fuente", 11) or 11)
+    except (TypeError, ValueError):
+        tam = 11
+    if tam != 11:
+        texto = f"[S{tam}]{texto}"
+    return texto
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
@@ -120,6 +129,7 @@ def crear_barra_formato(parent, text_widget):
     inner_text = text_widget._textbox if hasattr(text_widget, "_textbox") else text_widget
     inner_text._memoria_blindada = None
     inner_text._memoria_bloqueada = False
+    inner_text._tam_fuente = 11
 
     def rastreador_mac():
         try:
@@ -182,6 +192,24 @@ def crear_barra_formato(parent, text_widget):
     btn_c.bind("<Enter>", lambda e: [activar_candado(e), btn_c.configure(fg_color="#c8c8c8")])
     btn_c.bind("<Leave>", lambda e: [quitar_candado(e), btn_c.configure(fg_color="#e0e0e0")])
 
+    def cambiar_tamano(delta):
+        tam_actual = getattr(inner_text, "_tam_fuente", 11)
+        aplicar_tamano_fuente(text_widget, tam_actual + delta)
+        inner_text.focus_set()
+        return "break"
+
+    btn_mas = ctk.CTkLabel(f_barra, text=" A+ ", width=35, height=25, font=("Helvetica", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
+    btn_mas.pack(side="left", padx=2)
+    btn_mas.bind("<Button-1>", lambda e: cambiar_tamano(1))
+    btn_mas.bind("<Enter>", lambda e: [activar_candado(e), btn_mas.configure(fg_color="#c8c8c8")])
+    btn_mas.bind("<Leave>", lambda e: [quitar_candado(e), btn_mas.configure(fg_color="#e0e0e0")])
+
+    btn_menos = ctk.CTkLabel(f_barra, text=" A- ", width=35, height=25, font=("Helvetica", 12, "bold"), fg_color="#e0e0e0", text_color="black", corner_radius=5, cursor="hand2")
+    btn_menos.pack(side="left", padx=2)
+    btn_menos.bind("<Button-1>", lambda e: cambiar_tamano(-1))
+    btn_menos.bind("<Enter>", lambda e: [activar_candado(e), btn_menos.configure(fg_color="#c8c8c8")])
+    btn_menos.bind("<Leave>", lambda e: [quitar_candado(e), btn_menos.configure(fg_color="#e0e0e0")])
+
     inner_text.bind("<Command-b>", lambda e: alternar_formato("bold"))
     inner_text.bind("<Command-m>", lambda e: alternar_formato("color"))
     inner_text.bind("<Control-b>", lambda e: alternar_formato("bold"))
@@ -193,15 +221,50 @@ def crear_barra_formato(parent, text_widget):
 
 def configurar_tags_formato(txt_widget, tam=10):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    inner._tam_fuente = int(tam)
     inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
     inner.tag_raise("bold")
     inner.tag_raise("color")
 
+
+def aplicar_tamano_fuente(txt_widget, tam):
+    """Ajusta el tamaño de letra de la nota y de su tag de negrilla."""
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    tam = max(6, min(48, int(tam)))
+    inner._tam_fuente = tam
+    try:
+        inner.configure(font=("Helvetica", tam))
+    except Exception:
+        pass
+    inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
+    inner.tag_raise("bold")
+    inner.tag_raise("color")
+
+
+def obtener_tamano_nota(texto, defecto=10):
+    """Lee el tamaño guardado en la nota ([S<n>]); si no hay, devuelve el defecto."""
+    m = _PATRON_TAMANO.search(str(texto))
+    if m:
+        try:
+            return max(6, min(48, int(m.group(1))))
+        except (TypeError, ValueError):
+            pass
+    return int(defecto)
+
+
 def insertar_texto_formateado(txt_widget, texto):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    texto_str = str(texto)
+    m = _PATRON_TAMANO.search(texto_str)
+    if m:
+        try:
+            aplicar_tamano_fuente(txt_widget, int(m.group(1)))
+        except (TypeError, ValueError):
+            pass
+        texto_str = _PATRON_TAMANO.sub("", texto_str)
     inner.delete("1.0", tk.END)
-    segmentos = parsear_segmentos_formato(texto)
+    segmentos = parsear_segmentos_formato(texto_str)
     for frag, neg, col in segmentos:
         tags = []
         if neg: tags.append("bold")
@@ -1465,12 +1528,18 @@ class VentanaEtapaProveedores:
             
             # --- NOTAS DEL CLIENTE ---
             texto_nota = str(notas_r) if notas_r else "-"
+            tam_nota = obtener_tamano_nota(texto_nota, defecto=10)
+            chars_por_linea_nota = max(20, int(65 * (10.0 / max(6, tam_nota))))
+            altura_linea_nota = max(16, int(tam_nota * 2))
             conteo_lineas = texto_nota.count('\n') + 1
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas += len(texto_plano_sin_marcado(linea_texto)) // 65
+            conteo_lineas_nota = texto_nota.count('\n') + 1
+            for linea_texto in texto_nota.split('\n'):
+                conteo_lineas_nota += len(texto_plano_sin_marcado(linea_texto)) // chars_por_linea_nota
                 
-            txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
-            configurar_tags_formato(txt_notas, tam=10)
+            txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas_nota * altura_linea_nota), font=("Helvetica", tam_nota), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
+            configurar_tags_formato(txt_notas, tam=tam_nota)
             insertar_texto_formateado(txt_notas, texto_nota)
             txt_notas.pack(side="left", fill="both", expand=True, padx=(4, 2), pady=5)
             

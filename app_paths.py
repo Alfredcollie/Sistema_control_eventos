@@ -52,13 +52,16 @@ def ruta_recurso(nombre_relativo):
 
 def cargar_config_local():
     """Lee la configuración local de forma segura (independiente del cwd).
-    Prioriza CONFIG_FILE (datos del usuario) y luego 'config_local.json' junto a la app."""
+    Prioriza CONFIG_FILE (datos del usuario) sobre 'config_local.json' (valores por defecto)."""
     config = {}
-    candidatos = [CONFIG_FILE, os.path.join(APP_DIR, "config_local.json")]
+    # Valores por defecto (junto a la app / empaquetados) con menor prioridad.
+    candidatos = [os.path.join(APP_DIR, "config_local.json")]
     try:
         candidatos.append(os.path.join(sys._MEIPASS, "config_local.json"))
     except Exception:
         pass
+    # La configuración del usuario se aplica al final para que tenga prioridad.
+    candidatos.append(CONFIG_FILE)
     for ruta in candidatos:
         try:
             if os.path.exists(ruta):

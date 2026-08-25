@@ -53,12 +53,18 @@ def cargar_configuracion_regional():
     except Exception: pass
     return config
 
-# 🚀 FUNCIÓN PARA LEER EL PORCENTAJE DE RENTA ANUAL DESDE CONFIG
-def obtener_porcentaje_renta_anual():
+# 🚀 FUNCIONES PARA LEER LOS PORCENTAJES DE RENTA DESDE CONFIG GENERAL
+def _porcentaje_renta(clave):
     try:
-        return float(cargar_config_local().get("renta_anual_porcentaje", "0.0"))
-    except Exception: pass
-    return 0.0
+        return float(cargar_config_local().get(clave, "0"))
+    except Exception:
+        return 0.0
+
+def obtener_porcentaje_renta_anual():
+    return _porcentaje_renta("renta_anual_porcentaje")
+
+def obtener_porcentaje_renta_mensual():
+    return _porcentaje_renta("renta_mensual_porcentaje")
 
 CONFIG_REGIONAL = cargar_configuracion_regional()
 
@@ -168,6 +174,7 @@ class EstadisticasFinancieraApp:
         self.parent_frame = parent_frame
         self.usuario_activo = "Desconocido"
         self.tasa_renta_anual = obtener_porcentaje_renta_anual()
+        self.tasa_renta_mensual = obtener_porcentaje_renta_mensual()
         
         self.crear_interfaz()
         self.cargar_eventos()
@@ -283,8 +290,13 @@ class EstadisticasFinancieraApp:
         self.card_rentabilidad = self.crear_tarjeta_larga(f_rentabilidad, "RENTABILIDAD DEL EVENTO / PERIODO (Ventas Netas - Compras Netas)", formatear_moneda(0), "#1f538d")
         self.card_caja = self.crear_tarjeta_larga(f_rentabilidad, "FLUJO DE CAJA (Dinero Efectivo Real: Cobrado - Pagado)", formatear_moneda(0), "#27ae60")
         
-        # 🚀 NUEVO BLOQUE: PROVISIÓN DE RENTA ANUAL
-        self.card_provision_renta = self.crear_tarjeta_larga(f_rentabilidad, f"PROVISIÓN IMPUESTO A LA RENTA ANUAL ({self.tasa_renta_anual}%)", formatear_moneda(0), "#e67e22")
+        # 🚀 PROVISIÓN DE IMPUESTO A LA RENTA (solo si el porcentaje es mayor a 0)
+        self.card_provision_renta = None
+        self.card_provision_renta_mensual = None
+        if self.tasa_renta_anual > 0:
+            self.card_provision_renta = self.crear_tarjeta_larga(f_rentabilidad, f"PROVISIÓN IMPUESTO A LA RENTA ANUAL ({self.tasa_renta_anual:g}%)", formatear_moneda(0), "#e67e22")
+        if self.tasa_renta_mensual > 0:
+            self.card_provision_renta_mensual = self.crear_tarjeta_larga(f_rentabilidad, f"PROVISIÓN IMPUESTO A LA RENTA MENSUAL ({self.tasa_renta_mensual:g}%)", formatear_moneda(0), "#8e44ad")
 
     def toggle_fecha_modo(self):
         modo = self.tipo_fecha_var.get()
@@ -413,29 +425,36 @@ class EstadisticasFinancieraApp:
         else:
             periodo_analizado = f"Mes: {self.combo_mes.get()} - Año: {self.combo_anio.get()}"
 
+        indicadores = [
+            "Ventas del Periodo (Neto)",
+            "Cobrado en el Periodo",
+            "Deuda Total Pendiente por Cobrar",
+            "Compras del Periodo (Neto)",
+            "Pagado en el Periodo",
+            "Deuda Total a Proveedores",
+            "Rentabilidad del Evento / Periodo",
+            "Flujo de Caja (Dinero Real)",
+        ]
+        valores = [
+            self.card_ventas.cget("text"),
+            self.card_cobrado.cget("text"),
+            self.card_por_cobrar.cget("text"),
+            self.card_compras.cget("text"),
+            self.card_pagado.cget("text"),
+            self.card_por_pagar.cget("text"),
+            self.card_rentabilidad.cget("text"),
+            self.card_caja.cget("text"),
+        ]
+        if self.card_provision_renta is not None:
+            indicadores.append(f"Provisión Impuesto Renta Anual ({self.tasa_renta_anual:g}%)")
+            valores.append(self.card_provision_renta.cget("text"))
+        if self.card_provision_renta_mensual is not None:
+            indicadores.append(f"Provisión Impuesto Renta Mensual ({self.tasa_renta_mensual:g}%)")
+            valores.append(self.card_provision_renta_mensual.cget("text"))
+
         datos_reporte = {
-            "Indicador Financiero": [
-                "Ventas del Periodo (Neto)",
-                "Cobrado en el Periodo",
-                "Deuda Total Pendiente por Cobrar",
-                "Compras del Periodo (Neto)",
-                "Pagado en el Periodo",
-                "Deuda Total a Proveedores",
-                "Rentabilidad del Evento / Periodo",
-                "Flujo de Caja (Dinero Real)",
-                f"Provisión Impuesto Renta Anual ({self.tasa_renta_anual}%)"
-            ],
-            "Valor Registrado": [
-                self.card_ventas.cget("text"),
-                self.card_cobrado.cget("text"),
-                self.card_por_cobrar.cget("text"),
-                self.card_compras.cget("text"),
-                self.card_pagado.cget("text"),
-                self.card_por_pagar.cget("text"),
-                self.card_rentabilidad.cget("text"),
-                self.card_caja.cget("text"),
-                self.card_provision_renta.cget("text")
-            ]
+            "Indicador Financiero": indicadores,
+            "Valor Registrado": valores
         }
 
         ruta = filedialog.asksaveasfilename(
@@ -648,14 +667,19 @@ class EstadisticasFinancieraApp:
         rentabilidad = resultados["ventas"] - resultados["compras"]
         caja = resultados["cobrado"] - resultados["pagado"]
         
-        # 🚀 CÁLCULO DE PROVISIÓN DE RENTA ANUAL (Solo si hay ganancia en el periodo)
+        # 🚀 CÁLCULO DE PROVISIÓN DE RENTA (solo si hay ganancia en el periodo)
         provision_renta = 0.0
+        provision_renta_mensual = 0.0
         if rentabilidad > 0:
             provision_renta = rentabilidad * (self.tasa_renta_anual / 100.0)
+            provision_renta_mensual = rentabilidad * (self.tasa_renta_mensual / 100.0)
 
         self.card_rentabilidad.configure(text=formatear_moneda(rentabilidad))
         self.card_caja.configure(text=formatear_moneda(caja))
-        self.card_provision_renta.configure(text=formatear_moneda(provision_renta))
+        if self.card_provision_renta is not None:
+            self.card_provision_renta.configure(text=formatear_moneda(provision_renta))
+        if self.card_provision_renta_mensual is not None:
+            self.card_provision_renta_mensual.configure(text=formatear_moneda(provision_renta_mensual))
 
         if rentabilidad < 0:
             self.card_rentabilidad.configure(text_color="#e74c3c")

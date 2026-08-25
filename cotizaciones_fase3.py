@@ -996,16 +996,20 @@ class VentanaEtapaProveedores:
         self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
-        # Fórmula: (Venta + IGV) − (Compra + IGV) − Diferencial IGV − Renta = Venta − Compra − Renta
-        # Renta = (Venta sin IGV − Detracción) × % Renta Mensual
+        # Fórmula: (Venta + IGV) − (Compra + IGV) − Diferencial IGV − ISR = Venta − Compra − ISR
+        # Detracción = (Gran Total + IGV) × % Detracción  (solo informativa)
+        # ISR Mensual = Gran Total sin IGV × % Renta Mensual
         # Los porcentajes salen de la Configuración General (control_general.py).
+        igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
         detraccion_pct = self._obtener_porcentaje_config("detraccion_porcentaje", 12)
         renta_pct = self._obtener_porcentaje_config("renta_mensual_porcentaje", 1.5)
 
         venta_sin_igv = subtotal
         compra_sin_igv = costo_total
-        detraccion = venta_sin_igv * detraccion_pct / 100.0
-        impuesto_renta = (venta_sin_igv - detraccion) * renta_pct / 100.0
+        gran_total_sin_igv = subtotal + fee
+        base_detraccion = gran_total_sin_igv * (1 + igv_pct / 100.0)
+        detraccion = base_detraccion * detraccion_pct / 100.0
+        impuesto_renta = gran_total_sin_igv * renta_pct / 100.0
         ganancia_neta = venta_sin_igv - compra_sin_igv - impuesto_renta
 
         self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")

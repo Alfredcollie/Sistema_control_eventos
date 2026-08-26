@@ -74,12 +74,92 @@ def abrir_documento(ruta):
 # =========================================================
 # HERRAMIENTAS DE TEXTO ENRIQUECIDO - VERSIÓN WYSIWYG MAC FIX
 # =========================================================
-_PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
+_PATRON_FORMATO = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\]|\[S\d+\])', re.IGNORECASE)
 _PATRON_TAMANO = re.compile(r'\[S(\d+)\]', re.IGNORECASE)
 
-def parsear_segmentos_formato(texto):
-    resultado, negrita, color_p = [], False, False
-    for parte in _PATRON_ETIQUETAS.split(str(texto)):
+
+def _nombre_tag_fuente(negrita, tamano):
+    return "f_b_%d" % tamano if negrita else "f_n_%d" % tamano
+
+
+def _tag_fuente(inner, negrita, tamano):
+    nombre = _nombre_tag_fuente(negrita, tamano)
+    try:
+        if negrita:
+            inner.tag_configure(nombre, font=("Helvetica", tamano, "bold"))
+        else:
+            inner.tag_configure(nombre, font=("Helvetica", tamano))
+    except Exception:
+        pass
+    return nombre
+
+
+def _negrita_en_indice(inner, idx):
+    for t in inner.tag_names(idx):
+        if t.startswith("f_b_"):
+            return True
+        if t.startswith("f_n_"):
+            return False
+    return False
+
+
+def _tamano_en_indice(inner, idx, defecto=11):
+    for t in inner.tag_names(idx):
+        if t.startswith("f_b_") or t.startswith("f_n_"):
+            try:
+                return max(6, min(48, int(t.rsplit("_", 1)[1])))
+            except (ValueError, IndexError):
+                pass
+    return defecto
+
+
+def _obtener_seleccion(inner):
+    s, e = None, None
+    try:
+        if inner.tag_ranges(tk.SEL):
+            s = inner.index(tk.SEL_FIRST)
+            e = inner.index(tk.SEL_LAST)
+    except Exception:
+        pass
+    if not s and getattr(inner, "_memoria_blindada", None):
+        s, e = inner._memoria_blindada
+    return s, e
+
+
+def _aplicar_fuente_rango(inner, s, e, negrita, tamano):
+    for t in list(inner.tag_names(s)):
+        if t.startswith("f_b_") or t.startswith("f_n_"):
+            try:
+                inner.tag_remove(t, s, e)
+            except Exception:
+                pass
+    inner.tag_add(_tag_fuente(inner, negrita, tamano), s, e)
+
+
+def _runs_estilo(inner, s, e):
+    runs = []
+    idx = s
+    while inner.compare(idx, "<", e):
+        neg = _negrita_en_indice(inner, idx)
+        tam = _tamano_en_indice(inner, idx)
+        fin = idx
+        while True:
+            nxt = inner.index(f"{fin} +1c")
+            if inner.compare(nxt, ">=", e):
+                break
+            if _negrita_en_indice(inner, nxt) != neg or _tamano_en_indice(inner, nxt) != tam:
+                break
+            fin = nxt
+        end = inner.index(f"{fin} +1c")
+        runs.append((idx, end, neg, tam))
+        idx = end
+    return runs
+
+
+def parsear_segmentos_formato(texto, tam_defecto=11):
+    resultado = []
+    negrita, color_p, tamano = False, False, tam_defecto
+    for parte in _PATRON_FORMATO.split(str(texto)):
         p_up = parte.upper()
         if p_up == "[B]":
             negrita = True
@@ -89,13 +169,20 @@ def parsear_segmentos_formato(texto):
             color_p = True
         elif p_up == "[/M]":
             color_p = False
+        elif p_up.startswith("[S") and p_up.endswith("]"):
+            m = _PATRON_TAMANO.match(parte)
+            if m:
+                try:
+                    tamano = max(6, min(48, int(m.group(1))))
+                except ValueError:
+                    pass
         elif parte:
-            resultado.append((parte, negrita, color_p))
+            resultado.append((parte, negrita, color_p, tamano))
     return resultado
 
+
 def texto_plano_sin_marcado(texto):
-    t = _PATRON_TAMANO.sub("", str(texto))
-    return _PATRON_ETIQUETAS.sub("", t)
+    return _PATRON_FORMATO.sub("", str(texto))
 
 # Memoria de normalización (perf): evita recalcular el texto normalizado de cada
 # proveedor en cada cambio de categoría dentro de la misma sesión.
@@ -103,25 +190,36 @@ _NORM_CACHE_PROVEEDORES = {}
 
 def extraer_texto_con_formato(txt_widget):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
-    dump = inner.dump("1.0", "end-1c")
+    contenido = inner.get("1.0", "end-1c")
+    if not contenido:
+        return ""
     partes = []
-    for key, value, index in dump:
-        if key == "tagon":
-            if value == "bold": partes.append("[B]")
-            elif value == "color": partes.append("[M]")
-        elif key == "tagoff":
-            if value == "bold": partes.append("[/B]")
-            elif value == "color": partes.append("[/M]")
-        elif key == "text":
-            partes.append(value)
-    texto = "".join(partes)
-    try:
-        tam = int(getattr(inner, "_tam_fuente", 11) or 11)
-    except (TypeError, ValueError):
-        tam = 11
-    if tam != 11:
-        texto = f"[S{tam}]{texto}"
-    return texto
+    neg_actual, tam_actual, col_actual = None, None, None
+    idx = "1.0"
+    while inner.compare(idx, "<", "end-1c"):
+        neg = _negrita_en_indice(inner, idx)
+        tam = _tamano_en_indice(inner, idx)
+        col = "color" in inner.tag_names(idx)
+
+        if neg != neg_actual:
+            if neg_actual is True and not neg:
+                partes.append("[/B]")
+            elif neg_actual is not True and neg:
+                partes.append("[B]")
+            neg_actual = neg
+        if tam != tam_actual:
+            partes.append(f"[S{tam}]")
+            tam_actual = tam
+        if col != col_actual:
+            if col_actual is True and not col:
+                partes.append("[/M]")
+            elif col_actual is not True and col:
+                partes.append("[M]")
+            col_actual = col
+
+        partes.append(inner.get(idx))
+        idx = inner.index(f"{idx} +1c")
+    return "".join(partes)
 
 def crear_barra_formato(parent, text_widget):
     f_barra = ctk.CTkFrame(parent, fg_color="transparent")
@@ -151,32 +249,26 @@ def crear_barra_formato(parent, text_widget):
     f_barra.bind("<Leave>", quitar_candado, add="+")
 
     def alternar_formato(tag_name):
-        s, e = None, None
+        s, e = _obtener_seleccion(inner_text)
+        if not (s and e):
+            inner_text.focus_set()
+            return "break"
         try:
-            if inner_text.tag_ranges(tk.SEL):
-                s = inner_text.index(tk.SEL_FIRST)
-                e = inner_text.index(tk.SEL_LAST)
+            if tag_name == "color":
+                if "color" in inner_text.tag_names(s):
+                    inner_text.tag_remove("color", s, e)
+                else:
+                    inner_text.tag_add("color", s, e)
+                inner_text.tag_raise("color")
+            else:
+                es_negrita = _negrita_en_indice(inner_text, s)
+                objetivo = not es_negrita
+                for rs, re_, neg, tam in _runs_estilo(inner_text, s, e):
+                    _aplicar_fuente_rango(inner_text, rs, re_, objetivo, tam)
+            inner_text.tag_add(tk.SEL, s, e)
+            inner_text._memoria_blindada = None
         except Exception:
             pass
-
-        if not s and inner_text._memoria_blindada:
-            s, e = inner_text._memoria_blindada
-
-        if s and e:
-            try:
-                current_tags = inner_text.tag_names(s)
-                if tag_name in current_tags:
-                    inner_text.tag_remove(tag_name, s, e)
-                else:
-                    inner_text.tag_add(tag_name, s, e)
-                
-                inner_text.tag_raise(tag_name)
-                
-                inner_text.tag_add(tk.SEL, s, e)
-                inner_text._memoria_blindada = None
-            except Exception:
-                pass
-                
         inner_text.focus_set()
         return "break"
 
@@ -193,8 +285,20 @@ def crear_barra_formato(parent, text_widget):
     btn_c.bind("<Leave>", lambda e: [quitar_candado(e), btn_c.configure(fg_color="#e0e0e0")])
 
     def cambiar_tamano(delta):
-        tam_actual = getattr(inner_text, "_tam_fuente", 11)
-        aplicar_tamano_fuente(text_widget, tam_actual + delta)
+        s, e = _obtener_seleccion(inner_text)
+        if not (s and e):
+            inner_text.focus_set()
+            return "break"
+        try:
+            for rs, re_, neg, tam in _runs_estilo(inner_text, s, e):
+                nuevo = max(6, min(48, tam + delta))
+                if nuevo == tam:
+                    continue
+                _aplicar_fuente_rango(inner_text, rs, re_, neg, nuevo)
+            inner_text.tag_add(tk.SEL, s, e)
+            inner_text._memoria_blindada = None
+        except Exception:
+            pass
         inner_text.focus_set()
         return "break"
 
@@ -222,60 +326,30 @@ def crear_barra_formato(parent, text_widget):
 def configurar_tags_formato(txt_widget, tam=10):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     inner._tam_fuente = int(tam)
-    inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
-    inner.tag_raise("bold")
-    inner.tag_raise("color")
-
-
-def aplicar_tamano_fuente(txt_widget, tam):
-    """Ajusta el tamaño de letra de la nota y de su tag de negrilla."""
-    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
-    tam = max(6, min(48, int(tam)))
-    inner._tam_fuente = tam
-    try:
-        inner.configure(font=("Helvetica", tam))
-    except Exception:
-        pass
-    inner.tag_configure("bold", font=("Helvetica", tam, "bold"))
-    inner.tag_raise("bold")
     inner.tag_raise("color")
 
 
 def obtener_tamano_nota(texto, defecto=10):
-    """Lee el tamaño guardado en la nota ([S<n>]); si no hay, devuelve el defecto."""
-    m = _PATRON_TAMANO.search(str(texto))
-    if m:
-        try:
-            return max(6, min(48, int(m.group(1))))
-        except (TypeError, ValueError):
-            pass
-    return int(defecto)
+    """Devuelve el tamaño máximo guardado en la nota ([S<n>]); si no hay, el defecto."""
+    try:
+        tamanos = [int(x) for x in _PATRON_TAMANO.findall(str(texto))]
+    except ValueError:
+        tamanos = []
+    if not tamanos:
+        return int(defecto)
+    return max(6, min(48, max(tamanos)))
 
 
-def insertar_texto_formateado(txt_widget, texto):
+def insertar_texto_formateado(txt_widget, texto, tam_defecto=11):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
-    texto_str = str(texto)
-    m = _PATRON_TAMANO.search(texto_str)
-    if m:
-        try:
-            aplicar_tamano_fuente(txt_widget, int(m.group(1)))
-        except (TypeError, ValueError):
-            pass
-        texto_str = _PATRON_TAMANO.sub("", texto_str)
+    inner.tag_configure("color", foreground=COLOR_PRIMARIO)
     inner.delete("1.0", tk.END)
-    segmentos = parsear_segmentos_formato(texto_str)
-    for frag, neg, col in segmentos:
-        tags = []
-        if neg: tags.append("bold")
-        if col: tags.append("color")
-        
-        if tags:
-            inner.insert(tk.END, frag, tuple(tags))
-        else:
-            inner.insert(tk.END, frag)
-            
-    inner.tag_raise("bold")
+    for frag, neg, col, tam in parsear_segmentos_formato(texto, tam_defecto):
+        tags = [_tag_fuente(inner, neg, tam)]
+        if col:
+            tags.append("color")
+        inner.insert(tk.END, frag, tuple(tags))
     inner.tag_raise("color")
 
 # =========================================================
@@ -1540,7 +1614,7 @@ class VentanaEtapaProveedores:
                 
             txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas_nota * altura_linea_nota), font=("Helvetica", tam_nota), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             configurar_tags_formato(txt_notas, tam=tam_nota)
-            insertar_texto_formateado(txt_notas, texto_nota)
+            insertar_texto_formateado(txt_notas, texto_nota, tam_defecto=10)
             txt_notas.pack(side="left", fill="both", expand=True, padx=(4, 2), pady=5)
             
             txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))

@@ -3,127 +3,63 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 import psycopg2
-import keyring
 import subprocess
 import sys
-import os
 import uuid
-import re
 from datetime import datetime
-
-# Bundle de certificados raíz para SSL a Supabase en macOS/PyInstaller
-try:
-    import certifi
-    _CA_BUNDLE = certifi.where()
-except Exception:
-    _CA_BUNDLE = None
 
 # =========================================================
 # ⚙️ CREDENCIALES DE LA BASE DE DATOS DE LICENCIAS
-# El host / puerto / base / usuario NO son secretos.
-# La CONTRASEÑA es el secreto: se lee del llavero del sistema
-# (servicio "ControlFlotaLicencias") o de la variable de entorno
-# SUPABASE_LIC_DB_PASSWORD. Ya NO va en el código.
 # =========================================================
 SUPABASE_HOST = "aws-1-us-west-2.pooler.supabase.com"
 SUPABASE_DB_NAME = "postgres"
 SUPABASE_USER = "postgres.nqjfptmupnrkmgvnbyly"
+SUPABASE_PASSWORD = "Ve-10339092"
 SUPABASE_PORT = "6543"
-SERVICE_NAME = "ControlFlotaLicencias"
-
-
-def _password_licencia():
-    """Contraseña de la base de licencias (llavero o variable de entorno)."""
-    try:
-        pw = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PASSWORD")
-        if pw:
-            return pw
-    except Exception:
-        pass
-    return os.environ.get("SUPABASE_LIC_DB_PASSWORD", "")
 
 # =========================================================
 # 🚀 IDENTIFICADOR DEL SOFTWARE
 # =========================================================
 # Cambia este texto por el nombre exacto del software.
-SOFTWARE_ASIGNADO = "Control de Flota Automotriz" 
-
-def _ejecutar_comando(comando):
-    """Ejecuta un comando sin shell y devuelve su salida como texto (o vacío si falla)."""
-    try:
-        return subprocess.check_output(
-            comando, stderr=subprocess.DEVNULL, text=True, timeout=10
-        ).strip()
-    except Exception:
-        return ""
-
+SOFTWARE_ASIGNADO = "Control de Eventos" 
 
 def obtener_hwid():
-    """Genera o extrae el ID de Hardware único del equipo (HWID).
-    Compatible con Windows, macOS (Intel y Apple Silicon M1/M2/M3/M4) y Linux."""
+    """Genera o extrae el ID de Hardware único de la PC (HWID)"""
     hwid = ""
     try:
         if sys.platform == "win32":
-            # WMIC fue eliminado en Windows 11 24H2+; usamos fuentes alternativas en orden.
-            salida = _ejecutar_comando(["wmic", "csproduct", "get", "uuid"])
-            if not salida:
-                salida = _ejecutar_comando([
-                    "powershell", "-NoProfile", "-Command",
-                    "(Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID"
-                ])
-            for linea in salida.splitlines():
-                linea = linea.strip()
-                if linea and linea.lower() != "uuid":
-                    hwid = linea
-                    break
+            # 'wmic' está deprecado/eliminado en Windows 11. Usar CIM de PowerShell (Win10/11).
+            hwid = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_ComputerSystemProduct).UUID"],
+                timeout=15
+            ).decode("utf-8", errors="ignore").strip()
         elif sys.platform == "darwin":
-            # ioreg sin shell: extraemos el UUID con expresiones regulares.
-            salida = _ejecutar_comando(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])
-            for linea in salida.splitlines():
+            out = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]).decode("utf-8", "replace")
+            hwid = ""
+            for linea in out.splitlines():
                 if "IOPlatformUUID" in linea:
-                    m = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', linea)
-                    if m:
-                        hwid = m.group(1)
-                        break
+                    hwid = linea.split('"')[-2]
+                    break
             if not hwid:
-                salida = _ejecutar_comando(["system_profiler", "SPHardwareDataType"])
-                m = re.search(r"Hardware\s+UUID:\s*([A-Fa-f0-9-]+)", salida, re.IGNORECASE)
-                if m:
-                    hwid = m.group(1)
+                raise RuntimeError("IOPlatformUUID no encontrado")
         else:
-            hwid = _ejecutar_comando(["cat", "/etc/machine-id"])
-            if not hwid:
-                hwid = _ejecutar_comando(["cat", "/var/lib/dbus/machine-id"])
+            hwid = subprocess.check_output(["/bin/cat", "/etc/machine-id"]).decode("utf-8", "replace").strip()
     except Exception:
-        hwid = ""
-    if not hwid:
-        # Último recurso multiplataforma: identificador derivado del hardware base de Python
         hwid = str(uuid.UUID(int=uuid.getnode())).upper()
     return hwid
 
 def consultar_licencia_supabase(hwid):
     """Se conecta a Supabase y verifica el estado de TODAS las licencias asociadas a este HWID y Software"""
     try:
-        password = _password_licencia()
-        if not password:
-            return False, "Error: contraseña de licencias no configurada. Defina SUPABASE_LIC_DB_PASSWORD o guarde la credencial en el llavero."
-        base = dict(
+        conn = psycopg2.connect(
             dbname=SUPABASE_DB_NAME,
             user=SUPABASE_USER,
-            password=password,
+            password=SUPABASE_PASSWORD,
             host=SUPABASE_HOST,
             port=SUPABASE_PORT,
-            connect_timeout=5,
-            sslmode="require"
+            connect_timeout=5
         )
-        conn = None
-        if _CA_BUNDLE and os.path.exists(_CA_BUNDLE):
-            try:
-                conn = psycopg2.connect(**{**base, "sslrootcert": _CA_BUNDLE})
-            except Exception:
-                conn = None
-        if conn is None:
-            conn = psycopg2.connect(**base)
         cursor = conn.cursor()
         
         query = """
@@ -157,14 +93,18 @@ def consultar_licencia_supabase(hwid):
 
             try:
                 if venc_eq:
-                    if hoy > datetime.strptime(venc_eq, fmt):
+                    if isinstance(venc_eq, str):
+                        venc_eq = datetime.strptime(venc_eq, fmt)
+                    if hoy > venc_eq:
                         errores.append("Licencia de equipo vencida")
                         valido = False
             except Exception: pass
 
             try:
                 if venc_lic:
-                    if hoy > datetime.strptime(venc_lic, fmt):
+                    if isinstance(venc_lic, str):
+                        venc_lic = datetime.strptime(venc_lic, fmt)
+                    if hoy > venc_lic:
                         errores.append("Licencia general vencida")
                         valido = False
             except Exception: pass

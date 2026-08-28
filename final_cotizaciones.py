@@ -279,6 +279,14 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 c.drawString(x_cursor, y, palabra)
                 x_cursor += c.stringWidth(palabra, fuente_palabra, tam)
 
+        def dibujar_linea_formateada_centrada(cx, y, lista_palabras, tam):
+            ancho_total = 0.0
+            for palabra, es_neg, es_col in lista_palabras:
+                fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
+                ancho_total += c.stringWidth(palabra, fuente_palabra, tam)
+            x = cx - ancho_total / 2.0
+            dibujar_linea_formateada(x, y, lista_palabras, tam)
+
         ruta_usar = None
         mostrar_logo = True
         
@@ -384,7 +392,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         altura_desc = 17 + 11 * len(lineas_desc)
 
         altura_total = altura_fila_superior + 12 + altura_desc
-        y_superior = GRIS_TOP - (GRIS_H - altura_total) / 2.0 - 17
+        y_superior = GRIS_TOP - (GRIS_H - altura_total) / 2.0 - 10
 
         # Tres columnas justificadas a la izquierda
         for (etiq, lv), cx in zip(cols, col_left):
@@ -479,9 +487,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     c.setFillColorRGB(color_fondo, color_fondo, color_fondo)
                     c.rect(TABLE_LEFT, y_pos - f["altura"], TABLE_RIGHT - TABLE_LEFT, f["altura"], fill=1, stroke=0)
                     y_pos -= f["altura"]
-                    y_renglon = y_pos + f["altura"] - 12
+                    n_lineas = len(f["lineas_desc"])
+                    y_renglon = y_pos + (f["altura"] / 2.0) + (10.5 * (n_lineas - 1)) / 2.0
                     for linea_palabras in f["lineas_desc"]:
-                        dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 8.5)
+                        dibujar_linea_formateada_centrada(237.5, y_renglon, linea_palabras, 8.5)
                         y_renglon -= 10.5
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)

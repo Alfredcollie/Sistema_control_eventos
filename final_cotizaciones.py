@@ -31,6 +31,8 @@ except Exception:
 
 _PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
 
+_PATRON_MARCADORES = re.compile(r'\[[A-Za-z]+\d+\]', re.IGNORECASE)
+
 def hex_to_rgb(hex_color):
     try:
         hex_color = hex_color.lstrip('#')
@@ -55,7 +57,10 @@ def parsear_segmentos_formato(texto):
     return resultado
 
 def texto_plano_sin_marcado(texto):
-    return _PATRON_ETIQUETAS.sub("", str(texto))
+    return _PATRON_ETIQUETAS.sub("", _PATRON_MARCADORES.sub(" ", str(texto)))
+
+def limpiar_marcadores(texto):
+    return _PATRON_MARCADORES.sub(" ", str(texto))
 
 def tamano_natural_puntos(ruta_imagen):
     """
@@ -113,7 +118,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             res_db = cursor.fetchone()
             if res_db:
                 cliente = str(res_db[0]).replace('{', '').replace('}', '').strip()
-                descripcion_proyecto = str(res_db[1]).replace('{', '').replace('}', '').strip()
+                descripcion_proyecto = limpiar_marcadores(str(res_db[1]).replace('{', '').replace('}', '').strip())
                 proyecto = str(res_db[2]).replace('{', '').replace('}', '').strip()
                 if len(res_db) > 3 and res_db[3] is not None and float(res_db[3]) > 0:
                     tipo_cambio_pdf = float(res_db[3])
@@ -186,7 +191,16 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 except Exception:
                     pass
                 
-        nombre_archivo = os.path.join(carpeta_destino, f"Cotizacion_{codigo_cotizacion}.pdf")
+        # Nombre de archivo solicitado: {Código} - BLACK CUBE - PRESUPUESTO - {Cliente} - {Evento}
+        def _limpio_nombre_archivo(valor):
+            v = str(valor or "").replace('{', '').replace('}', '').strip()
+            v = re.sub(r'[\\/:*?"<>|\r\n\t]+', ' ', v)
+            v = re.sub(r'\s+', ' ', v).strip()
+            return v
+
+        cliente_archivo = _limpio_nombre_archivo(cliente) or "Cliente"
+        evento_archivo = _limpio_nombre_archivo(proyecto) or "Evento"
+        nombre_archivo = os.path.join(carpeta_destino, f"{str(codigo_cotizacion)} - BLACK CUBE - PRESUPUESTO - {cliente_archivo} - {evento_archivo}.pdf")
 
         c = canvas.Canvas(nombre_archivo, pagesize=letter)
         ancho_hoja = letter[0]
@@ -417,7 +431,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 cat_sum = str(r[2]).strip().upper() if len(r) > 2 and r[2] else "SUMINISTRO"
                 prov_nom = str(r[3]).strip() if len(r) > 3 and r[3] else "Proveedor"
                 precio_final_venta = float(r[8]) if len(r) > 8 and r[8] else 0.0
-                nota_solicitud = str(r[9]).strip() if len(r) > 9 and r[9] else ""
+                nota_solicitud = limpiar_marcadores(str(r[9]).strip()) if len(r) > 9 and r[9] else ""
                 cant_item = int(r[10]) if len(r) > 10 and r[10] else 1
                 p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
                 texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."

@@ -490,7 +490,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     n_lineas = len(f["lineas_desc"])
                     y_renglon = y_pos + (f["altura"] / 2.0) + (10.5 * (n_lineas - 1)) / 2.0
                     for linea_palabras in f["lineas_desc"]:
-                        dibujar_linea_formateada_centrada(237.5, y_renglon, linea_palabras, 8.5)
+                        dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 8.5)
                         y_renglon -= 10.5
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)

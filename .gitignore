@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build / PyInstaller
+build/
+dist/
+*.spec
+
+# Secretos / credenciales (NO subir a GitHub)
+crear_roles_app.sql
+corregir_rls_licencias.sql
+.env
+.env.*
+
+# Sistema
+.DS_Store
+Thumbs.db

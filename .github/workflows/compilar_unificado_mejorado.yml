@@ -58,6 +58,14 @@ jobs:
     - name: Compilar con PyInstaller (Windows)
       run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring control_general.py
 
+    - name: Crear instalador Windows (Inno Setup)
+      run: |
+        $v = "1.0.0"
+        if ($env:GITHUB_REF_TYPE -eq "tag") { $v = $env:GITHUB_REF_NAME }
+        elseif ($env:INPUT_TAG_NAME) { $v = $env:INPUT_TAG_NAME }
+        choco install innosetup -y --no-progress
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=$v instalador_windows.iss
+
     - name: Comprimir en ZIP (Windows)
       run: Compress-Archive -Path "dist/Instalador-ControlEventos-Windows" -DestinationPath "dist/Instalador-ControlEventos-Windows.zip" -Force
 
@@ -65,7 +73,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: windows
-        path: dist/Instalador-ControlEventos-Windows.zip
+        path: |
+          dist/Instalador-ControlEventos-Windows.zip
+          dist/ControlEventos-Setup.exe
 
   # ===================== macOS =====================
   build-mac:
@@ -166,5 +176,6 @@ jobs:
         files: |
           release-assets/*.zip
           release-assets/*.dmg
+          release-assets/*.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

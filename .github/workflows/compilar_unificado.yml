@@ -32,6 +32,16 @@ jobs:
     - name: Inyectar versión del tag
       run: python injectar_version.py
 
+    - name: Inyectar credenciales y config (secretos)
+      run: python generar_config_build.py
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_LIC_USER: ${{ secrets.SUPABASE_LIC_USER }}
+        SUPABASE_LIC_PASSWORD: ${{ secrets.SUPABASE_LIC_PASSWORD }}
+        NUBEFACT_URL: ${{ secrets.NUBEFACT_URL }}
+        NUBEFACT_TOKEN: ${{ secrets.NUBEFACT_TOKEN }}
+
     - name: Instalar dependencias
       run: |
         python -m pip install --upgrade pip
@@ -48,6 +58,23 @@ jobs:
     - name: Compilar con PyInstaller (Windows)
       run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring control_general.py
 
+    - name: Crear instalador Windows (Inno Setup)
+      shell: pwsh
+      run: |
+        if (-not (Test-Path instalador_windows.iss)) {
+          Write-Error "No se encontro instalador_windows.iss en el repo. Asegurate de haberlo commiteado (git add instalador_windows.iss)."
+          exit 1
+        }
+        $v = "1.0.0"
+        if ($env:GITHUB_REF_TYPE -eq "tag") { $v = $env:GITHUB_REF_NAME }
+        elseif ($env:INPUT_TAG_NAME) { $v = $env:INPUT_TAG_NAME }
+        $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        if (-not (Test-Path $iscc)) {
+          choco install innosetup -y --no-progress
+          if (-not (Test-Path $iscc)) { $iscc = "ISCC.exe" }
+        }
+        & $iscc /DMyAppVersion=$v instalador_windows.iss
+
     - name: Comprimir en ZIP (Windows)
       run: Compress-Archive -Path "dist/Instalador-ControlEventos-Windows" -DestinationPath "dist/Instalador-ControlEventos-Windows.zip" -Force
 
@@ -55,7 +82,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: windows
-        path: dist/Instalador-ControlEventos-Windows.zip
+        path: |
+          dist/Instalador-ControlEventos-Windows.zip
+          dist/ControlEventos-Setup.exe
 
   # ===================== macOS =====================
   build-mac:
@@ -72,6 +101,16 @@ jobs:
 
     - name: Inyectar versión del tag
       run: python injectar_version.py
+
+    - name: Inyectar credenciales y config (secretos)
+      run: python generar_config_build.py
+      env:
+        SUPABASE_DB_USER: ${{ secrets.SUPABASE_DB_USER }}
+        SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        SUPABASE_LIC_USER: ${{ secrets.SUPABASE_LIC_USER }}
+        SUPABASE_LIC_PASSWORD: ${{ secrets.SUPABASE_LIC_PASSWORD }}
+        NUBEFACT_URL: ${{ secrets.NUBEFACT_URL }}
+        NUBEFACT_TOKEN: ${{ secrets.NUBEFACT_TOKEN }}
 
     - name: Instalar dependencias
       run: |
@@ -146,5 +185,6 @@ jobs:
         files: |
           release-assets/*.zip
           release-assets/*.dmg
+          release-assets/*.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

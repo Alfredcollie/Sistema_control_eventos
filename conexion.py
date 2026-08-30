@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CONEXION.PY (v3 SEGURA + OPTIMIZADA + BLINDADA MAC)
-- Credenciales de Supabase en llavero del sistema (keyring) con Fallback.
+- Credenciales de Supabase en llavero del sistema (keyring) o variables de entorno.
 - Pool de Conexiones Persistente (ThreadedConnectionPool).
 - Auditoría Asíncrona (Background Threading).
 """
@@ -11,14 +11,27 @@ from psycopg2 import pool
 import threading
 from datetime import datetime
 import sys
+import os
 
-# keyring es opcional: si no está instalado, se usan las credenciales de respaldo (fallback).
+# keyring es opcional: si no está instalado, se usan las variables de entorno.
 try:
     import keyring
 except ImportError:
     keyring = None
 
 SERVICE_NAME = "ControlEventos"
+
+# Valores por defecto (no secretos). Usuario y contraseña NUNCA se hardcodean:
+# se leen del llavero del sistema (keyring) o de variables de entorno.
+DB_HOST_DEFAULT = "aws-1-us-west-2.pooler.supabase.com"
+DB_PORT_DEFAULT = "6543"
+DB_NAME_DEFAULT = "postgres"
+
+# Config empaquetado (config_local.json) como último recurso de credenciales.
+try:
+    from app_paths import cargar_config_local
+except Exception:
+    cargar_config_local = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,32 +43,50 @@ _connection_pool = None
 
 
 def leer_credenciales():
-    """Lee las credenciales del llavero del sistema. Si falla, usa el respaldo seguro."""
-    host = None
+    """Lee credenciales con prioridad:
+    1) llavero del sistema (keyring) -> 2) variables de entorno -> 3) config empaquetado.
+    No se hardcodea usuario ni contraseña.
+    """
+    # Base: config_local.json empaquetado (defaults del build)
+    config = {}
+    if cargar_config_local is not None:
+        try:
+            config = cargar_config_local()
+        except Exception:
+            config = {}
+
+    host = config.get("supabase_db_host")
+    port = config.get("supabase_db_port") or DB_PORT_DEFAULT
+    dbname = config.get("supabase_db_name") or DB_NAME_DEFAULT
+    user = config.get("supabase_db_user")
+    password = config.get("supabase_db_password")
+
+    # Variables de entorno tienen prioridad sobre el config empaquetado
+    host = os.environ.get("SUPABASE_DB_HOST") or host
+    port = os.environ.get("SUPABASE_DB_PORT") or port
+    dbname = os.environ.get("SUPABASE_DB_NAME") or dbname
+    user = os.environ.get("SUPABASE_DB_USER") or user
+    password = os.environ.get("SUPABASE_DB_PASSWORD") or password
+
+    # El llavero del sistema tiene la máxima prioridad
     if keyring is not None:
         try:
-            host = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST")
+            k_host = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_HOST")
+            if k_host:
+                host = k_host
+                port = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PORT") or port
+                dbname = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_NAME") or dbname
+                user = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_USER")
+                password = keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PASSWORD")
         except Exception as e:
             logging.error(f"Error al leer keyring: {e}")
 
-    # 🚀 PLAN DE RESPALDO INFALIBLE: Si el llavero de Mac falla, usamos los datos directos
-    if not host:
-        logging.info("Usando credenciales de respaldo (Fallback).")
-        return {
-            "host": "aws-1-us-west-2.pooler.supabase.com",
-            "port": "6543",
-            "dbname": "postgres",
-            "user": "postgres.xqhlkmqiwkeldpcxomhb",
-            "password": "Fc10339092Fc",
-        }
-
-    # Si el llavero funcionó (ej. en Windows), usamos sus datos
     return {
-        "host": host,
-        "port": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PORT") or "6543",
-        "dbname": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_NAME") or "postgres",
-        "user": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_USER"),
-        "password": keyring.get_password(SERVICE_NAME, "SUPABASE_DB_PASSWORD"),
+        "host": host or DB_HOST_DEFAULT,
+        "port": port,
+        "dbname": dbname,
+        "user": user,
+        "password": password,
     }
 
 
@@ -67,7 +98,11 @@ def inicializar_pool(silencioso=False):
             cred = leer_credenciales()
             if not cred["host"] or not cred["user"] or not cred["password"]:
                 if not silencioso:
-                    logging.warning("No hay credenciales válidas para conectar a Supabase.")
+                    logging.warning(
+                        "No hay credenciales válidas para conectar a Supabase. "
+                        "Configúralas con 'guardar_credenciales.py' o mediante las "
+                        "variables de entorno SUPABASE_DB_USER / SUPABASE_DB_PASSWORD."
+                    )
                 return
             
             _connection_pool = psycopg2.pool.ThreadedConnectionPool(

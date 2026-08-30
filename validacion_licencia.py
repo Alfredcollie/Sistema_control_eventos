@@ -5,17 +5,54 @@ import customtkinter as ctk
 import psycopg2
 import subprocess
 import sys
+import os
 import uuid
 from datetime import datetime
 
+# keyring es opcional: si no está instalado, se usan variables de entorno.
+try:
+    import keyring
+except ImportError:
+    keyring = None
+
 # =========================================================
-# ⚙️ CREDENCIALES DE LA BASE DE DATOS DE LICENCIAS
+# ⚙️ BASE DE DATOS DE LICENCIAS (SOLO LECTURA)
+# Usuario/contraseña NO se hardcodean: se leen del llavero o de variables de entorno.
 # =========================================================
+SERVICE_NAME = "ControlEventosLicencias"
 SUPABASE_HOST = "aws-1-us-west-2.pooler.supabase.com"
 SUPABASE_DB_NAME = "postgres"
-SUPABASE_USER = "postgres.nqjfptmupnrkmgvnbyly"
-SUPABASE_PASSWORD = "Ve-10339092"
 SUPABASE_PORT = "6543"
+
+
+def leer_credenciales_licencia():
+    """Devuelve (usuario, contraseña) del rol de solo-lectura de licencias.
+    Prioridad: keyring > variables de entorno > config_local.json empaquetado."""
+    # Base: config empaquetado
+    config = {}
+    try:
+        from app_paths import cargar_config_local
+        config = cargar_config_local()
+    except Exception:
+        config = {}
+
+    user = config.get("supabase_lic_user")
+    password = config.get("supabase_lic_password")
+
+    # Variables de entorno
+    user = os.environ.get("SUPABASE_LIC_USER") or user
+    password = os.environ.get("SUPABASE_LIC_PASSWORD") or password
+
+    # Llavero del sistema (máxima prioridad)
+    if keyring is not None:
+        try:
+            k_user = keyring.get_password(SERVICE_NAME, "SUPABASE_LIC_USER")
+            k_pass = keyring.get_password(SERVICE_NAME, "SUPABASE_LIC_PASSWORD")
+            if k_user:
+                user, password = k_user, k_pass
+        except Exception:
+            pass
+    return user, password
 
 # =========================================================
 # 🚀 IDENTIFICADOR DEL SOFTWARE
@@ -51,11 +88,15 @@ def obtener_hwid():
 
 def consultar_licencia_supabase(hwid):
     """Se conecta a Supabase y verifica el estado de TODAS las licencias asociadas a este HWID y Software"""
+    user, password = leer_credenciales_licencia()
+    if not user or not password:
+        return False, "Error: credenciales de licencias no configuradas. Ejecute 'guardar_credenciales.py'."
+
     try:
         conn = psycopg2.connect(
             dbname=SUPABASE_DB_NAME,
-            user=SUPABASE_USER,
-            password=SUPABASE_PASSWORD,
+            user=user,
+            password=password,
             host=SUPABASE_HOST,
             port=SUPABASE_PORT,
             connect_timeout=5

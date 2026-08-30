@@ -16,6 +16,14 @@ corregir_rls_licencias.sql
 .env
 .env.*
 
+# Salidas de build y datos generados por la app (NO subir)
+Archivo Exe/
+Cotizaciones/
+Pautas_Eventos/
+cartas_eventos/
+comprobantes_impuestos/
+formularios_proveedores/
+
 # Sistema
 .DS_Store
 Thumbs.db

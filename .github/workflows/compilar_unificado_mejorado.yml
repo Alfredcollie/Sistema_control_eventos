@@ -146,6 +146,8 @@ jobs:
         path: |
           dist/ControlEventos-Mac.zip
           dist/Instalador.Control.Eventos.dmg
+
+          
 ; Instalador de Windows (Inno Setup) para Control de Eventos
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"

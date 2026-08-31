@@ -447,7 +447,13 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
                 texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."
                 lineas_desc = wrap_texto_formato(texto_base, 11, DESC_MAX_WIDTH)
-                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(30, 16 + len(lineas_desc) * 13.0)})
+                tam_max = 11
+                for la in lineas_desc:
+                    for palabra, _n, _c, etam in la:
+                        if palabra.strip():
+                            tam_max = max(tam_max, etam)
+                espacio = max(13.0, tam_max * 1.28)
+                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(30, 16 + len(lineas_desc) * espacio), "espacio": espacio})
 
             for i, f in enumerate(filas_preparadas):
                 if bloques_items and bloques_items[-1]["nombre"] == f["categoria"]:
@@ -491,10 +497,11 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     c.rect(TABLE_LEFT, y_pos - f["altura"], TABLE_RIGHT - TABLE_LEFT, f["altura"], fill=1, stroke=0)
                     y_pos -= f["altura"]
                     n_lineas = len(f["lineas_desc"])
-                    y_renglon = y_pos + (f["altura"] / 2.0) + (13.0 * (n_lineas - 1)) / 2.0
+                    espacio = f.get("espacio", 13.0)
+                    y_renglon = y_pos + (f["altura"] / 2.0) + (espacio * (n_lineas - 1)) / 2.0
                     for linea_palabras in f["lineas_desc"]:
                         dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 11)
-                        y_renglon -= 13.0
+                        y_renglon -= espacio
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)
                     c.setFillColorRGB(0, 0, 0)

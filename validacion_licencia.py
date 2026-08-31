@@ -99,6 +99,7 @@ def consultar_licencia_supabase(hwid):
             password=password,
             host=SUPABASE_HOST,
             port=SUPABASE_PORT,
+            sslmode="require",
             connect_timeout=5
         )
         cursor = conn.cursor()

@@ -113,6 +113,7 @@ def inicializar_pool(silencioso=False):
                 database=cred["dbname"],
                 user=cred["user"],
                 password=cred["password"],
+                sslmode="require",
                 connect_timeout=10
             )
     except Exception as e:

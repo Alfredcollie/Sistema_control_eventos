@@ -1174,35 +1174,35 @@ class SistemaProveedores:
         var_e_cat = tk.StringVar(value=str(p[3]) if p[3] else "No seleccionada")
         lbl_e_cat = ctk.CTkLabel(f1, textvariable=var_e_cat, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat.grid(row=3, column=1, sticky="w", pady=8)
-        btn_sel_cat = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat))
+        btn_sel_cat = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat, v_edit))
         btn_sel_cat.grid(row=3, column=3, sticky="w", padx=15, pady=8)
 
         ctk.CTkLabel(f1, text="Categoría Adicional 2:", font=(familia_fuente, 12, "bold")).grid(row=4, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_2 = tk.StringVar(value=str(p[21]) if len(p)>21 and p[21] else "No seleccionada")
         lbl_e_cat_2 = ctk.CTkLabel(f1, textvariable=var_e_cat_2, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_2.grid(row=4, column=1, sticky="w", pady=8)
-        btn_sel_cat_2 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_2))
+        btn_sel_cat_2 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_2, v_edit))
         btn_sel_cat_2.grid(row=4, column=3, sticky="w", padx=15, pady=8)
 
         ctk.CTkLabel(f1, text="Categoría Adicional 3:", font=(familia_fuente, 12, "bold")).grid(row=5, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_3 = tk.StringVar(value=str(p[22]) if len(p)>22 and p[22] else "No seleccionada")
         lbl_e_cat_3 = ctk.CTkLabel(f1, textvariable=var_e_cat_3, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_3.grid(row=5, column=1, sticky="w", pady=8)
-        btn_sel_cat_3 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_3))
+        btn_sel_cat_3 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_3, v_edit))
         btn_sel_cat_3.grid(row=5, column=3, sticky="w", padx=15, pady=8)
 
         ctk.CTkLabel(f1, text="Categoría Adicional 4:", font=(familia_fuente, 12, "bold")).grid(row=6, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_4 = tk.StringVar(value=str(p[23]) if len(p)>23 and p[23] else "No seleccionada")
         lbl_e_cat_4 = ctk.CTkLabel(f1, textvariable=var_e_cat_4, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_4.grid(row=6, column=1, sticky="w", pady=8)
-        btn_sel_cat_4 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_4))
+        btn_sel_cat_4 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_4, v_edit))
         btn_sel_cat_4.grid(row=6, column=3, sticky="w", padx=15, pady=8)
 
         ctk.CTkLabel(f1, text="Categoría Adicional 5:", font=(familia_fuente, 12, "bold")).grid(row=7, column=0, sticky="w", padx=(20, 5), pady=8)
         var_e_cat_5 = tk.StringVar(value=str(p[24]) if len(p)>24 and p[24] else "No seleccionada")
         lbl_e_cat_5 = ctk.CTkLabel(f1, textvariable=var_e_cat_5, font=(familia_fuente, 12, "bold"), text_color="#1F85DE")
         lbl_e_cat_5.grid(row=7, column=1, sticky="w", pady=8)
-        btn_sel_cat_5 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_5))
+        btn_sel_cat_5 = ctk.CTkButton(f1, text="Gestionar", width=120, command=lambda: self.ventana_emergente_categorias(var_e_cat_5, v_edit))
         btn_sel_cat_5.grid(row=7, column=3, sticky="w", padx=15, pady=8)
 
         ctk.CTkLabel(f1, text="Descripción Proveedor:\n(Max 400 carac.)", font=(familia_fuente, 12, "bold")).grid(row=8, column=0, sticky="nw", padx=(20, 5), pady=12)
@@ -1427,11 +1427,17 @@ class SistemaProveedores:
         btn_actualizar = ctk.CTkButton(scroll_frame_e, text="💾 Guardar Cambios", font=("Arial", 14, "bold"), fg_color="#1f538d", hover_color="#163b65", width=250, height=40, command=ejecutar_update)
         btn_actualizar.pack(pady=20)
 
-    def ventana_emergente_categorias(self, variable_destino=None):
-        v_cat = ctk.CTkToplevel(self.root)
+    def ventana_emergente_categorias(self, variable_destino=None, parent=None):
+        ventana_padre = parent if parent is not None else self.root
+        v_cat = ctk.CTkToplevel(ventana_padre)
         v_cat.title("Categorías")
         v_cat.geometry("460x520")
-        v_cat.grab_set() 
+        if isinstance(ventana_padre, (tk.Toplevel, tk.Tk)):
+            try:
+                v_cat.transient(ventana_padre)
+            except Exception:
+                pass
+        v_cat.grab_set()
         v_cat.resizable(False, False)
         
         ctk.CTkLabel(v_cat, text="Gestione las categorías disponibles:", font=("Arial", 12, "bold")).pack(pady=10)
@@ -1520,17 +1526,49 @@ class SistemaProveedores:
                 finally:
                     liberar_conexion(conn)
 
+        def restaurar_ventana_padre():
+            # macOS (Apple Silicon): al destruir un Toplevel con grab_set, Tk a
+            # veces no devuelve el foco ni el z-order a la ventana que lo abrio.
+            if ventana_padre is None:
+                return
+            try:
+                if not ventana_padre.winfo_exists():
+                    return
+                if isinstance(ventana_padre, (tk.Toplevel, tk.Tk)):
+                    ventana_padre.lift()
+                    ventana_padre.grab_set()
+                    ventana_padre.focus_force()
+            except Exception:
+                pass
+
+        def cerrar_popup():
+            try:
+                v_cat.grab_release()
+            except Exception:
+                pass
+            try:
+                v_cat.destroy()
+            except Exception:
+                pass
+            try:
+                if isinstance(ventana_padre, (tk.Toplevel, tk.Tk)):
+                    ventana_padre.after(50, restaurar_ventana_padre)
+                else:
+                    restaurar_ventana_padre()
+            except Exception:
+                restaurar_ventana_padre()
+
         def seleccionar():
             if lista_box.curselection():
                 item = lista_box.get(lista_box.curselection())
                 if variable_destino: variable_destino.set(item)
                 else: self.var_cat.set(item)
-                v_cat.destroy()
+            cerrar_popup()
 
         def limpiar_seleccion():
             if variable_destino: variable_destino.set("No seleccionada")
             else: self.var_cat.set("No seleccionada")
-            v_cat.destroy()
+            cerrar_popup()
 
         btn_add = ctk.CTkButton(frame_ctrl, text="[ Agregar ]", width=80, command=agregar)
         btn_add.pack(side="left", padx=2)
@@ -1543,6 +1581,8 @@ class SistemaProveedores:
         
         btn_clear = ctk.CTkButton(v_cat, text="[ X ] Quitar / Dejar en Blanco", width=200, fg_color="#7f8c8d", hover_color="#606b6b", command=limpiar_seleccion)
         btn_clear.pack(pady=(0, 15))
+
+        v_cat.protocol("WM_DELETE_WINDOW", cerrar_popup)
 
 
 if __name__ == "__main__":

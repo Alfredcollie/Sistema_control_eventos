@@ -29,9 +29,8 @@ except Exception:
     RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
     ruta_recurso = lambda nombre: os.path.join(os.path.dirname(os.path.abspath(__file__)), nombre)
 
-_PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\])', re.IGNORECASE)
-
-_PATRON_MARCADORES = re.compile(r'\[[A-Za-z]+\d+\]', re.IGNORECASE)
+_PATRON_ETIQUETAS = re.compile(r'(\[B\]|\[/B\]|\[M\]|\[/M\]|\[S\d+\])', re.IGNORECASE)
+_PATRON_TAMANO = re.compile(r'\[S(\d+)\]', re.IGNORECASE)
 
 def hex_to_rgb(hex_color):
     try:
@@ -40,8 +39,8 @@ def hex_to_rgb(hex_color):
     except Exception:
         return (0.0, 0.0, 0.0)
 
-def parsear_segmentos_formato(texto):
-    resultado, negrita, color_p = [], False, False
+def parsear_segmentos_formato(texto, tam_defecto=11):
+    resultado, negrita, color_p, tamano = [], False, False, tam_defecto
     for parte in _PATRON_ETIQUETAS.split(str(texto)):
         p_up = parte.upper()
         if p_up == "[B]":
@@ -52,15 +51,19 @@ def parsear_segmentos_formato(texto):
             color_p = True
         elif p_up == "[/M]":
             color_p = False
+        elif p_up.startswith("[S") and p_up.endswith("]"):
+            m = _PATRON_TAMANO.match(parte)
+            if m:
+                try:
+                    tamano = max(6, min(48, int(m.group(1))))
+                except ValueError:
+                    pass
         elif parte:
-            resultado.append((parte, negrita, color_p))
+            resultado.append((parte, negrita, color_p, tamano))
     return resultado
 
 def texto_plano_sin_marcado(texto):
-    return _PATRON_ETIQUETAS.sub("", _PATRON_MARCADORES.sub(" ", str(texto)))
-
-def limpiar_marcadores(texto):
-    return _PATRON_MARCADORES.sub(" ", str(texto))
+    return _PATRON_ETIQUETAS.sub("", str(texto))
 
 def tamano_natural_puntos(ruta_imagen):
     """
@@ -118,7 +121,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             res_db = cursor.fetchone()
             if res_db:
                 cliente = str(res_db[0]).replace('{', '').replace('}', '').strip()
-                descripcion_proyecto = limpiar_marcadores(str(res_db[1]).replace('{', '').replace('}', '').strip())
+                descripcion_proyecto = str(res_db[1]).replace('{', '').replace('}', '').strip()
                 proyecto = str(res_db[2]).replace('{', '').replace('}', '').strip()
                 if len(res_db) > 3 and res_db[3] is not None and float(res_db[3]) > 0:
                     tipo_cambio_pdf = float(res_db[3])
@@ -236,20 +239,20 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 if not texto_plano_sin_marcado(parrafo).strip():
                     continue
                 tokens = []
-                for frag_texto, es_neg, es_col in parsear_segmentos_formato(parrafo):
+                for frag_texto, es_neg, es_col, es_tam in parsear_segmentos_formato(parrafo, tam):
                     partes = frag_texto.split(' ')
                     for idx, palabra in enumerate(partes):
                         if palabra:
-                            tokens.append((palabra, es_neg, es_col))
+                            tokens.append((palabra, es_neg, es_col, es_tam))
                         if idx < len(partes) - 1:
-                            tokens.append((' ', es_neg, es_col))
+                            tokens.append((' ', es_neg, es_col, es_tam))
                 linea_actual, ancho_actual = [], 0.0
-                for palabra, es_neg, es_col in tokens:
+                for palabra, es_neg, es_col, es_tam in tokens:
                     fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
-                    ancho_palabra = c.stringWidth(palabra, fuente_palabra, tam)
+                    ancho_palabra = c.stringWidth(palabra, fuente_palabra, es_tam)
                     if palabra == ' ':
                         if linea_actual:
-                            linea_actual.append((palabra, es_neg, es_col))
+                            linea_actual.append((palabra, es_neg, es_col, es_tam))
                             ancho_actual += ancho_palabra
                         continue
                     if ancho_actual + ancho_palabra > max_ancho and linea_actual:
@@ -257,7 +260,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                             linea_actual.pop()
                         lineas_finales.append(linea_actual)
                         linea_actual, ancho_actual = [], 0.0
-                    linea_actual.append((palabra, es_neg, es_col))
+                    linea_actual.append((palabra, es_neg, es_col, es_tam))
                     ancho_actual += ancho_palabra
                 while linea_actual and linea_actual[-1][0] == ' ':
                     linea_actual.pop()
@@ -267,7 +270,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
         def dibujar_linea_formateada(x, y, lista_palabras, tam):
             x_cursor = x
-            for palabra, es_neg, es_col in lista_palabras:
+            for palabra, es_neg, es_col, es_tam in lista_palabras:
                 fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
                 if es_col:
                     c.setFillColorRGB(*rgb_primario)
@@ -275,15 +278,15 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     c.setFillColorRGB(*rgb_secundario)
                 else:
                     c.setFillColorRGB(0.25, 0.25, 0.25)
-                c.setFont(fuente_palabra, tam)
+                c.setFont(fuente_palabra, es_tam)
                 c.drawString(x_cursor, y, palabra)
-                x_cursor += c.stringWidth(palabra, fuente_palabra, tam)
+                x_cursor += c.stringWidth(palabra, fuente_palabra, es_tam)
 
         def dibujar_linea_formateada_centrada(cx, y, lista_palabras, tam):
             ancho_total = 0.0
-            for palabra, es_neg, es_col in lista_palabras:
+            for palabra, es_neg, es_col, es_tam in lista_palabras:
                 fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
-                ancho_total += c.stringWidth(palabra, fuente_palabra, tam)
+                ancho_total += c.stringWidth(palabra, fuente_palabra, es_tam)
             x = cx - ancho_total / 2.0
             dibujar_linea_formateada(x, y, lista_palabras, tam)
 
@@ -388,7 +391,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
         altura_fila_superior = max(17 + 11 * len(lv) for _, lv in cols)
 
-        lineas_desc = wrap_text(str(descripcion_proyecto), "Helvetica", 9, CONTENIDO_W)[:2]
+        lineas_desc = wrap_text(texto_plano_sin_marcado(descripcion_proyecto), "Helvetica", 9, CONTENIDO_W)[:2]
         altura_desc = 17 + 11 * len(lineas_desc)
 
         altura_total = altura_fila_superior + 12 + altura_desc
@@ -439,12 +442,12 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 cat_sum = str(r[2]).strip().upper() if len(r) > 2 and r[2] else "SUMINISTRO"
                 prov_nom = str(r[3]).strip() if len(r) > 3 and r[3] else "Proveedor"
                 precio_final_venta = float(r[8]) if len(r) > 8 and r[8] else 0.0
-                nota_solicitud = limpiar_marcadores(str(r[9]).strip()) if len(r) > 9 and r[9] else ""
+                nota_solicitud = str(r[9]).strip() if len(r) > 9 and r[9] else ""
                 cant_item = int(r[10]) if len(r) > 10 and r[10] else 1
                 p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
                 texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."
-                lineas_desc = wrap_texto_formato(texto_base, 8.5, DESC_MAX_WIDTH)
-                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(28, 15 + len(lineas_desc) * 10.5)})
+                lineas_desc = wrap_texto_formato(texto_base, 11, DESC_MAX_WIDTH)
+                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(30, 16 + len(lineas_desc) * 13.0)})
 
             for i, f in enumerate(filas_preparadas):
                 if bloques_items and bloques_items[-1]["nombre"] == f["categoria"]:
@@ -488,10 +491,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     c.rect(TABLE_LEFT, y_pos - f["altura"], TABLE_RIGHT - TABLE_LEFT, f["altura"], fill=1, stroke=0)
                     y_pos -= f["altura"]
                     n_lineas = len(f["lineas_desc"])
-                    y_renglon = y_pos + (f["altura"] / 2.0) + (10.5 * (n_lineas - 1)) / 2.0
+                    y_renglon = y_pos + (f["altura"] / 2.0) + (13.0 * (n_lineas - 1)) / 2.0
                     for linea_palabras in f["lineas_desc"]:
-                        dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 8.5)
-                        y_renglon -= 10.5
+                        dibujar_linea_formateada(DESC_X, y_renglon, linea_palabras, 11)
+                        y_renglon -= 13.0
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)
                     c.setFillColorRGB(0, 0, 0)

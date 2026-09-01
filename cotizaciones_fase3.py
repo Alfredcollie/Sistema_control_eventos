@@ -229,6 +229,38 @@ def crear_barra_formato(parent, text_widget):
     inner_text._memoria_bloqueada = False
     inner_text._tam_fuente = 11
 
+    # --- Indicador numérico de tamaño de letra ---
+    lbl_tam = ctk.CTkLabel(f_barra, text="11", width=34, height=25, font=("Helvetica", 12, "bold"), fg_color="#f2f2f2", text_color="black", corner_radius=5)
+    lbl_tam.pack(side="left", padx=2)
+    inner_text._hover_tam = False
+
+    def tam_en_cursor():
+        try:
+            s, e = _obtener_seleccion(inner_text)
+            if s and e:
+                return _tamano_en_indice(inner_text, s, 11)
+            return _tamano_en_indice(inner_text, "insert", 11)
+        except Exception:
+            return 11
+
+    def actualizar_indicador(*_):
+        try:
+            lbl_tam.configure(text=str(tam_en_cursor()))
+        except Exception:
+            pass
+
+    def actualizar_indicador_hover(event):
+        try:
+            inner_text._hover_tam = True
+            idx = inner_text.index(f"@{event.x},{event.y}")
+            lbl_tam.configure(text=str(_tamano_en_indice(inner_text, idx, 11)))
+        except Exception:
+            pass
+
+    def salir_hover(_):
+        inner_text._hover_tam = False
+        actualizar_indicador()
+
     def rastreador_mac():
         try:
             if not inner_text.winfo_exists(): return
@@ -238,6 +270,8 @@ def crear_barra_formato(parent, text_widget):
                 inner_text._memoria_blindada = None
         except Exception:
             pass
+        if not getattr(inner_text, "_hover_tam", False):
+            actualizar_indicador()
         inner_text.after(50, rastreador_mac)
 
     rastreador_mac()
@@ -267,6 +301,7 @@ def crear_barra_formato(parent, text_widget):
                     _aplicar_fuente_rango(inner_text, rs, re_, objetivo, tam)
             inner_text.tag_add(tk.SEL, s, e)
             inner_text._memoria_blindada = None
+            actualizar_indicador()
         except Exception:
             pass
         inner_text.focus_set()
@@ -318,6 +353,12 @@ def crear_barra_formato(parent, text_widget):
     inner_text.bind("<Command-m>", lambda e: alternar_formato("color"))
     inner_text.bind("<Control-b>", lambda e: alternar_formato("bold"))
     inner_text.bind("<Control-m>", lambda e: alternar_formato("color"))
+
+    inner_text.bind("<KeyRelease>", actualizar_indicador, add="+")
+    inner_text.bind("<KeyPress>", actualizar_indicador, add="+")
+    inner_text.bind("<ButtonRelease-1>", actualizar_indicador, add="+")
+    inner_text.bind("<Motion>", actualizar_indicador_hover, add="+")
+    inner_text.bind("<Leave>", salir_hover, add="+")
     
     configurar_tags_formato(text_widget, tam=11)
     

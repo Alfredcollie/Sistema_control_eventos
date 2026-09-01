@@ -38,6 +38,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] conexion_supabase: %(message)s"
 )
 
+# Registrar también en un archivo (útil en apps empaquetadas sin consola,
+# por ejemplo macOS). El log queda en la carpeta de datos del usuario.
+try:
+    from app_paths import obtener_directorio_datos_usuario
+    _log_dir = obtener_directorio_datos_usuario()
+    _fh = logging.FileHandler(os.path.join(_log_dir, "conexion_supabase.log"), encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception:
+    pass
+
 # Variable global para el Pool de conexiones
 _connection_pool = None
 
@@ -97,14 +108,16 @@ def inicializar_pool(silencioso=False):
         if _connection_pool is None:
             cred = leer_credenciales()
             if not cred["host"] or not cred["user"] or not cred["password"]:
-                if not silencioso:
-                    logging.warning(
-                        "No hay credenciales válidas para conectar a Supabase. "
-                        "Configúralas con 'guardar_credenciales.py' o mediante las "
-                        "variables de entorno SUPABASE_DB_USER / SUPABASE_DB_PASSWORD."
-                    )
+                logging.warning(
+                    "No hay credenciales válidas. host=%r user=%r pwd_len=%d",
+                    cred["host"], cred["user"], len(cred["password"] or ""),
+                )
                 return
             
+            logging.info(
+                "Conectando a host=%r port=%r db=%r user=%r pwd_len=%d",
+                cred["host"], cred["port"], cred["dbname"], cred["user"], len(cred["password"] or ""),
+            )
             _connection_pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
                 maxconn=15,
@@ -117,8 +130,7 @@ def inicializar_pool(silencioso=False):
                 connect_timeout=10
             )
     except Exception as e:
-        if not silencioso:
-            logging.error(f"Error inicializando el Pool de Conexiones: {e}")
+        logging.error(f"Error inicializando el Pool de Conexiones: {type(e).__name__}: {e}")
 
 
 def conectar_db(silencioso=False):

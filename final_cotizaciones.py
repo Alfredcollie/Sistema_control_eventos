@@ -237,6 +237,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             lineas_finales = []
             for parrafo in str(texto).replace('\r', '').split('\n'):
                 if not texto_plano_sin_marcado(parrafo).strip():
+                    lineas_finales.append([])  # línea en blanco: respeta el salto de línea
                     continue
                 tokens = []
                 for frag_texto, es_neg, es_col, es_tam in parsear_segmentos_formato(parrafo, tam):
@@ -436,14 +437,14 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         dibujar_encabezado_tabla(y_pos)
 
         try:
-            cursor.execute("SELECT * FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (codigo_cotizacion,))
+            cursor.execute("SELECT categoria_suministro, proveedor_nombre, precio_final_venta, notes_negociacion, cantidad FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (codigo_cotizacion,))
             filas_preparadas, bloques_items = [], []
             for r in cursor.fetchall():
-                cat_sum = str(r[2]).strip().upper() if len(r) > 2 and r[2] else "SUMINISTRO"
-                prov_nom = str(r[3]).strip() if len(r) > 3 and r[3] else "Proveedor"
-                precio_final_venta = float(r[8]) if len(r) > 8 and r[8] else 0.0
-                nota_solicitud = str(r[9]).strip() if len(r) > 9 and r[9] else ""
-                cant_item = int(r[10]) if len(r) > 10 and r[10] else 1
+                cat_sum = str(r[0]).strip().upper() if len(r) > 0 and r[0] else "SUMINISTRO"
+                prov_nom = str(r[1]).strip() if len(r) > 1 and r[1] else "Proveedor"
+                precio_final_venta = float(r[2]) if len(r) > 2 and r[2] else 0.0
+                nota_solicitud = str(r[3]).strip() if len(r) > 3 and r[3] else ""
+                cant_item = int(r[4]) if len(r) > 4 and r[4] else 1
                 p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
                 texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."
                 lineas_desc = wrap_texto_formato(texto_base, 11, DESC_MAX_WIDTH)

@@ -39,6 +39,18 @@ def leer_credenciales_licencia():
     user = config.get("supabase_lic_user")
     password = config.get("supabase_lic_password")
 
+    # Si el config empaquetado trae credenciales válidas, limpia el llavero
+    # para que entradas viejas no pisen las correctas.
+    if user and password and keyring is not None:
+        try:
+            for _k in ("SUPABASE_LIC_USER", "SUPABASE_LIC_PASSWORD"):
+                try:
+                    keyring.delete_password(SERVICE_NAME, _k)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # Variables de entorno
     user = os.environ.get("SUPABASE_LIC_USER") or user
     password = os.environ.get("SUPABASE_LIC_PASSWORD") or password

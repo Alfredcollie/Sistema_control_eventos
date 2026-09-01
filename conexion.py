@@ -72,6 +72,18 @@ def leer_credenciales():
     user = config.get("supabase_db_user")
     password = config.get("supabase_db_password")
 
+    # Si el config empaquetado ya trae credenciales válidas (build con secretos),
+    # limpia el llavero del sistema para que entradas viejas no pisen las correctas.
+    if user and password and keyring is not None:
+        try:
+            for _k in ("SUPABASE_DB_HOST", "SUPABASE_DB_PORT", "SUPABASE_DB_NAME", "SUPABASE_DB_USER", "SUPABASE_DB_PASSWORD"):
+                try:
+                    keyring.delete_password(SERVICE_NAME, _k)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # Variables de entorno tienen prioridad sobre el config empaquetado
     host = os.environ.get("SUPABASE_DB_HOST") or host
     port = os.environ.get("SUPABASE_DB_PORT") or port

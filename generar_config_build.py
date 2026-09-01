@@ -31,17 +31,20 @@ def main():
     with open(BASE, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    inyectados = []
+    detalle = []
     for clave, env in SECRETOS.items():
         valor = os.environ.get(env)
         if valor:
             config[clave] = valor
-            inyectados.append(clave)
+            if "user" in clave:
+                detalle.append(f"{clave}=len{len(valor)}:{valor[:3]}...{valor[-3:]}")
+            else:
+                detalle.append(f"{clave}=len{len(valor)}")
 
     with open(BASE, "w", encoding="utf-8") as f:
         json.dump(config, f, ensure_ascii=False, indent=4)
 
-    print("config_local.json generado. Secretos inyectados: " + (", ".join(inyectados) if inyectados else "(ninguno)"))
+    print("config_local.json generado. Detalle: " + (", ".join(detalle) if detalle else "(ninguno)"))
 
 
 if __name__ == "__main__":

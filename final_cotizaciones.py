@@ -452,8 +452,8 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     for palabra, _n, _c, etam in la:
                         if palabra.strip():
                             tam_max = max(tam_max, etam)
-                espacio = max(13.0, tam_max * 1.28)
-                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(30, 16 + len(lineas_desc) * espacio), "espacio": espacio})
+                espacio = max(13.0, tam_max * 1.5)
+                filas_preparadas.append({"categoria": cat_sum, "lineas_desc": lineas_desc, "precio": precio_final_venta, "p_unitario": p_unitario, "cantidad": cant_item, "altura": max(34, 24 + len(lineas_desc) * espacio), "espacio": espacio})
 
             for i, f in enumerate(filas_preparadas):
                 if bloques_items and bloques_items[-1]["nombre"] == f["categoria"]:

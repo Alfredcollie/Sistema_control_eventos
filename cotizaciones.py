@@ -1040,21 +1040,28 @@ class VentanaCotizaciones:
             return
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT nombre_empresa, nombre_evento, descripcion, status, fecha_evento, locacion_evento FROM cotizaciones WHERE id = %s", (id_cot,))
+            for _sql_alt in (
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
+            ):
+                try:
+                    cursor.execute(_sql_alt)
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+            cursor.execute("SELECT nombre_empresa, nombre_evento, descripcion, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE id = %s", (id_cot,))
             orig = cursor.fetchone()
             if orig:
-                empresa, evento, desc, status, f_evento, locacion = orig
+                empresa, evento, desc, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee = orig
                 nuevo_codigo = generar_nueva_version_evento_existente(conn, codigo_actual)
                 fecha_registro = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 
-                cursor.execute("INSERT INTO cotizaciones (codigo_cotizacion, nombre_empresa, nombre_evento, descripcion, fecha_registro, status, fecha_evento, locacion_evento) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                               (nuevo_codigo, empresa, evento, desc, fecha_registro, status, f_evento, locacion))
-                cursor.execute("INSERT INTO cotizacion_detalles (codigo_cotizacion, categoria_suministro, cantidad) SELECT %s, categoria_suministro, cantidad FROM cotizacion_detalles WHERE codigo_cotizacion = %s", (nuevo_codigo, codigo_actual))
-                try:
-                    cursor.execute("INSERT INTO cotizacion_proveedores (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, cantidad, dias_credito) SELECT %s, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, cantidad, dias_credito FROM cotizacion_proveedores WHERE codigo_cotizacion = %s", (nuevo_codigo, codigo_actual))
-                except Exception:
-                    pass
-                    
+                cursor.execute("INSERT INTO cotizaciones (codigo_cotizacion, nombre_empresa, nombre_evento, descripcion, fecha_registro, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                               (nuevo_codigo, empresa, evento, desc, fecha_registro, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee))
+                cursor.execute("INSERT INTO cotizacion_detalles (codigo_cotizacion, categoria_suministro, cantidad) SELECT %s, categoria_suministro, cantidad FROM cotizacion_detalles WHERE codigo_cotizacion = %s ORDER BY id ASC", (nuevo_codigo, codigo_actual))
+                cursor.execute("INSERT INTO cotizacion_proveedores (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito) SELECT %s, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (nuevo_codigo, codigo_actual))
                 conn.commit()
                 cache_sistema.invalidar()
                 registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Clonó la cotización {codigo_actual} generando la versión {nuevo_codigo}")

@@ -103,7 +103,7 @@ def _negrita_en_indice(inner, idx):
     return False
 
 
-def _tamano_en_indice(inner, idx, defecto=11):
+def _tamano_en_indice(inner, idx, defecto=9):
     for t in inner.tag_names(idx):
         if t.startswith("f_b_") or t.startswith("f_n_"):
             try:
@@ -156,7 +156,7 @@ def _runs_estilo(inner, s, e):
     return runs
 
 
-def parsear_segmentos_formato(texto, tam_defecto=11):
+def parsear_segmentos_formato(texto, tam_defecto=9):
     resultado = []
     negrita, color_p, tamano = False, False, tam_defecto
     for parte in _PATRON_FORMATO.split(str(texto)):
@@ -227,7 +227,7 @@ def crear_barra_formato(parent, text_widget):
     inner_text = text_widget._textbox if hasattr(text_widget, "_textbox") else text_widget
     inner_text._memoria_blindada = None
     inner_text._memoria_bloqueada = False
-    inner_text._tam_fuente = 11
+    inner_text._tam_fuente = 9
 
     # --- Indicador numérico de tamaño de letra ---
     lbl_tam = ctk.CTkLabel(f_barra, text="11", width=34, height=25, font=("Helvetica", 12, "bold"), fg_color="#f2f2f2", text_color="black", corner_radius=5)
@@ -238,8 +238,8 @@ def crear_barra_formato(parent, text_widget):
         try:
             s, e = _obtener_seleccion(inner_text)
             if s and e:
-                return _tamano_en_indice(inner_text, s, 11)
-            return _tamano_en_indice(inner_text, "insert", 11)
+                return _tamano_en_indice(inner_text, s, 9)
+            return _tamano_en_indice(inner_text, "insert", 9)
         except Exception:
             return 11
 
@@ -253,7 +253,7 @@ def crear_barra_formato(parent, text_widget):
         try:
             inner_text._hover_tam = True
             idx = inner_text.index(f"@{event.x},{event.y}")
-            lbl_tam.configure(text=str(_tamano_en_indice(inner_text, idx, 11)))
+            lbl_tam.configure(text=str(_tamano_en_indice(inner_text, idx, 9)))
         except Exception:
             pass
 
@@ -354,13 +354,11 @@ def crear_barra_formato(parent, text_widget):
     inner_text.bind("<Control-b>", lambda e: alternar_formato("bold"))
     inner_text.bind("<Control-m>", lambda e: alternar_formato("color"))
 
-    inner_text.bind("<KeyRelease>", actualizar_indicador, add="+")
-    inner_text.bind("<KeyPress>", actualizar_indicador, add="+")
     inner_text.bind("<ButtonRelease-1>", actualizar_indicador, add="+")
     inner_text.bind("<Motion>", actualizar_indicador_hover, add="+")
     inner_text.bind("<Leave>", salir_hover, add="+")
     
-    configurar_tags_formato(text_widget, tam=11)
+    configurar_tags_formato(text_widget, tam=9)
     
     return f_barra
 
@@ -371,7 +369,7 @@ def configurar_tags_formato(txt_widget, tam=10):
     inner.tag_raise("color")
 
 
-def obtener_tamano_nota(texto, defecto=10):
+def obtener_tamano_nota(texto, defecto=9):
     """Devuelve el tamaño máximo guardado en la nota ([S<n>]); si no hay, el defecto."""
     try:
         tamanos = [int(x) for x in _PATRON_TAMANO.findall(str(texto))]
@@ -382,7 +380,7 @@ def obtener_tamano_nota(texto, defecto=10):
     return max(6, min(48, max(tamanos)))
 
 
-def insertar_texto_formateado(txt_widget, texto, tam_defecto=11):
+def insertar_texto_formateado(txt_widget, texto, tam_defecto=9):
     inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
     inner.tag_configure("color", foreground=COLOR_PRIMARIO)
     inner.delete("1.0", tk.END)
@@ -563,7 +561,7 @@ class VentanaEtapaProveedores:
         self.v_prov = ctk.CTkToplevel(self.root)
         self.v_prov.title(f"Etapa 3: Matriz de Costos - Cotización: {self.codigo_cot}")
         self.v_prov.geometry("1200x780")
-        self.v_prov.grab_set()
+        # Sin grab_set: permite dejar abierta esta cotización y abrir/editar otra a la vez.
         self.v_prov.after(100, lambda: maximizar_ventana(self.v_prov))
         self.v_prov.protocol("WM_DELETE_WINDOW", self._cerrar_ventana)
 
@@ -713,7 +711,7 @@ class VentanaEtapaProveedores:
         f_header_nc = ctk.CTkFrame(f_nc, fg_color="transparent")
         f_header_nc.pack(fill="x", side="top", pady=(0, 2))
         ctk.CTkLabel(f_header_nc, text="Notas al Cliente (PDF/Excel):", font=("Arial", 11, "bold")).pack(side="left", anchor="w")
-        self.txt_p_notes = ctk.CTkTextbox(f_nc, width=280, height=100, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
+        self.txt_p_notes = ctk.CTkTextbox(f_nc, width=280, height=100, font=("Helvetica", 9), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         f_estilos = crear_barra_formato(f_header_nc, self.txt_p_notes)
         f_estilos.pack(side="right", anchor="e")
         self.txt_p_notes.pack(fill="both", expand=True, side="top")
@@ -721,7 +719,7 @@ class VentanaEtapaProveedores:
         f_ni = ctk.CTkFrame(f_notas_wrapper, fg_color="transparent")
         f_ni.pack(side="left", fill="both", expand=True, padx=(10, 0))
         ctk.CTkLabel(f_ni, text="Notas Internas (Solo Matriz):", font=("Arial", 11, "bold"), text_color="#D32F2F").pack(anchor="w", pady=(0, 2))
-        self.txt_internal_notes = ctk.CTkTextbox(f_ni, width=280, height=100, font=("Helvetica", 11), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+        self.txt_internal_notes = ctk.CTkTextbox(f_ni, width=280, height=100, font=("Helvetica", 9), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
         self.txt_internal_notes.pack(fill="both", expand=True, side="top")
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
@@ -796,6 +794,7 @@ class VentanaEtapaProveedores:
         self.btn_toggle_vista.pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="[ Editar ] Costo/Margen", width=150, fg_color="#f39c12", hover_color="#e67e22", command=self.modificar_proveedor_matriz).pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="[ X ] Retirar Ítem", width=120, fg_color="#D32F2F", hover_color="#B71C1C", command=self.retirar_proveedor_matriz).pack(side="left", padx=5)
+        ctk.CTkButton(self.f_b_matriz, text="[ Duplicar ] Ítem", width=120, fg_color="#1F6AA5", hover_color="#154360", command=self.duplicar_proveedor_matriz).pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="▲ Subir", width=70, fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: self.mover_renglon_matriz("ARRIBA")).pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="▼ Bajar", width=70, fg_color="#e0e0e0", text_color="black", hover_color="#c8c8c8", command=lambda: self.mover_renglon_matriz("ABAJO")).pack(side="left", padx=5)
         ctk.CTkButton(self.f_b_matriz, text="[ OK ] Finalizar Matriz", width=150, command=self._cerrar_ventana).pack(side="right", padx=5)
@@ -1400,6 +1399,90 @@ class VentanaEtapaProveedores:
                 return
             self.cargar_grid_proveedores()
 
+    def _renumerar_filas(self):
+        for idx, f_row in enumerate(self.lista_widgets_filas):
+            try:
+                lbl = getattr(f_row, "lbl_num", None)
+                if lbl is not None:
+                    lbl.configure(text=str(idx + 1))
+            except Exception:
+                pass
+
+    def eliminar_item(self, id_item):
+        if not self.conn:
+            return
+        if not messagebox.askyesno("Confirmar", "¿Eliminar este ítem?", parent=self.v_prov):
+            return
+        try:
+            c = self.conn.cursor()
+            c.execute("DELETE FROM cotizacion_proveedores WHERE id=%s", (id_item,))
+            self.conn.commit()
+            cache_sistema.invalidar()
+            registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Eliminó ítem de la Cotización N° {self.codigo_cot}")
+        except Exception as e:
+            self.conn.rollback()
+            messagebox.showerror("Error", f"No se pudo eliminar:\n{e}", parent=self.v_prov)
+            return
+        try:
+            idx = next(i for i, w in enumerate(self.lista_widgets_filas) if w.data_pack[0] == id_item)
+            f_row = self.lista_widgets_filas.pop(idx)
+            antes = getattr(self, "_reconstruyendo_grid", False)
+            self._reconstruyendo_grid = True
+            try:
+                f_row.destroy()
+            finally:
+                self._reconstruyendo_grid = antes
+            self._posicionar_filas()
+            self._renumerar_filas()
+        except Exception:
+            self.cargar_grid_proveedores()
+        self.actualizar_bloque_totales_pantalla()
+
+    def duplicar_proveedor_matriz(self):
+        if not self.conn:
+            return
+        if not self.fila_matriz_seleccionada:
+            messagebox.showwarning("Advertencia", "Seleccione una fila de la matriz primero.", parent=self.v_prov)
+            return
+        id_mat = self.fila_matriz_seleccionada[0]
+        if not messagebox.askyesno("Confirmar", "¿Duplicar este ítem completo?", parent=self.v_prov):
+            return
+        try:
+            c = self.conn.cursor()
+            c.execute("""SELECT categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito 
+                         FROM cotizacion_proveedores WHERE id=%s""", (id_mat,))
+            fila = c.fetchone()
+            if not fila:
+                return
+            c.execute("""INSERT INTO cotizacion_proveedores 
+                (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito) 
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) 
+                RETURNING id""", (self.codigo_cot,) + tuple(fila))
+            nuevo_id = c.fetchone()[0]
+            self.conn.commit()
+            cache_sistema.invalidar()
+            registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Duplicó ítem en la Cotización N° {self.codigo_cot}")
+
+            # Colocar la copia justo debajo del ítem original (no al final).
+            c.execute("SELECT id FROM cotizacion_proveedores WHERE codigo_cotizacion=%s ORDER BY id ASC", (self.codigo_cot,))
+            ids = [r[0] for r in c.fetchall()]
+            pos_orig = ids.index(id_mat)
+            pos_dup = ids.index(nuevo_id)
+            rec_dup = nuevo_id
+            while pos_dup > pos_orig + 1:
+                id_arriba = ids[pos_dup - 1]
+                self._intercambiar_datos(id_arriba, rec_dup, c)
+                rec_dup = id_arriba
+                pos_dup -= 1
+            self.conn.commit()
+            cache_sistema.invalidar()
+            nuevo_id = rec_dup
+        except Exception as e:
+            self.conn.rollback()
+            messagebox.showerror("Error", f"No se pudo duplicar el ítem:\n{e}", parent=self.v_prov)
+            return
+        self.cargar_grid_proveedores(id_a_seleccionar=nuevo_id)
+
     def modificar_proveedor_matriz(self):
         if not self.conn:
             return
@@ -1448,14 +1531,14 @@ class VentanaEtapaProveedores:
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
         ctk.CTkLabel(f_m_header, text="Notas al Cliente:", font=("Arial", 12, "bold")).pack(side="left")
         
-        txt_m_notas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 11), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
+        txt_m_notas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 9), fg_color="#ffffff", text_color="#000000", border_width=1, border_color="#cccccc", corner_radius=5, wrap="word")
         f_barra = crear_barra_formato(f_m_header, txt_m_notas)
         f_barra.pack(side="right")
         txt_m_notas.pack(fill="x", padx=10, pady=2)
         insertar_texto_formateado(txt_m_notas, str(datos[4]) if datos[4] else "")
 
         ctk.CTkLabel(f_m, text="Notas Internas (Solo Matriz):", font=("Arial", 12, "bold"), text_color="#D32F2F").pack(anchor="w", padx=10, pady=(10, 2))
-        txt_m_notas_internas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 11), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+        txt_m_notas_internas = ctk.CTkTextbox(f_m, width=500, height=80, font=("Helvetica", 9), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
         txt_m_notas_internas.pack(fill="x", padx=10, pady=2)
         txt_m_notas_internas.insert("1.0", str(datos[5]) if datos[5] else "")
 
@@ -1496,6 +1579,92 @@ class VentanaEtapaProveedores:
             cursor.execute(query, d2 + (id1,))
             cursor.execute(query, d1 + (id2,))
 
+    def _posicionar_filas(self):
+        try:
+            for f in self.lista_widgets_filas:
+                f.pack_forget()
+            for f in self.lista_widgets_filas:
+                f.pack(fill="x", pady=2)
+        except Exception:
+            pass
+
+    def _intercambiar_filas_ui(self, idx_a, idx_b):
+        if idx_a < 0 or idx_b < 0 or idx_a >= len(self.lista_widgets_filas) or idx_b >= len(self.lista_widgets_filas):
+            return
+        fa = self.lista_widgets_filas[idx_a]
+        fb = self.lista_widgets_filas[idx_b]
+        ida = fa.data_pack[0]
+        idb = fb.data_pack[0]
+        self.lista_widgets_filas[idx_a], self.lista_widgets_filas[idx_b] = fb, fa
+        fa.data_pack = (idb,) + tuple(fa.data_pack[1:])
+        fb.data_pack = (ida,) + tuple(fb.data_pack[1:])
+        self._posicionar_filas()
+
+    def _marcar_fila(self, f_row):
+        try:
+            for child in self.f_rows_dinamicas.winfo_children():
+                child.configure(fg_color="#ffffff", border_color="#e0e0e0", border_width=1)
+                for sub in child.winfo_children():
+                    if isinstance(sub, ctk.CTkTextbox):
+                        if "FFFDE7" in sub.cget("fg_color"): continue
+                        sub.configure(fg_color="#ffffff")
+            f_row.configure(fg_color="#cfe2ff")
+            for sub in f_row.winfo_children():
+                if isinstance(sub, ctk.CTkTextbox):
+                    if "FFFDE7" in sub.cget("fg_color"): continue
+                    sub.configure(fg_color="#cfe2ff")
+            self.fila_matriz_seleccionada = f_row.data_pack
+        except Exception:
+            pass
+
+    def _guardar_nota(self, f_row, txt_widget, campo):
+        try:
+            if getattr(self, "_reconstruyendo_grid", True):
+                return
+            if not txt_widget.winfo_exists():
+                return
+            if not getattr(txt_widget, "_nota_modificada", False):
+                return
+            id_actual = f_row.data_pack[0]
+            if campo == "notes_negociacion":
+                contenido = extraer_texto_con_formato(txt_widget).strip()
+            else:
+                contenido = txt_widget.get("1.0", tk.END).strip()
+            cont = self.conn.cursor()
+            cont.execute(f"UPDATE cotizacion_proveedores SET {campo}=%s WHERE id=%s", (contenido, id_actual))
+            self.conn.commit()
+            txt_widget._nota_modificada = False
+            cache_sistema.invalidar()
+        except Exception:
+            pass
+
+    def _conectar_autoguardado(self, txt_widget, f_row, campo):
+        txt_widget._nota_modificada = False
+        txt_widget._save_job = None
+
+        def guardar(*_):
+            if not getattr(txt_widget, "_nota_modificada", False):
+                return
+            self._guardar_nota(f_row, txt_widget, campo)
+
+        def marcar_modificado(*_):
+            try:
+                if getattr(self, "_reconstruyendo_grid", False):
+                    return
+                txt_widget._nota_modificada = True
+                if txt_widget._save_job is not None:
+                    try:
+                        self.root.after_cancel(txt_widget._save_job)
+                    except Exception:
+                        pass
+                txt_widget._save_job = self.root.after(900, guardar)
+            except Exception:
+                pass
+
+        inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+        inner.bind("<FocusOut>", lambda e: guardar(), add="+")
+        inner.bind("<KeyRelease>", marcar_modificado, add="+")
+
     def _reordenar_items(self, start_idx, target_idx):
         if not self.conn: return
         c = self.conn.cursor()
@@ -1505,25 +1674,28 @@ class VentanaEtapaProveedores:
                     id1 = self.lista_widgets_filas[i].data_pack[0]
                     id2 = self.lista_widgets_filas[i+1].data_pack[0]
                     self._intercambiar_datos(id1, id2, c)
+                    self._intercambiar_filas_ui(i, i+1)
             else:
                 for i in range(start_idx, target_idx, -1):
                     id1 = self.lista_widgets_filas[i].data_pack[0]
                     id2 = self.lista_widgets_filas[i-1].data_pack[0]
                     self._intercambiar_datos(id1, id2, c)
+                    self._intercambiar_filas_ui(i, i-1)
             self.conn.commit()
             cache_sistema.invalidar()
-            id_dest = self.lista_widgets_filas[target_idx].data_pack[0]
-            self.cargar_grid_proveedores(id_a_seleccionar=id_dest)
+            self._marcar_fila(self.lista_widgets_filas[target_idx])
         except Exception as e:
             self.conn.rollback()
             print("Error Drag&Drop:", e)
             self.cargar_grid_proveedores()
 
-    def _iniciar_arrastre(self, event, idx):
+    def _iniciar_arrastre(self, event, f_row):
+        try:
+            idx = self.lista_widgets_filas.index(f_row)
+        except ValueError:
+            return
         self._drag_start_index = idx
-        if idx < len(self.lista_widgets_filas):
-            f_row = self.lista_widgets_filas[idx]
-            f_row.configure(border_color=COLOR_PRIMARIO, border_width=2)
+        f_row.configure(border_color=COLOR_PRIMARIO, border_width=2)
 
     def _en_arrastre(self, event):
         self.v_prov.config(cursor="fleur")
@@ -1566,8 +1738,12 @@ class VentanaEtapaProveedores:
     def cargar_grid_proveedores(self, id_a_seleccionar=None):
         if not self.conn:
             return
-        for widget in self.f_rows_dinamicas.winfo_children():
-            widget.destroy()
+        self._reconstruyendo_grid = True
+        try:
+            for widget in self.f_rows_dinamicas.winfo_children():
+                widget.destroy()
+        finally:
+            self._reconstruyendo_grid = False
         self.fila_matriz_seleccionada = None
         self.lista_widgets_filas = []
         c = self.conn.cursor()
@@ -1590,30 +1766,14 @@ class VentanaEtapaProveedores:
             f_row.data_pack = data_pack
             self.lista_widgets_filas.append(f_row)
             
-            row_idx = len(self.lista_widgets_filas) - 1
-
             def bind_drag(w):
-                w.bind("<ButtonPress-1>", lambda e, idx=row_idx: self._iniciar_arrastre(e, idx), add="+")
+                w.bind("<ButtonPress-1>", lambda e, f=f_row: self._iniciar_arrastre(e, f), add="+")
                 w.bind("<B1-Motion>", self._en_arrastre, add="+")
                 w.bind("<ButtonRelease-1>", self._soltar_arrastre, add="+")
 
             bind_drag(f_row)
 
-            def marcar_seleccion_f(event, f=f_row, d=data_pack):
-                for child in self.f_rows_dinamicas.winfo_children():
-                    child.configure(fg_color="#ffffff", border_color="#e0e0e0", border_width=1)
-                    for sub in child.winfo_children():
-                        if isinstance(sub, ctk.CTkTextbox):
-                            if "FFFDE7" in sub.cget("fg_color"): continue 
-                            sub.configure(fg_color="#ffffff")
-                f.configure(fg_color="#cfe2ff")
-                for sub in f.winfo_children():
-                    if isinstance(sub, ctk.CTkTextbox):
-                        if "FFFDE7" in sub.cget("fg_color"): continue 
-                        sub.configure(fg_color="#cfe2ff")
-                self.fila_matriz_seleccionada = d
-
-            f_row.bind("<Button-1>", marcar_seleccion_f)
+            f_row.bind("<Button-1>", lambda e, f=f_row: self._marcar_fila(f))
             
             # Ganancia por ítem = (P. Venta total) − (costo real unitario × cantidad).
             # El costo real es el P. Dscto si existe (> 0); si no, el P. Lista.
@@ -1631,19 +1791,21 @@ class VentanaEtapaProveedores:
                 (f"S/. {ganancia_item:,.2f}", 85, "e", "#1e8449")
             ]
             
-            for item in anchos_row:
+            for idx_item, item in enumerate(anchos_row):
                 text, w, align = item[0], item[1], item[2]
                 color = item[3] if len(item) > 3 else None
                 just = "left" if align == "w" else ("right" if align == "e" else "center")
                 wrap_val = w - 5 if w > 50 else 0 
                 lbl = ctk.CTkLabel(f_row, text=text, font=("Arial", 11), width=w, wraplength=wrap_val, anchor=align, justify=just, text_color=color if color else None)
                 lbl.pack(side="left", padx=2, fill="y")
-                lbl.bind("<Button-1>", marcar_seleccion_f)
+                lbl.bind("<Button-1>", lambda e, f=f_row: self._marcar_fila(f))
                 bind_drag(lbl)
+                if idx_item == 0:
+                    f_row.lbl_num = lbl
             
-            # --- NOTAS DEL CLIENTE ---
-            texto_nota = str(notas_r) if notas_r else "-"
-            tam_nota = obtener_tamano_nota(texto_nota, defecto=10)
+            # --- NOTAS DEL CLIENTE (editable + autoguardado) ---
+            texto_nota = str(notas_r) if notas_r else ""
+            tam_nota = obtener_tamano_nota(texto_nota, defecto=9) if texto_nota else 9
             chars_por_linea_nota = max(20, int(65 * (10.0 / max(6, tam_nota))))
             altura_linea_nota = max(16, int(tam_nota * 2))
             conteo_lineas = texto_nota.count('\n') + 1
@@ -1652,30 +1814,28 @@ class VentanaEtapaProveedores:
             conteo_lineas_nota = texto_nota.count('\n') + 1
             for linea_texto in texto_nota.split('\n'):
                 conteo_lineas_nota += len(texto_plano_sin_marcado(linea_texto)) // chars_por_linea_nota
-                
+
             txt_notas = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas_nota * altura_linea_nota), font=("Helvetica", tam_nota), fg_color="#ffffff", text_color="#000000", border_width=0, corner_radius=0, wrap="word")
             configurar_tags_formato(txt_notas, tam=tam_nota)
-            insertar_texto_formateado(txt_notas, texto_nota, tam_defecto=10)
+            insertar_texto_formateado(txt_notas, texto_nota, tam_defecto=9)
             txt_notas.pack(side="left", fill="both", expand=True, padx=(4, 2), pady=5)
-            
-            txt_notas.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
-            txt_notas._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
-            bind_drag(txt_notas)
-            bind_drag(txt_notas._textbox)
-            
-            # --- NOTAS INTERNAS ---
+            txt_notas.bind("<Button-1>", lambda e, f=f_row: self._marcar_fila(f))
+            self._conectar_autoguardado(txt_notas, f_row, "notes_negociacion")
+
+            # --- NOTAS INTERNAS (editable + autoguardado) ---
             texto_nota_int = str(notas_int_r) if notas_int_r else ""
-            txt_notas_int = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 10), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
+            txt_notas_int = ctk.CTkTextbox(f_row, height=max(60, conteo_lineas * 20), font=("Helvetica", 9), fg_color="#FFFDE7", text_color="#000000", border_width=1, border_color="#FBC02D", corner_radius=5, wrap="word")
             txt_notas_int.insert("1.0", texto_nota_int)
             txt_notas_int.pack(side="left", fill="both", expand=True, padx=(2, 4), pady=5)
-            
-            txt_notas_int.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d))
-            txt_notas_int._textbox.bind("<Button-1>", lambda e, f=f_row, d=data_pack: marcar_seleccion_f(e, f, d), add="+")
-            bind_drag(txt_notas_int)
-            bind_drag(txt_notas_int._textbox)
+            txt_notas_int.bind("<Button-1>", lambda e, f=f_row: self._marcar_fila(f))
+            self._conectar_autoguardado(txt_notas_int, f_row, "notas_internas")
+
+            # --- Botón eliminar del renglón ---
+            btn_del = ctk.CTkButton(f_row, text="✕", width=30, height=26, fg_color="#e74c3c", hover_color="#c0392b", text_color="white", font=("Arial", 12, "bold"), command=lambda idr=id_real: self.eliminar_item(idr))
+            btn_del.pack(side="right", padx=(2, 6), pady=5)
 
             if id_a_seleccionar == id_real:
-                marcar_seleccion_f(None, f_row, data_pack)
+                self._marcar_fila(f_row)
 
     def mover_renglon_matriz(self, direccion):
         if not self.conn:
@@ -1703,7 +1863,8 @@ class VentanaEtapaProveedores:
             cache_sistema.invalidar()
         except Exception:
             self.conn.rollback()
-        self.cargar_grid_proveedores(id_a_seleccionar=id_dest)
+        self._intercambiar_filas_ui(idx_act, idx_dest)
+        self._marcar_fila(self.lista_widgets_filas[idx_dest])
 
 
 if __name__ == "__main__":

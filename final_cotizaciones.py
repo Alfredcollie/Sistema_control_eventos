@@ -39,7 +39,7 @@ def hex_to_rgb(hex_color):
     except Exception:
         return (0.0, 0.0, 0.0)
 
-def parsear_segmentos_formato(texto, tam_defecto=11):
+def parsear_segmentos_formato(texto, tam_defecto=9):
     resultado, negrita, color_p, tamano = [], False, False, tam_defecto
     for parte in _PATRON_ETIQUETAS.split(str(texto)):
         p_up = parte.upper()
@@ -234,39 +234,46 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
             return lineas_finales if lineas_finales else [""]
 
         def wrap_texto_formato(texto, tam, max_ancho):
+            # Se parsea TODO el texto de una sola vez para que los marcadores
+            # (tamaño, negrita, color) se conserven a través de los saltos de línea.
+            tokens = []
+            for frag_texto, es_neg, es_col, es_tam in parsear_segmentos_formato(str(texto).replace('\r', ''), tam):
+                partes = frag_texto.split(' ')
+                for idx, parte in enumerate(partes):
+                    subpartes = parte.split('\n')
+                    for j, sub in enumerate(subpartes):
+                        if j > 0:
+                            tokens.append(('\n', es_neg, es_col, es_tam))
+                        if sub:
+                            tokens.append((sub, es_neg, es_col, es_tam))
+                    if idx < len(partes) - 1:
+                        tokens.append((' ', es_neg, es_col, es_tam))
             lineas_finales = []
-            for parrafo in str(texto).replace('\r', '').split('\n'):
-                if not texto_plano_sin_marcado(parrafo).strip():
-                    lineas_finales.append([])  # línea en blanco: respeta el salto de línea
-                    continue
-                tokens = []
-                for frag_texto, es_neg, es_col, es_tam in parsear_segmentos_formato(parrafo, tam):
-                    partes = frag_texto.split(' ')
-                    for idx, palabra in enumerate(partes):
-                        if palabra:
-                            tokens.append((palabra, es_neg, es_col, es_tam))
-                        if idx < len(partes) - 1:
-                            tokens.append((' ', es_neg, es_col, es_tam))
-                linea_actual, ancho_actual = [], 0.0
-                for palabra, es_neg, es_col, es_tam in tokens:
-                    fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
-                    ancho_palabra = c.stringWidth(palabra, fuente_palabra, es_tam)
-                    if palabra == ' ':
-                        if linea_actual:
-                            linea_actual.append((palabra, es_neg, es_col, es_tam))
-                            ancho_actual += ancho_palabra
-                        continue
+            linea_actual, ancho_actual = [], 0.0
+            for tok, es_neg, es_col, es_tam in tokens:
+                fuente_palabra = "Helvetica-Bold" if es_neg else "Helvetica"
+                ancho_palabra = c.stringWidth(tok, fuente_palabra, es_tam)
+                if tok == '\n':
+                    while linea_actual and linea_actual[-1][0] == ' ':
+                        linea_actual.pop()
+                    lineas_finales.append(linea_actual)
+                    linea_actual, ancho_actual = [], 0.0
+                elif tok == ' ':
+                    if linea_actual and ancho_actual + ancho_palabra <= max_ancho:
+                        linea_actual.append((tok, es_neg, es_col, es_tam))
+                        ancho_actual += ancho_palabra
+                else:
                     if ancho_actual + ancho_palabra > max_ancho and linea_actual:
                         while linea_actual and linea_actual[-1][0] == ' ':
                             linea_actual.pop()
                         lineas_finales.append(linea_actual)
                         linea_actual, ancho_actual = [], 0.0
-                    linea_actual.append((palabra, es_neg, es_col, es_tam))
+                    linea_actual.append((tok, es_neg, es_col, es_tam))
                     ancho_actual += ancho_palabra
-                while linea_actual and linea_actual[-1][0] == ' ':
-                    linea_actual.pop()
-                if linea_actual:
-                    lineas_finales.append(linea_actual)
+            while linea_actual and linea_actual[-1][0] == ' ':
+                linea_actual.pop()
+            if linea_actual:
+                lineas_finales.append(linea_actual)
             return lineas_finales if lineas_finales else [[]]
 
         def dibujar_linea_formateada(x, y, lista_palabras, tam):
@@ -447,8 +454,8 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 cant_item = int(r[4]) if len(r) > 4 and r[4] else 1
                 p_unitario = precio_final_venta / float(cant_item) if cant_item > 0 else precio_final_venta
                 texto_base = nota_solicitud if nota_solicitud else f"Servicio especializado provisto por {prov_nom}."
-                lineas_desc = wrap_texto_formato(texto_base, 11, DESC_MAX_WIDTH)
-                tam_max = 11
+                lineas_desc = wrap_texto_formato(texto_base, 9, DESC_MAX_WIDTH)
+                tam_max = 9
                 for la in lineas_desc:
                     for palabra, _n, _c, etam in la:
                         if palabra.strip():

@@ -360,6 +360,7 @@ def crear_barra_formato(parent, text_widget):
     
     configurar_tags_formato(text_widget, tam=9)
     
+    conectar_copiar_pegar_formateado(text_widget)
     return f_barra
 
 def configurar_tags_formato(txt_widget, tam=10):
@@ -390,6 +391,100 @@ def insertar_texto_formateado(txt_widget, texto, tam_defecto=9):
             tags.append("color")
         inner.insert(tk.END, frag, tuple(tags))
     inner.tag_raise("color")
+
+# =========================================================
+# COPIA / PEGADO CON FORMATO (color, negrita y tamaño)
+# =========================================================
+_PORTAPAPELES_FORMATEADO = None
+_PORTAPAPELES_PLAIN = None
+
+
+def _extraer_rango_con_formato(inner, s, e):
+    """Devuelve el texto del rango [s, e) con sus marcadores de formato."""
+    partes = []
+    neg_actual, tam_actual, col_actual = None, None, None
+    idx = s
+    while inner.compare(idx, "<", e):
+        neg = _negrita_en_indice(inner, idx)
+        tam = _tamano_en_indice(inner, idx)
+        col = "color" in inner.tag_names(idx)
+        if neg != neg_actual:
+            if neg_actual is True and not neg:
+                partes.append("[/B]")
+            elif neg_actual is not True and neg:
+                partes.append("[B]")
+            neg_actual = neg
+        if tam != tam_actual:
+            partes.append(f"[S{tam}]")
+            tam_actual = tam
+        if col != col_actual:
+            if col_actual is True and not col:
+                partes.append("[/M]")
+            elif col_actual is not True and col:
+                partes.append("[M]")
+            col_actual = col
+        partes.append(inner.get(idx))
+        idx = inner.index(f"{idx} +1c")
+    return "".join(partes)
+
+
+def _insertar_con_formato(inner, markup, index):
+    """Inserta texto con formato (marcadores) en la posición 'index'."""
+    inner.tag_configure("color", foreground=COLOR_PRIMARIO)
+    for frag, neg, col, tam in parsear_segmentos_formato(str(markup), 9):
+        if not frag:
+            continue
+        tags = [_tag_fuente(inner, neg, tam)]
+        if col:
+            tags.append("color")
+        inner.insert(index, frag, tuple(tags))
+        index = inner.index(f"{index} +{len(frag)}c")
+    inner.tag_raise("color")
+
+
+def _copiar_formateado(txt_widget):
+    global _PORTAPAPELES_FORMATEADO, _PORTAPAPELES_PLAIN
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    s, e = _obtener_seleccion(inner)
+    if not (s and e):
+        return None
+    _PORTAPAPELES_FORMATEADO = _extraer_rango_con_formato(inner, s, e)
+    try:
+        _PORTAPAPELES_PLAIN = inner.get(s, e)
+    except Exception:
+        _PORTAPAPELES_PLAIN = _PORTAPAPELES_FORMATEADO
+    return None  # deja que el copiado por defecto ponga texto plano en el portapapeles
+
+
+def _pegar_formateado(txt_widget):
+    global _PORTAPAPELES_FORMATEADO, _PORTAPAPELES_PLAIN
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    if _PORTAPAPELES_FORMATEADO is None:
+        return None
+    try:
+        if not (inner.clipboard_get() == _PORTAPAPELES_PLAIN):
+            return None
+    except Exception:
+        return None
+    s, e = _obtener_seleccion(inner)
+    if s and e:
+        inner.delete(s, e)
+        destino = s
+    else:
+        destino = inner.index("insert")
+    _insertar_con_formato(inner, _PORTAPAPELES_FORMATEADO, destino)
+    inner.tag_raise("color")
+    return "break"
+
+
+def conectar_copiar_pegar_formateado(txt_widget):
+    """Conecta copiar/pegar con formato (color, negrita, tamaño) a una caja de texto."""
+    inner = txt_widget._textbox if hasattr(txt_widget, "_textbox") else txt_widget
+    try:
+        inner.bind("<<Copy>>", lambda e: _copiar_formateado(txt_widget), add="+")
+        inner.bind("<<Paste>>", lambda e: _pegar_formateado(txt_widget), add="+")
+    except Exception:
+        pass
 
 # =========================================================
 # 🚀 FUNCIONES GENERADORAS DE CÓDIGOS CORRELATIVOS
@@ -1821,6 +1916,7 @@ class VentanaEtapaProveedores:
             txt_notas.pack(side="left", fill="both", expand=True, padx=(4, 2), pady=5)
             txt_notas.bind("<Button-1>", lambda e, f=f_row: self._marcar_fila(f))
             self._conectar_autoguardado(txt_notas, f_row, "notes_negociacion")
+            conectar_copiar_pegar_formateado(txt_notas)
 
             # --- NOTAS INTERNAS (editable + autoguardado) ---
             texto_nota_int = str(notas_int_r) if notas_int_r else ""

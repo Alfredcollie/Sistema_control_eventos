@@ -245,7 +245,9 @@ def crear_barra_formato(parent, text_widget):
 
     def actualizar_indicador(*_):
         try:
-            lbl_tam.configure(text=str(tam_en_cursor()))
+            nuevo = str(tam_en_cursor())
+            if lbl_tam.cget("text") != nuevo:
+                lbl_tam.configure(text=nuevo)
         except Exception:
             pass
 
@@ -253,7 +255,9 @@ def crear_barra_formato(parent, text_widget):
         try:
             inner_text._hover_tam = True
             idx = inner_text.index(f"@{event.x},{event.y}")
-            lbl_tam.configure(text=str(_tamano_en_indice(inner_text, idx, 9)))
+            nuevo = str(_tamano_en_indice(inner_text, idx, 9))
+            if lbl_tam.cget("text") != nuevo:
+                lbl_tam.configure(text=nuevo)
         except Exception:
             pass
 
@@ -270,8 +274,6 @@ def crear_barra_formato(parent, text_widget):
                 inner_text._memoria_blindada = None
         except Exception:
             pass
-        if not getattr(inner_text, "_hover_tam", False):
-            actualizar_indicador()
         inner_text.after(50, rastreador_mac)
 
     rastreador_mac()
@@ -332,6 +334,7 @@ def crear_barra_formato(parent, text_widget):
                 _aplicar_fuente_rango(inner_text, rs, re_, neg, nuevo)
             inner_text.tag_add(tk.SEL, s, e)
             inner_text._memoria_blindada = None
+            actualizar_indicador()
         except Exception:
             pass
         inner_text.focus_set()

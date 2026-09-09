@@ -48,7 +48,11 @@ def maximizar_ventana(ventana):
         if sys.platform == "win32":
             ventana.state("zoomed")
         elif sys.platform == "darwin":
-            ventana.attributes("-zoomed", True)
+            # En macOS '-zoomed' puede congelar la app en pantalla completa;
+            # usamos el tamaño de pantalla en su lugar.
+            w = ventana.winfo_screenwidth()
+            h = ventana.winfo_screenheight()
+            ventana.geometry(f"{w}x{h}+0+0")
         else:
             ventana.state("zoomed")
     except Exception:
@@ -274,7 +278,7 @@ def crear_barra_formato(parent, text_widget):
                 inner_text._memoria_blindada = None
         except Exception:
             pass
-        inner_text.after(50, rastreador_mac)
+        inner_text.after(150, rastreador_mac)
 
     rastreador_mac()
 

@@ -33,6 +33,14 @@ from datetime import datetime
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 
+# 🚀 CORTE DEL SISTEMA: fecha de comienzo (bloquea ventas anteriores a esa fecha)
+try:
+    from fecha_sistema import (
+        sugerir_periodo_sire, validar_periodo_sire, validar_fecha_registro, texto_fecha_comienzo,
+    )
+except Exception:
+    sugerir_periodo_sire = validar_periodo_sire = validar_fecha_registro = texto_fecha_comienzo = None
+
 try:
     import pdfplumber
 except ImportError:
@@ -554,6 +562,11 @@ class FacturasEmitidasTab:
         tipo, nro_doc, fecha = self.combo_tipo.get(), self.ent_nro_doc.get().strip(), self.ent_fecha.get().strip()
         cliente, desc, evento, oc_sel = self.combo_cliente.get().strip(), self.ent_desc.get().strip(), self.combo_evento.get(), self.combo_oc.get()
         if not cliente or cliente == "--- Seleccione Cliente ---" or not desc: return messagebox.showwarning("Atención", "Llene los campos obligatorios.")
+        # 🚀 CORTE DEL SISTEMA: no registrar ventas anteriores a la Fecha de Comienzo
+        if validar_fecha_registro:
+            fecha_ok, msg_fecha = validar_fecha_registro(fecha)
+            if not fecha_ok:
+                return messagebox.showwarning("Fecha fuera del rango del sistema", msg_fecha)
         if oc_sel == "--- Sin Orden de Compra ---": oc_sel = ""
         if not oc_sel and "Factura" in tipo:
             if not messagebox.askyesno("Falta Orden de Compra", "⚠️ No hay OC.\n\n¿Emitir sin OC?"): return
@@ -832,6 +845,11 @@ class FacturasEmitidasTab:
                 if oc_sel == "--- Sin Orden de Compra ---": oc_sel = ""
                 try: sub, dias, ui_pct = float(ent_s.get()), int(ent_d.get()), float(ent_det.get() if ent_det.get() else 0)
                 except ValueError: return messagebox.showerror("Error", "Monto, días y porcentaje deben ser numéricos.", parent=v_mod)
+                # 🚀 CORTE DEL SISTEMA: no permitir mover una venta antes de la Fecha de Comienzo
+                if validar_fecha_registro:
+                    fecha_ok, msg_fecha = validar_fecha_registro(fecha)
+                    if not fecha_ok:
+                        return messagebox.showwarning("Fecha fuera del rango del sistema", msg_fecha, parent=v_mod)
                 if "Factura" in tipo: imp = sub * 0.18; tot_bruto = sub + imp; det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
                 elif "Recibo" in tipo: imp = sub * (ui_pct / 100.0); tot_bruto = sub; det_pct = 0.0; det_monto = 0.0; neto_nuevo = sub - imp
                 else: imp = 0.0; tot_bruto = sub; det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
@@ -1512,9 +1530,22 @@ class NotasCreditoTab:
             )
             return
 
-        periodo = simpledialog.askstring("Periodo SIRE SUNAT", "Ingrese el Periodo a descargar (Formato YYYYMM, ej: 202607):", initialvalue=datetime.now().strftime("%Y%m"))
+        # 🚀 CORTE DEL SISTEMA: nunca antes de la Fecha de Comienzo configurada
+        corte_txt = (texto_fecha_comienzo() if texto_fecha_comienzo else "") or ""
+        tiene_corte = bool(corte_txt) and corte_txt != "Sin definir"
+        periodo_inicial = sugerir_periodo_sire() if sugerir_periodo_sire else datetime.now().strftime("%Y%m")
+        texto_pregunta = "Ingrese el Periodo a descargar (Formato YYYYMM, ej: 202607):"
+        if tiene_corte:
+            texto_pregunta += f"\n\n📅 Corte del sistema: solo se permiten periodos desde la Fecha de Comienzo ({corte_txt}) en adelante."
+
+        periodo = simpledialog.askstring("Periodo SIRE SUNAT", texto_pregunta, initialvalue=periodo_inicial)
         if not periodo or len(periodo) != 6 or not periodo.isdigit():
             return messagebox.showerror("Error", "Debe ingresar un periodo válido de 6 dígitos (ej: 202607).")
+
+        if validar_periodo_sire:
+            permitido, msg_bloqueo = validar_periodo_sire(periodo)
+            if not permitido:
+                return messagebox.showwarning("Periodo bloqueado por el Corte del Sistema", msg_bloqueo)
 
         v_sire = ctk.CTkToplevel(self.main_root)
         v_sire.title("Conexión Oficial SUNAT SIRE (Ventas)")

@@ -50,6 +50,16 @@ from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 from app_paths import CONFIG_FILE
 
+# 🚀 Fecha de Comienzo del Sistema (corte de compras y ventas)
+try:
+    from fecha_sistema import (
+        obtener_fecha_comienzo, purgar_anteriores, resumen_purga,
+        parsear_fecha as parsear_fecha_corte, CLAVE_FECHA_COMIENZO,
+    )
+    FECHA_SISTEMA_DISPONIBLE = True
+except Exception:
+    FECHA_SISTEMA_DISPONIBLE = False
+
 try:
     from PIL import Image
     PIL_DISPONIBLE = True
@@ -141,6 +151,7 @@ def cargar_configuracion_general():
         "color_menu_fondo": "#1a252c", "color_menu_btn": "#1f538d",
         "color_menu_hover": "#163b65", "color_menu_texto": "white",
         "terminos_cotizacion": "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos.",
+        "fecha_comienzo_sistema": "",
         "orden_operativos": ["clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"],
         "orden_finanzas": ["ventas", "compras", "libro_diario", "libro_mayor", "impuestos", "dashboard"],
         "orden_ajustes": ["configuracion", "usuarios", "bitacora"]
@@ -1026,6 +1037,126 @@ class ControlGeneralEventos:
         ent_ult_rec.pack(side="left", padx=5)
         ent_ult_rec.insert(0, config_actual.get("ultimo_recibo", "E001-0"))
 
+        # ---------- 1.5 FECHA DE COMIENZO DEL SISTEMA (CORTE DE COMPRAS Y VENTAS) ----------
+        f_corte = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#fff7ed", border_width=1, border_color="#fdba74")
+        f_corte.pack(fill="x", padx=10, pady=10, ipady=10)
+        ctk.CTkLabel(f_corte, text="📅 Fecha de Comienzo del Sistema (Corte de Compras y Ventas)", font=("Arial", 14, "bold"), text_color="#9a3412").pack(anchor="w", padx=15, pady=(10, 2))
+        ctk.CTkLabel(
+            f_corte,
+            text=("Todo lo anterior a esta fecha se elimina de forma definitiva y SUNAT/SIRE ya no volverá a descargarlo.\n"
+                  "El sistema solo carga y registra compras y ventas desde esta fecha en adelante. Déjala vacía si no deseas ningún corte."),
+            font=("Arial", 11, "italic"), text_color="#7c2d12", justify="left"
+        ).pack(anchor="w", padx=15, pady=(0, 8))
+
+        f_corte_row = ctk.CTkFrame(f_corte, fg_color="transparent")
+        f_corte_row.pack(fill="x", padx=15, pady=2)
+        ctk.CTkLabel(f_corte_row, text="Fecha de Comienzo:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        ent_fecha_corte = ctk.CTkEntry(f_corte_row, width=130, placeholder_text="DD/MM/AAAA")
+        ent_fecha_corte.pack(side="left", padx=5)
+        _fecha_corte_guardada = obtener_fecha_comienzo(config_actual) if FECHA_SISTEMA_DISPONIBLE else None
+        if _fecha_corte_guardada:
+            ent_fecha_corte.insert(0, _fecha_corte_guardada.strftime("%d/%m/%Y"))
+
+        def _poner_fecha_hoy():
+            ent_fecha_corte.delete(0, tk.END)
+            ent_fecha_corte.insert(0, datetime.now().strftime("%d/%m/%Y"))
+
+        ctk.CTkButton(f_corte_row, text="📅 Hoy", width=70, fg_color="#7f8c8d", hover_color="#606b6b", command=_poner_fecha_hoy).pack(side="left", padx=5)
+        ctk.CTkButton(
+            f_corte_row, text="🧹 Eliminar Compras y Ventas de esta fecha hacia atrás",
+            font=("Arial", 11, "bold"), fg_color="#c0392b", hover_color="#922b21",
+            command=lambda: limpiar_anteriores()
+        ).pack(side="left", padx=10)
+
+        lbl_corte_info = ctk.CTkLabel(f_corte, text="", font=("Arial", 11, "bold"), text_color="gray", justify="left")
+        lbl_corte_info.pack(anchor="w", padx=15, pady=(8, 4))
+
+        if not FECHA_SISTEMA_DISPONIBLE:
+            ent_fecha_corte.configure(state="disabled")
+
+        def _refrescar_label_corte():
+            if not FECHA_SISTEMA_DISPONIBLE:
+                lbl_corte_info.configure(text="⚠️ No se pudo cargar el módulo de corte (fecha_sistema.py).", text_color="#c0392b")
+                return
+            f = obtener_fecha_comienzo()
+            if f:
+                lbl_corte_info.configure(
+                    text=f"📌 Corte activo: se eliminan y bloquean las compras/ventas anteriores al {f.strftime('%d/%m/%Y')}. "
+                         f"SUNAT/SIRE solo descarga desde el periodo {f.strftime('%Y%m')} en adelante.",
+                    text_color="#9a3412"
+                )
+            else:
+                lbl_corte_info.configure(text="📌 Sin corte definido: el sistema muestra y descarga todo el historial disponible.", text_color="gray")
+
+        def _purgar_con_progreso(fecha_corte, al_terminar):
+            """Elimina en segundo plano para no congelar la interfaz."""
+            v_prog = ctk.CTkToplevel(v_conf)
+            v_prog.title("Eliminando compras y ventas...")
+            v_prog.geometry("440x170")
+            v_prog.transient(v_conf)
+            v_prog.grab_set()
+            v_prog.resizable(False, False)
+            v_prog.update_idletasks()
+            try:
+                x = v_conf.winfo_rootx() + (v_conf.winfo_width() // 2) - 220
+                y = v_conf.winfo_rooty() + (v_conf.winfo_height() // 2) - 85
+                v_prog.geometry(f"+{max(0, x)}+{max(0, y)}")
+            except Exception:
+                pass
+            ctk.CTkLabel(v_prog, text=f"🧹 Eliminando compras y ventas anteriores al\n{fecha_corte.strftime('%d/%m/%Y')}", font=("Arial", 13, "bold"), text_color="#c0392b").pack(pady=(22, 10))
+            pbar = ctk.CTkProgressBar(v_prog, width=360)
+            pbar.pack(pady=5)
+            pbar.set(0.4)
+            ctk.CTkLabel(v_prog, text="Este proceso es definitivo. No cierres la ventana...", font=("Arial", 10, "italic"), text_color="gray").pack(pady=5)
+
+            def tarea():
+                try:
+                    resultado = purgar_anteriores(fecha_corte, usuario=self.usuario_activo)
+                    error = None
+                except Exception as e:
+                    resultado, error = None, str(e)
+
+                def terminar():
+                    try:
+                        v_prog.destroy()
+                    except Exception:
+                        pass
+                    al_terminar(resultado, error)
+
+                try:
+                    v_conf.after(0, terminar)
+                except Exception:
+                    terminar()
+
+            threading.Thread(target=tarea, daemon=True).start()
+
+        def limpiar_anteriores():
+            if not FECHA_SISTEMA_DISPONIBLE:
+                return messagebox.showerror("No disponible", "No se pudo cargar el módulo de corte (fecha_sistema.py).", parent=v_conf)
+            fecha_corte = parsear_fecha_corte(ent_fecha_corte.get().strip())
+            if fecha_corte is None:
+                return messagebox.showwarning("Fecha inválida", "Escribe la Fecha de Comienzo con el formato DD/MM/AAAA (ej: 01/08/2026).", parent=v_conf)
+
+            if not messagebox.askyesno(
+                "Confirmar eliminación definitiva",
+                f"Se eliminarán DEFINITIVAMENTE de la base de datos todas las COMPRAS y VENTAS anteriores al {fecha_corte.strftime('%d/%m/%Y')}.\n\n"
+                "Esto incluye facturas recibidas, facturas emitidas, sus pagos y notas de crédito.\n\n"
+                "¿Deseas continuar?",
+                parent=v_conf
+            ):
+                return
+
+            def al_terminar(resultado, error):
+                if error:
+                    return messagebox.showerror("Error", f"No se pudo eliminar la información:\n{error}", parent=v_conf)
+                cache_sistema.invalidar()
+                messagebox.showinfo("Limpieza completada", resumen_purga(resultado), parent=v_conf)
+                _refrescar_label_corte()
+
+            _purgar_con_progreso(fecha_corte, al_terminar)
+
+        _refrescar_label_corte()
+
         def actualizar_tasas_regimen(choice):
             ent_igv.delete(0, tk.END)
             ent_detraccion.delete(0, tk.END)
@@ -1489,9 +1620,19 @@ class ControlGeneralEventos:
                     if texto in nombres_a_keys:
                         resultado.append(nombres_a_keys[texto])
                 return resultado
+            fecha_corte_txt = ent_fecha_corte.get().strip()
+            fecha_corte_nueva = parsear_fecha_corte(fecha_corte_txt) if fecha_corte_txt else None
+            if fecha_corte_txt and fecha_corte_nueva is None:
+                return messagebox.showerror(
+                    "Fecha inválida",
+                    "La Fecha de Comienzo del Sistema debe tener el formato DD/MM/AAAA (ej: 01/08/2026).",
+                    parent=v_conf
+                )
+
             nueva_config = config_actual.copy()
             nueva_config.pop("retencion_porcentaje", None)  # Retención ya no se usa en Perú
             nueva_config.update({
+                "fecha_comienzo_sistema": fecha_corte_nueva.isoformat() if fecha_corte_nueva else "",
                 "ruta_drive": ent_drive.get().strip(),
                 "rclone_remote": ent_rclone_remote.get().strip(),
                 "rclone_ruta_nube": ent_rclone_nube.get().strip(),
@@ -1565,6 +1706,42 @@ class ControlGeneralEventos:
                         print("Error respaldando config en la nube:", e)
                     finally:
                         liberar_conexion(conn)
+
+                # 🚀 CORTE DE COMPRAS Y VENTAS: si hay fecha de comienzo, ofrecer la limpieza definitiva
+                if fecha_corte_nueva and FECHA_SISTEMA_DISPONIBLE:
+                    fecha_corte_previa = obtener_fecha_comienzo(config_actual)
+                    aviso_cambio = ""
+                    if fecha_corte_previa != fecha_corte_nueva:
+                        aviso_cambio = f"La fecha de comienzo cambió de {fecha_corte_previa.strftime('%d/%m/%Y') if fecha_corte_previa else 'Sin definir'} a {fecha_corte_nueva.strftime('%d/%m/%Y')}.\n\n"
+                    if messagebox.askyesno(
+                        "Aplicar corte de compras y ventas",
+                        aviso_cambio +
+                        f"¿Deseas eliminar ahora todas las COMPRAS y VENTAS anteriores al {fecha_corte_nueva.strftime('%d/%m/%Y')}?\n\n"
+                        "La eliminación es definitiva (facturas recibidas, emitidas, pagos y notas de crédito).\n\n"
+                        "Si eliges 'No', la fecha quedará guardada y podrás ejecutar la limpieza después con el botón rojo.",
+                        parent=v_conf
+                    ):
+                        def al_terminar_corte(resultado, error):
+                            if error:
+                                messagebox.showerror("Configuración guardada, limpieza fallida", f"La fecha se guardó correctamente, pero no se pudo eliminar la información:\n{error}", parent=v_conf)
+                            else:
+                                cache_sistema.invalidar()
+                                messagebox.showinfo("Limpieza completada", resumen_purga(resultado), parent=v_conf)
+                            lanzar_sync_background()
+                            try:
+                                v_conf.destroy()
+                            except Exception:
+                                pass
+                            self.construir_dashboard_spa()
+
+                        _purgar_con_progreso(fecha_corte_nueva, al_terminar_corte)
+                        return
+                    messagebox.showinfo(
+                        "Corte guardado sin limpiar",
+                        "La Fecha de Comienzo quedó guardada.\n\nNo se eliminó ningún registro. Puedes ejecutar la limpieza cuando quieras con el botón rojo "
+                        "'Eliminar Compras y Ventas de esta fecha hacia atrás'.",
+                        parent=v_conf
+                    )
 
                 messagebox.showinfo("Éxito", "Las configuraciones del sistema se guardaron correctamente en la Nube y en este equipo.\n\nLos cambios visuales se aplicarán inmediatamente.", parent=v_conf)
                 lanzar_sync_background()

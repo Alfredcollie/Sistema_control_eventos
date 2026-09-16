@@ -208,6 +208,15 @@ def obtener_contacto_proveedor(prov, tipo="whatsapp"):
     return contacto_encontrado
 
 
+# 🚀 FIX CANTIDAD: normaliza la cantidad (llega como int, texto o None desde BD/Treeview)
+def cantidad_numerica(valor):
+    try:
+        n = float(str(valor).strip().replace(",", "."))
+        return n if n > 0 else 0.0
+    except Exception:
+        return 1.0
+
+
 # =========================================================
 # CLASE: SELECTOR DE HORA Y CALENDARIO
 # =========================================================
@@ -801,10 +810,13 @@ class OrdenesCompraApp:
             for r in cursor.fetchall():
                 cat = r[0].replace("('", "").replace("',)", "").replace("',", "").strip("() '\", ")
                 cant = r[1]
+                cant_num = cantidad_numerica(r[1])
                 p_lista = float(r[2] or 0)
                 p_dscto = float(r[3] or 0)
                 notas = r[4]
-                costo_real = p_dscto if p_dscto > 0 else p_lista
+                # 🚀 FIX: precio_lista y precio_descuento son UNITARIOS -> el costo total multiplica por la cantidad
+                costo_unit = p_dscto if p_dscto > 0 else p_lista
+                costo_real = costo_unit * cant_num
                 total_orden += costo_real
                 self.tabla_servicios.insert("", tk.END, values=(cat, cant, f"{p_lista:.2f}", f"{p_dscto:.2f}", f"{costo_real:.2f}"))
                 if notas and str(notas).strip():
@@ -923,10 +935,8 @@ class OrdenesCompraApp:
             c.drawString(45, y_pos, str(valores[1]))
             c.drawString(90, y_pos, cat)
             costo_linea = float(valores[4])
-            try:
-                p_unit = costo_linea / float(valores[1])
-            except Exception:
-                p_unit = 0.0
+            cant_linea = cantidad_numerica(valores[1])
+            p_unit = (costo_linea / cant_linea) if cant_linea > 0 else 0.0
             c.drawString(400, y_pos, f"S/ {p_unit:,.2f}")
             c.drawString(500, y_pos, f"S/ {costo_linea:,.2f}")
             y_pos -= 20.0
@@ -1214,8 +1224,14 @@ class OrdenesCompraApp:
             servicios_lista = []
             for r in cursor.fetchall():
                 cat = r[0].replace("('", "").replace("',)", "").replace("',", "").strip("() '\", ")
-                c_real = float(r[3]) if float(r[3]) > 0 else float(r[2])
-                servicios_lista.append((cat, r[1], r[2], r[3], c_real))
+                p_lista_r = float(r[2] or 0)
+                p_dscto_r = float(r[3] or 0)
+                # 🚀 FIX: el costo total de la línea = precio unitario acordado × cantidad
+                c_unit = p_dscto_r if p_dscto_r > 0 else p_lista_r
+                c_real = c_unit * cantidad_numerica(r[1])
+                servicios_lista.append((cat, r[1], p_lista_r, p_dscto_r, c_real))
+            # 🚀 FIX: el total se recalcula desde las líneas (corrige órdenes antiguas guardadas sin cantidad)
+            total_db = sum(float(item[4]) for item in servicios_lista) if servicios_lista else 0.0
         except Exception as e:
             return messagebox.showerror("Error", str(e))
         finally:
@@ -1279,8 +1295,8 @@ class OrdenesCompraApp:
                 n_ruta_pdf = self.fabricar_pdf(cod_cot, evento_nombre, prov, n_loc, n_inst, n_desm, n_det, n_fecha_emision, servicios_lista, total_db, num_orden_imprimir)
                 cursor = c2.cursor()
                 cursor.execute("""
-                    UPDATE ordenes_compra SET locacion=%s, fh_instalacion=%s, fh_desmontaje=%s, detalles_tecnicos=%s, fecha_emision=%s, pdf_ruta=%s, version=%s WHERE id=%s
-                """, (n_loc, n_inst, n_desm, n_det, n_fecha_emision, n_ruta_pdf, n_version, id_orden))
+                    UPDATE ordenes_compra SET locacion=%s, fh_instalacion=%s, fh_desmontaje=%s, detalles_tecnicos=%s, fecha_emision=%s, pdf_ruta=%s, total_orden=%s, version=%s WHERE id=%s
+                """, (n_loc, n_inst, n_desm, n_det, n_fecha_emision, n_ruta_pdf, total_db, n_version, id_orden))
                 c2.commit()
                 cache_sistema.invalidar()
                 registrar_auditoria(self.usuario_activo, "Órdenes", f"Modificó O/C a versión {num_orden_imprimir} para {prov}")

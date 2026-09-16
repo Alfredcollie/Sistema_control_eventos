@@ -789,49 +789,76 @@ class OrdenesCompraClienteApp:
 
         def tarea():
             lista = ["--- Seleccione ---"]
+            aviso_error = None
             conn = conectar_db(silencioso=True)
             if conn:
                 try:
                     c = conn.cursor()
+                    # 🚀 FIX: la tabla 'cotizaciones' NO tiene columna 'total'.
+                    # El total de venta de la cotización se calcula sumando precio_final_venta de sus ítems.
+                    total_sql = ("(SELECT COALESCE(SUM(p.precio_final_venta), 0) "
+                                 "FROM cotizacion_proveedores p "
+                                 "WHERE p.codigo_cotizacion = cot.codigo_cotizacion)")
+                    sin_oc = ("cot.codigo_cotizacion NOT IN ("
+                              "SELECT cotizacion_asociada FROM ordenes_compra_clientes "
+                              "WHERE cotizacion_asociada IS NOT NULL)")
+                    sql_base = f"""
+                        SELECT cot.codigo_cotizacion,
+                               COALESCE(cot.nombre_empresa, 'Cliente'),
+                               {total_sql},
+                               COALESCE(cot.nombre_evento, '')
+                        FROM cotizaciones cot
+                        WHERE cot.status = 'Aprobada'
+                    """
                     if cotizacion_a_incluir:
-                        sql = """
-                            SELECT codigo_cotizacion, COALESCE(nombre_empresa, 'Cliente'), COALESCE(total, 0), COALESCE(nombre_evento, '')
-                            FROM cotizaciones
-                            WHERE status = 'Aprobada'
-                              AND (
-                                  codigo_cotizacion NOT IN (SELECT cotizacion_asociada FROM ordenes_compra_clientes WHERE cotizacion_asociada IS NOT NULL)
-                                  OR codigo_cotizacion = %s
-                              )
-                            ORDER BY id DESC LIMIT 80
-                        """
-                        c.execute(sql, (cotizacion_a_incluir,))
+                        sql = sql_base + f" AND ({sin_oc} OR cot.codigo_cotizacion = %s) ORDER BY cot.id DESC LIMIT 80"
+                        parametros = (cotizacion_a_incluir,)
                     else:
-                        sql = """
-                            SELECT codigo_cotizacion, COALESCE(nombre_empresa, 'Cliente'), COALESCE(total, 0), COALESCE(nombre_evento, '')
-                            FROM cotizaciones
-                            WHERE status = 'Aprobada'
-                              AND codigo_cotizacion NOT IN (
-                                  SELECT cotizacion_asociada FROM ordenes_compra_clientes WHERE cotizacion_asociada IS NOT NULL
-                              )
-                            ORDER BY id DESC LIMIT 80
-                        """
-                        c.execute(sql)
-                        
-                    filas = c.fetchall()
+                        sql = sql_base + f" AND {sin_oc} ORDER BY cot.id DESC LIMIT 80"
+                        parametros = None
+
+                    try:
+                        c.execute(sql, parametros) if parametros else c.execute(sql)
+                        filas = c.fetchall()
+                    except Exception as e_principal:
+                        # 🚀 Red de seguridad: si la consulta enriquecida falla, se listan las aprobadas igual.
+                        conn.rollback()
+                        print("[Cotizaciones Load Error]", e_principal)
+                        aviso_error = str(e_principal).strip()
+                        c.execute("""
+                            SELECT cot.codigo_cotizacion, COALESCE(cot.nombre_empresa, 'Cliente'), 0, COALESCE(cot.nombre_evento, '')
+                            FROM cotizaciones cot
+                            WHERE cot.status = 'Aprobada'
+                            ORDER BY cot.id DESC LIMIT 80
+                        """)
+                        filas = c.fetchall()
+
                     for r in filas:
                         cod_val = str(r[0]).strip()
+                        if not cod_val or cod_val == "None":
+                            continue
                         cli_val = str(r[1]).strip()
                         tot_val = f"{parsear_numero_seguro(r[2]):,.2f}"
                         lista.append(f"{cod_val} | {cli_val} | {tot_val}")
-                    
-                    if not cotizacion_a_incluir:
+
+                    # Solo se cachea cuando la consulta principal funcionó (sin exclusiones).
+                    if not cotizacion_a_incluir and not aviso_error:
                         cache_sistema.guardar(clave_cache, lista)
                 except Exception as e:
                     print("[Cotizaciones Load Error]", e)
+                    aviso_error = str(e).strip()
                 finally:
                     liberar_conexion(conn)
-                    
+
             self.ejecutar_en_ui(self._aplicar_combo_cotizaciones, lista)
+            if aviso_error:
+                self.ejecutar_en_ui(
+                    messagebox.showwarning,
+                    "Cotizaciones Aprobadas",
+                    "No se pudo cargar la lista completa de cotizaciones aprobadas.\n\n"
+                    f"Detalle técnico: {aviso_error}\n\n"
+                    "Se muestran todas las cotizaciones aprobadas sin filtro de órdenes de compra."
+                )
 
         threading.Thread(target=tarea, daemon=True).start()
 

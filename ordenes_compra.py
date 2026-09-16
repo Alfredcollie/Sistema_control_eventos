@@ -208,6 +208,26 @@ def obtener_contacto_proveedor(prov, tipo="whatsapp"):
     return contacto_encontrado
 
 
+# 🚀 IGV: los precios del proveedor (P. Lista / P. Acordado) son NETOS, así que se les suma el IGV.
+# Si algún día cambia la tasa, se ajusta solo aquí.
+IGV_PORCENTAJE = 18.0
+
+
+def texto_totales_orden(subtotal_neto):
+    """Devuelve (texto_para_pantalla, total_con_igv) a partir de la suma neta de las líneas."""
+    try:
+        subtotal_neto = float(subtotal_neto or 0)
+    except Exception:
+        subtotal_neto = 0.0
+    igv = subtotal_neto * (IGV_PORCENTAJE / 100.0)
+    total_con_igv = subtotal_neto + igv
+    texto = (
+        f"Subtotal (sin IGV): S/ {subtotal_neto:,.2f}   +   IGV ({IGV_PORCENTAJE:g}%): S/ {igv:,.2f}\n"
+        f"TOTAL DE LA ORDEN (con IGV): S/ {total_con_igv:,.2f}"
+    )
+    return texto, total_con_igv
+
+
 # 🚀 FIX CANTIDAD: normaliza la cantidad (llega como int, texto o None desde BD/Treeview)
 def cantidad_numerica(valor):
     try:
@@ -428,7 +448,7 @@ class OrdenesCompraApp:
         self.tabla_servicios.column("p_dscto", width=80, anchor="e")
         self.tabla_servicios.column("p_costo_real", width=90, anchor="e")
         self.tabla_servicios.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.lbl_total_orden = ctk.CTkLabel(f_izq, text="Monto Total de la Orden: S/ 0.00", font=("Arial", 14, "bold"), text_color="#c0392b")
+        self.lbl_total_orden = ctk.CTkLabel(f_izq, text="Subtotal (sin IGV): S/ 0.00   +   IGV (18%): S/ 0.00\nTOTAL DE LA ORDEN (con IGV): S/ 0.00", font=("Arial", 13, "bold"), text_color="#c0392b", justify="left")
         self.lbl_total_orden.pack(anchor="e", padx=15, pady=10)
         f_der = ctk.CTkFrame(f_centro, width=360, corner_radius=10)
         f_der.pack(side="right", fill="y")
@@ -743,7 +763,7 @@ class OrdenesCompraApp:
         
         # Limpiamos interfaz
         self.tabla_servicios.delete(*self.tabla_servicios.get_children())
-        self.lbl_total_orden.configure(text="Monto Total de la Orden: S/ 0.00")
+        self.lbl_total_orden.configure(text="Subtotal (sin IGV): S/ 0.00   +   IGV (18%): S/ 0.00\nTOTAL DE LA ORDEN (con IGV): S/ 0.00")
         self.txt_detalles.delete("1.0", tk.END)
         
         conn = conectar_db(silencioso=True)
@@ -822,8 +842,10 @@ class OrdenesCompraApp:
                 if notas and str(notas).strip():
                     n_limpia = str(notas).replace("[B]", "").replace("[/B]", "").replace("[M]", "").replace("[/M]", "").strip()
                     notas_proveedor.append(f"• {cat}:\n  {n_limpia}\n")
-            self.lbl_total_orden.configure(text=f"Monto Total de la Orden: S/ {total_orden:,.2f}")
-            self.total_actual = total_orden
+            # 🚀 FIX IGV: las líneas traen el costo NETO; el total de la orden lleva el IGV sumado.
+            texto_totales, total_con_igv = texto_totales_orden(total_orden)
+            self.lbl_total_orden.configure(text=texto_totales)
+            self.total_actual = total_con_igv
             if notas_proveedor:
                 self.txt_detalles.insert("1.0", "\n".join(notas_proveedor))
         except Exception:
@@ -943,13 +965,14 @@ class OrdenesCompraApp:
             if y_pos < 250:
                 c.showPage()
                 y_pos = 730.0
-        subtotal = total_orden / 1.18
+        # 🚀 FIX IGV: total_orden ya viene con IGV incluido -> se desagrega para el PDF
+        subtotal = total_orden / (1.0 + (IGV_PORCENTAJE / 100.0))
         igv = total_orden - subtotal
         c.line(40, y_pos + 10, 572, y_pos + 10)
         c.setFont("Helvetica", 10)
         c.drawString(380, y_pos - 10, "SUBTOTAL:")
         c.drawString(480, y_pos - 10, f"S/ {subtotal:,.2f}")
-        c.drawString(380, y_pos - 25, "IGV (18%):")
+        c.drawString(380, y_pos - 25, f"IGV ({IGV_PORCENTAJE:g}%):")
         c.drawString(480, y_pos - 25, f"S/ {igv:,.2f}")
         c.setFont("Helvetica-Bold", 12)
         c.drawString(380, y_pos - 45, "MONTO TOTAL:")
@@ -1231,7 +1254,9 @@ class OrdenesCompraApp:
                 c_real = c_unit * cantidad_numerica(r[1])
                 servicios_lista.append((cat, r[1], p_lista_r, p_dscto_r, c_real))
             # 🚀 FIX: el total se recalcula desde las líneas (corrige órdenes antiguas guardadas sin cantidad)
-            total_db = sum(float(item[4]) for item in servicios_lista) if servicios_lista else 0.0
+            # y se le suma el IGV, porque los precios del proveedor son netos.
+            subtotal_neto_db = sum(float(item[4]) for item in servicios_lista) if servicios_lista else 0.0
+            total_db = subtotal_neto_db * (1.0 + (IGV_PORCENTAJE / 100.0))
         except Exception as e:
             return messagebox.showerror("Error", str(e))
         finally:

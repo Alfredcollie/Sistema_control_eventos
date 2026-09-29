@@ -691,6 +691,7 @@ class VentanaEtapaProveedores:
                             "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                             "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
                             "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
+                            "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS porcentaje_financiamiento NUMERIC DEFAULT 0",
                             "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
                             "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
                         ]
@@ -826,32 +827,53 @@ class VentanaEtapaProveedores:
 
         f_totales_centro = ctk.CTkFrame(self.f_inputs, border_width=1, border_color="#cccccc", fg_color="#f9f9f9")
         f_totales_centro.grid(row=5, column=5, columnspan=2, rowspan=3, sticky="nsew", padx=(15, 15), pady=(5, 12))
-        ctk.CTkLabel(f_totales_centro, text="Resumen Económico Contable", font=("Arial", 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(10, 5))
+        ctk.CTkLabel(f_totales_centro, text="Resumen Económico Contable", font=("Arial", 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(6, 2))
         
         self.var_sin_fee = tk.BooleanVar(value=False)
         self.chk_sin_fee = ctk.CTkCheckBox(f_totales_centro, text="Exonerar Fee Producción (15%)", variable=self.var_sin_fee, command=self.evento_toggle_fee, text_color="#D32F2F", fg_color="#D32F2F", hover_color="#B71C1C")
-        self.chk_sin_fee.pack(anchor="w", padx=15, pady=(0, 5))
+        self.chk_sin_fee.pack(anchor="w", padx=15, pady=(0, 2))
+
+        # 🚀 FINANCIAMIENTO VARIABLE: porcentaje editable (debajo del Fee) que se calcula
+        # SOBRE EL GRAN TOTAL y se imprime como línea propia en el PDF oficial.
+        # El % y su monto comparten una sola fila para no restar altura al panel.
+        f_financiamiento = ctk.CTkFrame(f_totales_centro, fg_color="transparent")
+        f_financiamiento.pack(anchor="w", fill="x", padx=15, pady=(0, 4))
+        ctk.CTkLabel(f_financiamiento, text="Financiamiento (%):", font=("Arial", 12, "bold"), text_color="#1f538d").pack(side="left")
+        self.var_financiamiento = tk.StringVar(value="0.00")
+        self.var_financiamiento.trace_add("write", lambda *args: self._recalcular_con_retraso())
+        self.ent_financiamiento = ctk.CTkEntry(f_financiamiento, width=70, textvariable=self.var_financiamiento)
+        self.ent_financiamiento.pack(side="left", padx=(6, 10))
+        self.ent_financiamiento.bind("<FocusOut>", lambda e: self.guardar_ajustes_globales_db())
+        self.ent_financiamiento.bind("<Return>", lambda e: self.guardar_ajustes_globales_db())
+        self.lbl_tot_financiamiento = ctk.CTkLabel(f_financiamiento, text="S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
+        self.lbl_tot_financiamiento.pack(side="left")
 
         self.lbl_tot_sub = ctk.CTkLabel(f_totales_centro, text="Total Venta al Cliente: S/ 0.00", font=("Arial", 12, "bold"), text_color="#111111")
-        self.lbl_tot_sub.pack(anchor="w", padx=15, pady=2)
+        self.lbl_tot_sub.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_igv = ctk.CTkLabel(f_totales_centro, text="15% Fee Producción: S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
-        self.lbl_tot_igv.pack(anchor="w", padx=15, pady=2)
+        self.lbl_tot_igv.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_gran = ctk.CTkLabel(f_totales_centro, text="Gran Total: S/ 0.00", font=("Arial", 14, "bold"), text_color="#e62060")
-        self.lbl_tot_gran.pack(anchor="w", padx=15, pady=2)
+        self.lbl_tot_gran.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
-        self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(5, 2))
+        self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(3, 1))
 
         # Ganancia total de la cotización:
         # (Venta + IGV) − (Compra + IGV) − Diferencial IGV = Venta − Compra
         # Renta = (Venta sin IGV − Detracción) × % Renta Mensual (Config. General)
         self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Compra (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555")
-        self.lbl_tot_costo.pack(anchor="w", padx=15, pady=2)
-        self.lbl_detraccion = ctk.CTkLabel(f_totales_centro, text="Detracción (12%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
-        self.lbl_detraccion.pack(anchor="w", padx=15, pady=1)
-        self.lbl_imp_renta = ctk.CTkLabel(f_totales_centro, text="Imp. Renta Mensual (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
-        self.lbl_imp_renta.pack(anchor="w", padx=15, pady=1)
+        self.lbl_tot_costo.pack(anchor="w", padx=15, pady=1)
+
+        # Detracción e Imp. Renta comparten fila: son informativas y así el panel
+        # no empuja hacia abajo la fila de botones de la ventana.
+        f_impuestos = ctk.CTkFrame(f_totales_centro, fg_color="transparent")
+        f_impuestos.pack(anchor="w", padx=15, pady=0)
+        self.lbl_detraccion = ctk.CTkLabel(f_impuestos, text="Detracción (12%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_detraccion.pack(side="left")
+        self.lbl_imp_renta = ctk.CTkLabel(f_impuestos, text="   Imp. Renta (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_imp_renta.pack(side="left")
+
         self.lbl_tot_gan = ctk.CTkLabel(f_totales_centro, text="GANANCIA TOTAL: S/ 0.00", font=("Arial", 15, "bold"), text_color="#1e8449")
-        self.lbl_tot_gan.pack(anchor="w", padx=15, pady=(6, 12))
+        self.lbl_tot_gan.pack(anchor="w", padx=15, pady=(4, 6))
 
         self.cargar_ajustes_globales()
 
@@ -955,9 +977,25 @@ class VentanaEtapaProveedores:
 
             c = self.conn.cursor()
             
-            c.execute("SELECT sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
-            res_fee = c.fetchone()
+            try:
+                c.execute("SELECT sin_fee, porcentaje_financiamiento FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+                res_fee = c.fetchone()
+            except Exception:
+                # Compatibilidad: BD aún sin la columna de financiamiento.
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                c = self.conn.cursor()
+                c.execute("SELECT sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+                res_fee = c.fetchone()
             sin_fee_db = bool(res_fee[0]) if res_fee and res_fee[0] is not None else False
+            fin_pct_db = 0.0
+            if res_fee and len(res_fee) > 1 and res_fee[1] is not None:
+                try:
+                    fin_pct_db = max(0.0, float(res_fee[1]))
+                except (TypeError, ValueError):
+                    fin_pct_db = 0.0
             
             c.execute("SELECT cantidad, notes_negociacion, precio_final_venta FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (self.codigo_cot,))
             registros = c.fetchall()
@@ -1072,6 +1110,8 @@ class VentanaEtapaProveedores:
             ws.cell(row=row_idx, column=4, value=f"=SUM(D8:D{row_idx-2})").number_format = '"S/." #,##0.00'
             ws.cell(row=row_idx, column=4).font = Font(bold=True)
 
+            componentes_gran = [f"D{subtotal_row}"]
+
             if not sin_fee_db:
                 row_idx += 1
                 fee_row = row_idx
@@ -1079,16 +1119,29 @@ class VentanaEtapaProveedores:
                 ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
                 ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}*0.15").number_format = '"S/." #,##0.00'
                 ws.cell(row=row_idx, column=4).font = Font(bold=True)
+                componentes_gran.append(f"D{fee_row}")
+
+            # 🚀 FINANCIAMIENTO VARIABLE: el % se calcula sobre el GRAN TOTAL
+            # (mismo engrose que en pantalla y en el PDF: base × %/(100−%)).
+            if fin_pct_db > 0:
+                row_idx += 1
+                fin_row = row_idx
+                base_fin = "+".join(componentes_gran)
+                if fin_pct_db < 100:
+                    formula_fin = f"=({base_fin})*{fin_pct_db:g}/(100-{fin_pct_db:g})"
+                else:
+                    formula_fin = f"=({base_fin})*{fin_pct_db:g}/100"
+                ws.cell(row=row_idx, column=3, value=f"FINANCIAMIENTO ({fin_pct_db:g}%):").font = Font(bold=True)
+                ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+                ws.cell(row=row_idx, column=4, value=formula_fin).number_format = '"S/." #,##0.00'
+                ws.cell(row=row_idx, column=4).font = Font(bold=True)
+                componentes_gran.append(f"D{fin_row}")
 
             row_idx += 1
             ws.cell(row=row_idx, column=3, value="GRAN TOTAL:").font = Font(bold=True, color=color_primario)
             ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
-            
-            if not sin_fee_db:
-                c_gran = ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}+D{fee_row}")
-            else:
-                c_gran = ws.cell(row=row_idx, column=4, value=f"=D{subtotal_row}")
-                
+
+            c_gran = ws.cell(row=row_idx, column=4, value="=" + "+".join(componentes_gran))
             c_gran.number_format = '"S/." #,##0.00'
             c_gran.font = Font(bold=True, color=color_primario)
 
@@ -1158,14 +1211,30 @@ class VentanaEtapaProveedores:
     def cargar_ajustes_globales(self):
         try:
             c = self.conn.cursor()
-            c.execute("SELECT tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
-            res = c.fetchone()
+            try:
+                c.execute("SELECT tipo_cambio, forma_pago, sin_fee, porcentaje_financiamiento FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+                res = c.fetchone()
+            except Exception:
+                # Compatibilidad: base de datos aún sin la columna de financiamiento.
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                c = self.conn.cursor()
+                c.execute("SELECT tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (self.codigo_cot,))
+                res = c.fetchone()
             if res:
                 self.ent_tc.delete(0, tk.END)
                 self.ent_tc.insert(0, str(res[0]) if res[0] and float(res[0]) > 0 else "3.750")
                 self.ent_forma_pago.delete(0, tk.END)
                 self.ent_forma_pago.insert(0, str(res[1]) if res[1] else "50% adelantado, 50% a 30 días de la primera factura.")
                 self.var_sin_fee.set(bool(res[2]) if res[2] is not None else False)
+                pct_guardado = res[3] if len(res) > 3 and res[3] is not None else 0
+                try:
+                    pct_guardado = max(0.0, float(pct_guardado))
+                except (TypeError, ValueError):
+                    pct_guardado = 0.0
+                self.var_financiamiento.set(f"{pct_guardado:.2f}")
         except Exception:
             try:
                 self.ent_tc.insert(0, "3.750")
@@ -1187,7 +1256,17 @@ class VentanaEtapaProveedores:
                     pass
             val_forma_pago = self.ent_forma_pago.get().strip()
             val_sin_fee = self.var_sin_fee.get()
-            c.execute("UPDATE cotizaciones SET tipo_cambio = %s, forma_pago = %s, sin_fee = %s WHERE codigo_cotizacion = %s", (val_tc, val_forma_pago, val_sin_fee, self.codigo_cot))
+            val_pct_financiamiento = self._porcentaje_financiamiento_valor()
+            try:
+                c.execute("UPDATE cotizaciones SET tipo_cambio = %s, forma_pago = %s, sin_fee = %s, porcentaje_financiamiento = %s WHERE codigo_cotizacion = %s", (val_tc, val_forma_pago, val_sin_fee, val_pct_financiamiento, self.codigo_cot))
+            except Exception:
+                # Compatibilidad: base de datos aún sin la columna de financiamiento.
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                c = self.conn.cursor()
+                c.execute("UPDATE cotizaciones SET tipo_cambio = %s, forma_pago = %s, sin_fee = %s WHERE codigo_cotizacion = %s", (val_tc, val_forma_pago, val_sin_fee, self.codigo_cot))
             self.conn.commit()
         except Exception:
             pass
@@ -1237,6 +1316,27 @@ class VentanaEtapaProveedores:
 
         threading.Thread(target=tarea, daemon=True).start()
 
+    def _porcentaje_financiamiento_valor(self):
+        """Devuelve el % de financiamiento digitado por el usuario (0.0 si es inválido)."""
+        try:
+            var = getattr(self, "var_financiamiento", None)
+            if var is not None:
+                texto = str(var.get()).strip()
+            else:
+                texto = str(self.ent_financiamiento.get()).strip()
+            texto = texto.replace("%", "").replace(" ", "")
+            if "," in texto and "." not in texto:
+                texto = texto.replace(",", ".")
+            else:
+                texto = texto.replace(",", "")
+            if not texto:
+                return 0.0
+            return max(0.0, float(texto))
+        except (TypeError, ValueError):
+            return 0.0
+        except Exception:
+            return 0.0
+
     def _obtener_porcentaje_config(self, clave, defecto):
         """Lee un porcentaje de la Configuración General (control_general.py).
         Claves: igv_porcentaje, detraccion_porcentaje, renta_mensual_porcentaje,
@@ -1258,6 +1358,18 @@ class VentanaEtapaProveedores:
             
         aplica_fee = not self.var_sin_fee.get()
         fee = subtotal * 0.15 if aplica_fee else 0.0
+
+        # 🚀 FINANCIAMIENTO VARIABLE: el % se calcula SOBRE EL GRAN TOTAL, por lo que el
+        # gran total se engrosa para que el financiamiento sea exactamente ese % del total:
+        #     Gran Total = (Venta + Fee) / (1 − %/100)   ⇔   Financiamiento = (Venta+Fee) × %/(100−%)
+        fin_pct = self._porcentaje_financiamiento_valor()
+        base_financiamiento = subtotal + fee
+        if 0 < fin_pct < 100:
+            financiamiento = base_financiamiento * fin_pct / (100.0 - fin_pct)
+            gran_total = base_financiamiento + financiamiento
+        else:
+            financiamiento = base_financiamiento * fin_pct / 100.0
+            gran_total = base_financiamiento + financiamiento
         
         try:
             tc_val = float(self.ent_tc.get())
@@ -1270,13 +1382,15 @@ class VentanaEtapaProveedores:
             self.lbl_tot_igv.configure(text=f"15% Fee Producción: S/ {fee:,.2f}")
         else:
             self.lbl_tot_igv.configure(text=f"Fee Producción: S/ 0.00 (Exonerado)")
+
+        self.lbl_tot_financiamiento.configure(text=f"S/ {financiamiento:,.2f}")
             
-        self.lbl_tot_gran.configure(text=f"Gran Total: S/ {subtotal + fee:,.2f}")
-        self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {(subtotal + fee) / tc_val:,.2f} USD")
+        self.lbl_tot_gran.configure(text=f"Gran Total: S/ {gran_total:,.2f}")
+        self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {gran_total / tc_val:,.2f} USD")
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
-        # Fórmula: (Venta + Fee + IGV) − (Compras + IGV) − Detracción − ISR − (IGV Venta − IGV Compra)
-        # (Venta + Fee) = Gran Total.
+        # Fórmula: (Venta + Fee + Financiamiento + IGV) − (Compras + IGV) − Detracción − ISR − (IGV Venta − IGV Compra)
+        # (Venta + Fee + Financiamiento) = Gran Total.
         # ISR Mensual = Gran Total sin IGV × % Renta Mensual.
         # Los porcentajes salen de la Configuración General (control_general.py).
         igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
@@ -1285,7 +1399,7 @@ class VentanaEtapaProveedores:
 
         venta_sin_igv = subtotal
         compra_sin_igv = costo_total
-        gran_total_sin_igv = subtotal + fee                         # Venta + Fee (sin IGV)
+        gran_total_sin_igv = gran_total                             # Venta + Fee + Financiamiento (sin IGV)
         venta_fee_igv = gran_total_sin_igv * (1 + igv_pct / 100.0)  # (Venta + Fee + IGV)
         compras_igv = compra_sin_igv * (1 + igv_pct / 100.0)        # (Compras + IGV)
         igv_venta = gran_total_sin_igv * igv_pct / 100.0            # IGV sobre (Venta + Fee)
@@ -1297,7 +1411,7 @@ class VentanaEtapaProveedores:
 
         self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")
         self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {detraccion:,.2f}")
-        self.lbl_imp_renta.configure(text=f"Imp. Renta Mensual ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
+        self.lbl_imp_renta.configure(text=f"   Imp. Renta ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
         self.lbl_tot_gan.configure(text=f"GANANCIA TOTAL: S/ {ganancia_neta:,.2f}")
 
     # =======================================================

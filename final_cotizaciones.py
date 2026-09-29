@@ -100,6 +100,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS porcentaje_financiamiento NUMERIC DEFAULT 0",
                 "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1",
             ):
                 try:
@@ -115,9 +116,10 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         forma_pago_pdf = "50% adelantado, 50% a 30 días de la primera factura."
         moneda, simbolo_moneda, tipo_cambio_pdf = "Soles", "S/", 3.75
         sin_fee_db = False
+        financiamiento_pct = 0.0
 
         try:
-            cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
+            cursor.execute("SELECT nombre_empresa, descripcion, nombre_evento, tipo_cambio, forma_pago, sin_fee, porcentaje_financiamiento FROM cotizaciones WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
             res_db = cursor.fetchone()
             if res_db:
                 cliente = str(res_db[0]).replace('{', '').replace('}', '').strip()
@@ -129,6 +131,11 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     forma_pago_pdf = str(res_db[4]).strip()
                 if len(res_db) > 5 and res_db[5] is not None:
                     sin_fee_db = bool(res_db[5])
+                if len(res_db) > 6 and res_db[6] is not None:
+                    try:
+                        financiamiento_pct = max(0.0, float(res_db[6]))
+                    except (TypeError, ValueError):
+                        financiamiento_pct = 0.0
             else:
                 return False, f"No se encontró el registro {codigo_cotizacion} en la tabla cotizaciones."
         except Exception:
@@ -538,10 +545,30 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
 
-        # 🚀 LÓGICA DE EXONERACIÓN DE FEE PARA EL PDF
+        # 🚀 LÓGICA DE EXONERACIÓN DE FEE + FINANCIAMIENTO VARIABLE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
-        total_general_soles = subtotal_acumulado + fee_produccion
+        base_financiamiento = subtotal_acumulado + fee_produccion
+        # El % de financiamiento se calcula SOBRE EL GRAN TOTAL: el gran total se engrosa
+        # para que el financiamiento represente exactamente ese % del total final
+        #     Gran Total = Base / (1 − %/100)   ⇔   Financiamiento = Base × %/(100−%)
+        if 0 < financiamiento_pct < 100:
+            monto_financiamiento = base_financiamiento * financiamiento_pct / (100.0 - financiamiento_pct)
+            total_general_soles = base_financiamiento + monto_financiamiento
+        else:
+            monto_financiamiento = base_financiamiento * financiamiento_pct / 100.0
+            total_general_soles = base_financiamiento + monto_financiamiento
         total_general_dolares = total_general_soles / tipo_cambio_pdf
+
+        # Filas del bloque de totales: se apilan dinámicamente (2, 3 o 4 líneas).
+        filas_totales = [("SUB TOTAL (SOLES)", subtotal_acumulado)]
+        if not sin_fee_db:
+            filas_totales.append(("15% FEE PRODUCCIÓN", fee_produccion))
+        if financiamiento_pct > 0:
+            filas_totales.append((f"{financiamiento_pct:g}% FINANCIAMIENTO", monto_financiamiento))
+        # Con la fila extra de financiamiento se comprime levemente el interlineado
+        # para que el bloque no choque con "TÉRMINOS Y CONDICIONES".
+        espacio_detalle = 17 if len(filas_totales) <= 2 else 15
+        espacio_cierre = 20 if len(filas_totales) <= 2 else 18
 
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.85, 0.85, 0.85)
@@ -551,23 +578,20 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         
         c.setFont("Helvetica-Bold", 9.5)
         c.setFillColorRGB(0.1, 0.1, 0.1)
-        c.drawRightString(440, y_cursor, "SUB TOTAL (SOLES)")
-        c.drawString(490, y_cursor, "S/")
-        c.drawRightString(565, y_cursor, f"{subtotal_acumulado:,.2f}")
-        
-        if not sin_fee_db:
-            y_cursor -= 17
-            c.drawRightString(440, y_cursor, "15% FEE PRODUCCIÓN")
+        for indice_fila, (etiqueta_fila, monto_fila) in enumerate(filas_totales):
+            if indice_fila:
+                y_cursor -= espacio_detalle
+            c.drawRightString(440, y_cursor, etiqueta_fila)
             c.drawString(490, y_cursor, "S/")
-            c.drawRightString(565, y_cursor, f"{fee_produccion:,.2f}")
+            c.drawRightString(565, y_cursor, f"{monto_fila:,.2f}")
             
-        y_cursor -= 20
+        y_cursor -= espacio_cierre
         c.setFont("Helvetica-Bold", 11)
         c.drawRightString(440, y_cursor, "TOTAL (SOLES)")
         c.drawString(490, y_cursor, "S/")
         c.drawRightString(565, y_cursor, f"{total_general_soles:,.2f}")
         
-        y_cursor -= 20
+        y_cursor -= espacio_cierre
         c.setFont("Helvetica-Bold", 10.5)
         c.setFillColorRGB(*rgb_primario)
         c.drawRightString(440, y_cursor, "TOTAL EQUIVALENTE (DÓLARES)")

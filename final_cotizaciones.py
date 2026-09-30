@@ -544,6 +544,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 c.showPage()
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
+        # Ancla FIJA del bloque "Términos y Condiciones": no se mueve aunque el bloque
+        # de totales crezca con las filas de IGV / financiamiento / total sin IGV.
+        y_totales_terminos = y_totales
 
         # 🚀 LÓGICA DE EXONERACIÓN DE FEE + FINANCIAMIENTO VARIABLE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
@@ -565,18 +568,32 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         filas_totales = [("SUB TOTAL (SOLES)", subtotal_acumulado)]
         if not sin_fee_db:
             filas_totales.append(("15% FEE PRODUCCIÓN", fee_produccion))
+        filas_totales.append(("TOTAL SIN IGV", venta_fee))
         if igv_pct_pdf > 0:
             filas_totales.append((f"IGV ({igv_pct_pdf:g}%)", igv_venta_pdf))
         if financiamiento_pct > 0:
             filas_totales.append((f"{financiamiento_pct:g}% FINANCIAMIENTO", monto_financiamiento))
-        # Con las filas extra de IGV/financiamiento se comprime el interlineado para
-        # que el bloque no choque con "TÉRMINOS Y CONDICIONES".
-        if len(filas_totales) <= 2:
+        # El bloque crece con las filas (fee, total sin IGV, IGV, financiamiento). Se
+        # comprime el interlineado y se baja "TÉRMINOS Y CONDICIONES" lo justo para que
+        # nunca se solapen. Con 2 filas el resultado es idéntico al de siempre.
+        n_filas_totales = len(filas_totales)
+        if n_filas_totales <= 2:
             espacio_detalle, espacio_cierre = 17, 20
-        elif len(filas_totales) == 3:
+        elif n_filas_totales == 3:
+            espacio_detalle, espacio_cierre = 16, 19
+        elif n_filas_totales == 4:
             espacio_detalle, espacio_cierre = 15, 18
         else:
-            espacio_detalle, espacio_cierre = 12, 15
+            espacio_detalle, espacio_cierre = 13, 16
+        alto_bloque_totales = espacio_detalle * (n_filas_totales - 1) + 2 * espacio_cierre
+        # Si el bloque es más alto que el original (2 filas) se sube todo lo que permita
+        # el espacio libre bajo la tabla, de modo que la última línea (el total en
+        # dólares) quede siempre a la misma altura. Lo que no se pueda subir desplaza
+        # hacia abajo "Términos y Condiciones" para que nunca se solapen.
+        sobrante_bloque = max(0.0, alto_bloque_totales - 57.0)
+        subida_bloque = min(sobrante_bloque, max(0.0, (y_pos - 50) - y_totales))
+        y_totales += subida_bloque
+        desplazo_terminos = sobrante_bloque - subida_bloque
 
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.85, 0.85, 0.85)
@@ -609,11 +626,11 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColorRGB(*rgb_primario)
-        c.drawString(40, y_totales - 55, "TÉRMINOS Y CONDICIONES:")
+        c.drawString(40, y_totales_terminos - 55 - desplazo_terminos, "TÉRMINOS Y CONDICIONES:")
         
         c.setFont("Helvetica", 8)
         c.setFillColorRGB(0.3, 0.3, 0.3)
-        y_cond_actual = y_totales - 68
+        y_cond_actual = y_totales_terminos - 68 - desplazo_terminos
         
         # 🚀 IMPRIMIR FORMA DE PAGO PRIMERO (DINÁMICO POR EVENTO)
         c.drawString(40, y_cond_actual, "Forma de pago: ")

@@ -848,30 +848,34 @@ class VentanaEtapaProveedores:
         self.lbl_tot_financiamiento = ctk.CTkLabel(f_financiamiento, text="S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
         self.lbl_tot_financiamiento.pack(side="left")
 
-        self.lbl_tot_sub = ctk.CTkLabel(f_totales_centro, text="Total Venta al Cliente: S/ 0.00", font=("Arial", 12, "bold"), text_color="#111111")
+        # Las alturas (height=) van justas al tamaño del texto: el panel tiene que caber
+        # sin empujar fuera de la ventana la fila de botones de abajo.
+        self.lbl_tot_sub = ctk.CTkLabel(f_totales_centro, text="Total Venta al Cliente: S/ 0.00", font=("Arial", 12, "bold"), text_color="#111111", height=22)
         self.lbl_tot_sub.pack(anchor="w", padx=15, pady=1)
-        self.lbl_tot_igv = ctk.CTkLabel(f_totales_centro, text="15% Fee Producción: S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
+        self.lbl_tot_igv = ctk.CTkLabel(f_totales_centro, text="15% Fee Producción: S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444", height=22)
         self.lbl_tot_igv.pack(anchor="w", padx=15, pady=1)
-        self.lbl_tot_igv_monto = ctk.CTkLabel(f_totales_centro, text="IGV (18%): S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
+        self.lbl_tot_sin_igv = ctk.CTkLabel(f_totales_centro, text="Total sin IGV: S/ 0.00", font=("Arial", 12, "bold"), text_color="#333333", height=22)
+        self.lbl_tot_sin_igv.pack(anchor="w", padx=15, pady=1)
+        self.lbl_tot_igv_monto = ctk.CTkLabel(f_totales_centro, text="IGV (18%): S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444", height=22)
         self.lbl_tot_igv_monto.pack(anchor="w", padx=15, pady=1)
-        self.lbl_tot_gran = ctk.CTkLabel(f_totales_centro, text="Gran Total: S/ 0.00", font=("Arial", 14, "bold"), text_color="#e62060")
+        self.lbl_tot_gran = ctk.CTkLabel(f_totales_centro, text="Gran Total: S/ 0.00", font=("Arial", 14, "bold"), text_color="#e62060", height=26)
         self.lbl_tot_gran.pack(anchor="w", padx=15, pady=1)
-        self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
+        self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222", height=22)
         self.lbl_tot_usd.pack(anchor="w", padx=15, pady=(3, 1))
 
         # Ganancia total de la cotización:
         # (Venta + IGV) − (Compra + IGV) − Diferencial IGV = Venta − Compra
         # Renta = (Venta sin IGV − Detracción) × % Renta Mensual (Config. General)
-        self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Compra (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555")
+        self.lbl_tot_costo = ctk.CTkLabel(f_totales_centro, text="Total Compra (sin IGV): S/ 0.00", font=("Arial", 12, "bold"), text_color="#555555", height=22)
         self.lbl_tot_costo.pack(anchor="w", padx=15, pady=1)
 
         # Detracción e Imp. Renta comparten fila: son informativas y así el panel
         # no empuja hacia abajo la fila de botones de la ventana.
         f_impuestos = ctk.CTkFrame(f_totales_centro, fg_color="transparent")
         f_impuestos.pack(anchor="w", padx=15, pady=0)
-        self.lbl_detraccion = ctk.CTkLabel(f_impuestos, text="Detracción (12%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_detraccion = ctk.CTkLabel(f_impuestos, text="Detracción (12%): S/ 0.00", font=("Arial", 11), text_color="#8B4513", height=20)
         self.lbl_detraccion.pack(side="left")
-        self.lbl_imp_renta = ctk.CTkLabel(f_impuestos, text="   Imp. Renta (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513")
+        self.lbl_imp_renta = ctk.CTkLabel(f_impuestos, text="   Imp. Renta (1.5%): S/ 0.00", font=("Arial", 11), text_color="#8B4513", height=20)
         self.lbl_imp_renta.pack(side="left")
 
         self.lbl_tot_gan = ctk.CTkLabel(f_totales_centro, text="GANANCIA TOTAL: S/ 0.00", font=("Arial", 15, "bold"), text_color="#1e8449")
@@ -1123,7 +1127,17 @@ class VentanaEtapaProveedores:
                 ws.cell(row=row_idx, column=4).font = Font(bold=True)
                 componentes_gran.append(f"D{fee_row}")
 
-            # 🚀 IGV sobre (Subtotal + Fee)
+            # 🚀 TOTAL SIN IGV = Subtotal + Fee
+            row_idx += 1
+            sin_igv_row = row_idx
+            ws.cell(row=row_idx, column=3, value="TOTAL SIN IGV:").font = Font(bold=True)
+            ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+            ws.cell(row=row_idx, column=4, value="=" + "+".join(componentes_gran)).number_format = '"S/." #,##0.00'
+            ws.cell(row=row_idx, column=4).font = Font(bold=True)
+            # El IGV y el Gran Total se calculan a partir de este Total sin IGV.
+            componentes_gran = [f"D{sin_igv_row}"]
+
+            # 🚀 IGV sobre (Total sin IGV)
             try:
                 igv_pct_x = float(config_data.get("igv_porcentaje", 18) or 18)
             except (TypeError, ValueError):
@@ -1396,6 +1410,7 @@ class VentanaEtapaProveedores:
         else:
             self.lbl_tot_igv.configure(text=f"Fee Producción: S/ 0.00 (Exonerado)")
 
+        self.lbl_tot_sin_igv.configure(text=f"Total sin IGV: S/ {venta_fee:,.2f}")
         self.lbl_tot_igv_monto.configure(text=f"IGV ({igv_pct:g}%): S/ {igv_venta:,.2f}")
         self.lbl_tot_financiamiento.configure(text=f"S/ {financiamiento:,.2f}")
             

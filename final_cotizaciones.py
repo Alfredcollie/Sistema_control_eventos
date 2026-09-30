@@ -547,28 +547,36 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
 
         # 🚀 LÓGICA DE EXONERACIÓN DE FEE + FINANCIAMIENTO VARIABLE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
-        base_financiamiento = subtotal_acumulado + fee_produccion
-        # El % de financiamiento se calcula SOBRE EL GRAN TOTAL: el gran total se engrosa
-        # para que el financiamiento represente exactamente ese % del total final
-        #     Gran Total = Base / (1 − %/100)   ⇔   Financiamiento = Base × %/(100−%)
-        if 0 < financiamiento_pct < 100:
-            monto_financiamiento = base_financiamiento * financiamiento_pct / (100.0 - financiamiento_pct)
-            total_general_soles = base_financiamiento + monto_financiamiento
-        else:
-            monto_financiamiento = base_financiamiento * financiamiento_pct / 100.0
-            total_general_soles = base_financiamiento + monto_financiamiento
+        # 🚀 GRAN TOTAL = Venta + Fee + IGV + Financiamiento.
+        # El % de financiamiento se calcula sobre (Venta + Fee + IGV).
+        try:
+            igv_pct_pdf = float(config.get("igv_porcentaje", 18) or 18)
+        except (TypeError, ValueError):
+            igv_pct_pdf = 18.0
+        venta_fee = subtotal_acumulado + fee_produccion
+        igv_venta_pdf = venta_fee * igv_pct_pdf / 100.0
+        base_financiamiento = venta_fee + igv_venta_pdf
+
+        monto_financiamiento = (base_financiamiento * financiamiento_pct / 100.0) if financiamiento_pct > 0 else 0.0
+        total_general_soles = base_financiamiento + monto_financiamiento
         total_general_dolares = total_general_soles / tipo_cambio_pdf
 
-        # Filas del bloque de totales: se apilan dinámicamente (2, 3 o 4 líneas).
+        # Filas del bloque de totales (2 a 4 líneas).
         filas_totales = [("SUB TOTAL (SOLES)", subtotal_acumulado)]
         if not sin_fee_db:
             filas_totales.append(("15% FEE PRODUCCIÓN", fee_produccion))
+        if igv_pct_pdf > 0:
+            filas_totales.append((f"IGV ({igv_pct_pdf:g}%)", igv_venta_pdf))
         if financiamiento_pct > 0:
             filas_totales.append((f"{financiamiento_pct:g}% FINANCIAMIENTO", monto_financiamiento))
-        # Con la fila extra de financiamiento se comprime levemente el interlineado
-        # para que el bloque no choque con "TÉRMINOS Y CONDICIONES".
-        espacio_detalle = 17 if len(filas_totales) <= 2 else 15
-        espacio_cierre = 20 if len(filas_totales) <= 2 else 18
+        # Con las filas extra de IGV/financiamiento se comprime el interlineado para
+        # que el bloque no choque con "TÉRMINOS Y CONDICIONES".
+        if len(filas_totales) <= 2:
+            espacio_detalle, espacio_cierre = 17, 20
+        elif len(filas_totales) == 3:
+            espacio_detalle, espacio_cierre = 15, 18
+        else:
+            espacio_detalle, espacio_cierre = 12, 15
 
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.85, 0.85, 0.85)

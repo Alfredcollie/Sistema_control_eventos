@@ -852,6 +852,8 @@ class VentanaEtapaProveedores:
         self.lbl_tot_sub.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_igv = ctk.CTkLabel(f_totales_centro, text="15% Fee Producción: S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
         self.lbl_tot_igv.pack(anchor="w", padx=15, pady=1)
+        self.lbl_tot_igv_monto = ctk.CTkLabel(f_totales_centro, text="IGV (18%): S/ 0.00", font=("Arial", 12, "bold"), text_color="#444444")
+        self.lbl_tot_igv_monto.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_gran = ctk.CTkLabel(f_totales_centro, text="Gran Total: S/ 0.00", font=("Arial", 14, "bold"), text_color="#e62060")
         self.lbl_tot_gran.pack(anchor="w", padx=15, pady=1)
         self.lbl_tot_usd = ctk.CTkLabel(f_totales_centro, text="Total Equivalente: $ 0.00 USD", font=("Arial", 12, "bold"), text_color="#222222")
@@ -1121,19 +1123,29 @@ class VentanaEtapaProveedores:
                 ws.cell(row=row_idx, column=4).font = Font(bold=True)
                 componentes_gran.append(f"D{fee_row}")
 
-            # 🚀 FINANCIAMIENTO VARIABLE: el % se calcula sobre el GRAN TOTAL
-            # (mismo engrose que en pantalla y en el PDF: base × %/(100−%)).
+            # 🚀 IGV sobre (Subtotal + Fee)
+            try:
+                igv_pct_x = float(config_data.get("igv_porcentaje", 18) or 18)
+            except (TypeError, ValueError):
+                igv_pct_x = 18.0
+            if igv_pct_x > 0:
+                row_idx += 1
+                igv_row = row_idx
+                base_igv = "+".join(componentes_gran)
+                ws.cell(row=row_idx, column=3, value=f"IGV ({igv_pct_x:g}%):").font = Font(bold=True)
+                ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
+                ws.cell(row=row_idx, column=4, value=f"=({base_igv})*{igv_pct_x:g}/100").number_format = '"S/." #,##0.00'
+                ws.cell(row=row_idx, column=4).font = Font(bold=True)
+                componentes_gran.append(f"D{igv_row}")
+
+            # 🚀 FINANCIAMIENTO VARIABLE: % sobre (Subtotal + Fee + IGV), sumado al total.
             if fin_pct_db > 0:
                 row_idx += 1
                 fin_row = row_idx
                 base_fin = "+".join(componentes_gran)
-                if fin_pct_db < 100:
-                    formula_fin = f"=({base_fin})*{fin_pct_db:g}/(100-{fin_pct_db:g})"
-                else:
-                    formula_fin = f"=({base_fin})*{fin_pct_db:g}/100"
                 ws.cell(row=row_idx, column=3, value=f"FINANCIAMIENTO ({fin_pct_db:g}%):").font = Font(bold=True)
                 ws.cell(row=row_idx, column=3).alignment = Alignment(horizontal="right")
-                ws.cell(row=row_idx, column=4, value=formula_fin).number_format = '"S/." #,##0.00'
+                ws.cell(row=row_idx, column=4, value=f"=({base_fin})*{fin_pct_db:g}/100").number_format = '"S/." #,##0.00'
                 ws.cell(row=row_idx, column=4).font = Font(bold=True)
                 componentes_gran.append(f"D{fin_row}")
 
@@ -1359,17 +1371,18 @@ class VentanaEtapaProveedores:
         aplica_fee = not self.var_sin_fee.get()
         fee = subtotal * 0.15 if aplica_fee else 0.0
 
-        # 🚀 FINANCIAMIENTO VARIABLE: el % se calcula SOBRE EL GRAN TOTAL, por lo que el
-        # gran total se engrosa para que el financiamiento sea exactamente ese % del total:
-        #     Gran Total = (Venta + Fee) / (1 − %/100)   ⇔   Financiamiento = (Venta+Fee) × %/(100−%)
+        igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
+
+        # 🚀 GRAN TOTAL = Venta + Fee + IGV + Financiamiento
+        # El % de financiamiento se calcula sobre (Venta + Fee + IGV):
+        #     Financiamiento = (Venta + Fee + IGV) × %/100
+        #     Gran Total     = (Venta + Fee) + IGV + Financiamiento
+        venta_fee = subtotal + fee
+        igv_venta = venta_fee * igv_pct / 100.0
+        total_con_igv = venta_fee + igv_venta               # base de cálculo del financiamiento
         fin_pct = self._porcentaje_financiamiento_valor()
-        base_financiamiento = subtotal + fee
-        if 0 < fin_pct < 100:
-            financiamiento = base_financiamiento * fin_pct / (100.0 - fin_pct)
-            gran_total = base_financiamiento + financiamiento
-        else:
-            financiamiento = base_financiamiento * fin_pct / 100.0
-            gran_total = base_financiamiento + financiamiento
+        financiamiento = (total_con_igv * fin_pct / 100.0) if fin_pct > 0 else 0.0
+        gran_total = total_con_igv + financiamiento
         
         try:
             tc_val = float(self.ent_tc.get())
@@ -1383,6 +1396,7 @@ class VentanaEtapaProveedores:
         else:
             self.lbl_tot_igv.configure(text=f"Fee Producción: S/ 0.00 (Exonerado)")
 
+        self.lbl_tot_igv_monto.configure(text=f"IGV ({igv_pct:g}%): S/ {igv_venta:,.2f}")
         self.lbl_tot_financiamiento.configure(text=f"S/ {financiamiento:,.2f}")
             
         self.lbl_tot_gran.configure(text=f"Gran Total: S/ {gran_total:,.2f}")
@@ -1390,24 +1404,21 @@ class VentanaEtapaProveedores:
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
         # Fórmula: (Venta + Fee + Financiamiento + IGV) − (Compras + IGV) − Detracción − ISR − (IGV Venta − IGV Compra)
-        # (Venta + Fee + Financiamiento) = Gran Total.
-        # ISR Mensual = Gran Total sin IGV × % Renta Mensual.
+        # Gran Total = Venta + Fee + IGV + Financiamiento.
+        # ISR Mensual = Venta sin IGV × % Renta Mensual.
         # Los porcentajes salen de la Configuración General (control_general.py).
-        igv_pct = self._obtener_porcentaje_config("igv_porcentaje", 18)
         detraccion_pct = self._obtener_porcentaje_config("detraccion_porcentaje", 12)
         renta_pct = self._obtener_porcentaje_config("renta_mensual_porcentaje", 1.5)
 
-        venta_sin_igv = subtotal
         compra_sin_igv = costo_total
-        gran_total_sin_igv = gran_total                             # Venta + Fee + Financiamiento (sin IGV)
-        venta_fee_igv = gran_total_sin_igv * (1 + igv_pct / 100.0)  # (Venta + Fee + IGV)
+        venta_sin_igv = venta_fee + financiamiento                  # Venta + Fee + Financiamiento (sin IGV)
+        venta_con_igv = gran_total                                  # lo que factura y paga el cliente
         compras_igv = compra_sin_igv * (1 + igv_pct / 100.0)        # (Compras + IGV)
-        igv_venta = gran_total_sin_igv * igv_pct / 100.0            # IGV sobre (Venta + Fee)
         igv_compra = compra_sin_igv * igv_pct / 100.0               # IGV sobre Compras
-        base_detraccion = venta_fee_igv
+        base_detraccion = venta_con_igv
         detraccion = base_detraccion * detraccion_pct / 100.0
-        impuesto_renta = gran_total_sin_igv * renta_pct / 100.0
-        ganancia_neta = venta_fee_igv - compras_igv - detraccion - impuesto_renta - (igv_venta - igv_compra)
+        impuesto_renta = venta_sin_igv * renta_pct / 100.0
+        ganancia_neta = venta_con_igv - compras_igv - detraccion - impuesto_renta - (igv_venta - igv_compra)
 
         self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")
         self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {detraccion:,.2f}")

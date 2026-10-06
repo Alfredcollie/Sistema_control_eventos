@@ -155,6 +155,63 @@ def formatear_moneda(valor):
     valor_float = parsear_numero_seguro(valor)
     return f"{simbolo} {valor_float:,.2f}"
 
+FEE_PRODUCCION_PCT = 15.0
+
+
+def obtener_porcentaje_igv():
+    """Devuelve el % de IGV configurado en Ajustes (Configuración), 18% por defecto."""
+    try:
+        valor = cargar_configuracion_regional().get("igv_porcentaje", 18)
+        if valor in (None, ""):
+            return 18.0
+        return float(valor)
+    except (TypeError, ValueError):
+        return 18.0
+    except Exception:
+        return 18.0
+
+
+def calcular_totales_cotizacion(venta, sin_fee=False, fin_pct=0.0, igv_pct=None):
+    """
+    Replica exactamente la fórmula de Cotizaciones:
+        Fee 15%        = Venta x 15%   (0 si la cotización está exonerada del Fee)
+        Total sin IGV  = Venta + Fee
+        IGV            = Total sin IGV x %IGV
+        Total con IGV  = Total sin IGV + IGV
+        Financiamiento = Total con IGV x %Financiamiento
+        Total final    = Total con IGV + Financiamiento   (lo que paga el cliente)
+    """
+    try:
+        venta = float(venta or 0.0)
+    except (TypeError, ValueError):
+        venta = 0.0
+    try:
+        fin_pct = max(0.0, float(fin_pct or 0.0))
+    except (TypeError, ValueError):
+        fin_pct = 0.0
+
+    igv_pct = obtener_porcentaje_igv() if igv_pct is None else float(igv_pct)
+
+    fee = 0.0 if sin_fee else venta * (FEE_PRODUCCION_PCT / 100.0)
+    sin_igv = venta + fee
+    igv = sin_igv * igv_pct / 100.0
+    con_igv = sin_igv + igv
+    financiamiento = con_igv * fin_pct / 100.0 if fin_pct > 0 else 0.0
+
+    return {
+        "venta": venta,
+        "fee": fee,
+        "sin_fee": bool(sin_fee),
+        "sin_igv": sin_igv,
+        "igv_pct": igv_pct,
+        "igv": igv,
+        "con_igv": con_igv,
+        "fin_pct": fin_pct,
+        "financiamiento": financiamiento,
+        "total": con_igv + financiamiento,
+    }
+
+
 
 class OrdenesCompraClienteApp:
     def __init__(self, parent_frame, usuario_activo="Desconocido"):
@@ -167,6 +224,9 @@ class OrdenesCompraClienteApp:
         # Estado de Edición
         self.id_oc_en_edicion = None
         self.ruta_archivo_actual_en_edicion = ""
+
+        # Datos de las cotizaciones aprobadas: venta, Fee 15%, IGV y financiamiento
+        self._datos_cotizaciones = {}
         
         # Cola de eventos UI Thread-safe
         self.ui_queue = queue.Queue()
@@ -330,7 +390,7 @@ class OrdenesCompraClienteApp:
         self.ent_desc = ctk.CTkEntry(f_form, placeholder_text="Servicios solicitados según OC...")
         self.ent_desc.pack(fill="x", padx=15, pady=(0, 10))
         
-        ctk.CTkLabel(f_form, text="6. Subtotal (Sin IGV):", font=ctk.CTkFont(family=familia_fuente, size=11, weight="bold")).pack(anchor="w", padx=15)
+        ctk.CTkLabel(f_form, text="6. Subtotal sin IGV (Venta + Fee 15%):", font=ctk.CTkFont(family=familia_fuente, size=11, weight="bold")).pack(anchor="w", padx=15)
         self.ent_subtotal = ctk.CTkEntry(f_form)
         self.ent_subtotal.pack(fill="x", padx=15, pady=(0, 10))
         self.ent_subtotal.bind("<KeyRelease>", self.calcular_totales_math)
@@ -342,6 +402,17 @@ class OrdenesCompraClienteApp:
         ctk.CTkLabel(f_form, text="8. Monto Total OC:", font=ctk.CTkFont(family=familia_fuente, size=12, weight="bold"), text_color="#c0392b").pack(anchor="w", padx=15)
         self.ent_monto_cli = ctk.CTkEntry(f_form)
         self.ent_monto_cli.pack(fill="x", padx=15, pady=(0, 10))
+
+        self.lbl_desglose = ctk.CTkLabel(
+            f_form,
+            text="",
+            font=ctk.CTkFont(family=familia_fuente, size=10),
+            text_color="#1f538d",
+            justify="left",
+            anchor="w",
+            wraplength=310
+        )
+        self.lbl_desglose.pack(fill="x", padx=15, pady=(0, 8))
         
         self.btn_guardar_oc = ctk.CTkButton(
             f_form, 
@@ -702,6 +773,7 @@ class OrdenesCompraClienteApp:
                         break
 
             # 6. ASIGNACIÓN EN INTERFAZ
+            self._pintar_desglose_cotizacion(None)
             if num_oc_detectado:
                 self.ent_oc_cli.delete(0, tk.END)
                 self.ent_oc_cli.insert(0, num_oc_detectado)
@@ -770,12 +842,15 @@ class OrdenesCompraClienteApp:
     def calcular_totales_math(self, event=None):
         try:
             sub = parsear_numero_seguro(self.ent_subtotal.get())
-            igv = sub * 0.18
+            igv_pct = obtener_porcentaje_igv()
+            igv = sub * igv_pct / 100.0
             tot = sub + igv
             self.ent_igv.delete(0, tk.END)
             self.ent_igv.insert(0, f"{igv:.2f}")
             self.ent_monto_cli.delete(0, tk.END)
             self.ent_monto_cli.insert(0, f"{tot:.2f}")
+            # El importe ya no corresponde al desglose de la cotización seleccionada.
+            self._pintar_desglose_cotizacion(None)
         except Exception:
             pass
 
@@ -788,7 +863,7 @@ class OrdenesCompraClienteApp:
             return
 
         def tarea():
-            lista = ["--- Seleccione ---"]
+            lista = []
             aviso_error = None
             conn = conectar_db(silencioso=True)
             if conn:
@@ -802,29 +877,40 @@ class OrdenesCompraClienteApp:
                     sin_oc = ("cot.codigo_cotizacion NOT IN ("
                               "SELECT cotizacion_asociada FROM ordenes_compra_clientes "
                               "WHERE cotizacion_asociada IS NOT NULL)")
-                    sql_base = f"""
-                        SELECT cot.codigo_cotizacion,
-                               COALESCE(cot.nombre_empresa, 'Cliente'),
-                               {total_sql},
-                               COALESCE(cot.nombre_evento, '')
-                        FROM cotizaciones cot
-                        WHERE cot.status = 'Aprobada'
-                    """
-                    if cotizacion_a_incluir:
-                        sql = sql_base + f" AND ({sin_oc} OR cot.codigo_cotizacion = %s) ORDER BY cot.id DESC LIMIT 80"
-                        parametros = (cotizacion_a_incluir,)
-                    else:
-                        sql = sql_base + f" AND {sin_oc} ORDER BY cot.id DESC LIMIT 80"
-                        parametros = None
 
-                    try:
-                        c.execute(sql, parametros) if parametros else c.execute(sql)
-                        filas = c.fetchall()
-                    except Exception as e_principal:
+                    def construir_sql(con_reglas_fee):
+                        # sin_fee y porcentaje_financiamiento son los mismos parámetros que usa
+                        # Cotizaciones para exonerar el Fee 15% y calcular el financiamiento.
+                        cols_extra = (", COALESCE(cot.sin_fee, FALSE), COALESCE(cot.porcentaje_financiamiento, 0)"
+                                      if con_reglas_fee else ", FALSE, 0")
+                        sql = f"""
+                            SELECT cot.codigo_cotizacion,
+                                   COALESCE(cot.nombre_empresa, 'Cliente'),
+                                   {total_sql},
+                                   COALESCE(cot.nombre_evento, ''){cols_extra}
+                            FROM cotizaciones cot
+                            WHERE cot.status = 'Aprobada'
+                        """
+                        if cotizacion_a_incluir:
+                            return (sql + f" AND ({sin_oc} OR cot.codigo_cotizacion = %s) ORDER BY cot.id DESC LIMIT 80",
+                                    (cotizacion_a_incluir,))
+                        return (sql + f" AND {sin_oc} ORDER BY cot.id DESC LIMIT 80", None)
+
+                    filas, error_reglas = None, None
+                    for con_reglas_fee in (True, False):
+                        sql, parametros = construir_sql(con_reglas_fee)
+                        try:
+                            c.execute(sql, parametros) if parametros else c.execute(sql)
+                            filas = c.fetchall()
+                            break
+                        except Exception as e_consulta:
+                            conn.rollback()
+                            print("[Cotizaciones Load Error]", e_consulta)
+                            error_reglas = str(e_consulta).strip()
+
+                    if filas is None:
                         # 🚀 Red de seguridad: si la consulta enriquecida falla, se listan las aprobadas igual.
-                        conn.rollback()
-                        print("[Cotizaciones Load Error]", e_principal)
-                        aviso_error = str(e_principal).strip()
+                        aviso_error = error_reglas
                         c.execute("""
                             SELECT cot.codigo_cotizacion, COALESCE(cot.nombre_empresa, 'Cliente'), 0, COALESCE(cot.nombre_evento, '')
                             FROM cotizaciones cot
@@ -838,8 +924,20 @@ class OrdenesCompraClienteApp:
                         if not cod_val or cod_val == "None":
                             continue
                         cli_val = str(r[1]).strip()
-                        tot_val = f"{parsear_numero_seguro(r[2]):,.2f}"
-                        lista.append(f"{cod_val} | {cli_val} | {tot_val}")
+                        # False/True = Fee 15% exonerado en la cotización; % de financiamiento.
+                        sin_fee_val = bool(r[4]) if len(r) > 4 and r[4] is not None else False
+                        try:
+                            fin_pct_val = float(r[5]) if len(r) > 5 and r[5] is not None else 0.0
+                        except (TypeError, ValueError):
+                            fin_pct_val = 0.0
+                        lista.append({
+                            "codigo": cod_val,
+                            "cliente": cli_val,
+                            "evento": str(r[3]).strip() if len(r) > 3 and r[3] is not None else "",
+                            "venta": parsear_numero_seguro(r[2]),
+                            "sin_fee": sin_fee_val,
+                            "fin_pct": max(0.0, fin_pct_val),
+                        })
 
                     # Solo se cachea cuando la consulta principal funcionó (sin exclusiones).
                     if not cotizacion_a_incluir and not aviso_error:
@@ -862,14 +960,61 @@ class OrdenesCompraClienteApp:
 
         threading.Thread(target=tarea, daemon=True).start()
 
-    def _aplicar_combo_cotizaciones(self, lista):
+    def _aplicar_combo_cotizaciones(self, datos):
         if self._esta_destruido:
             return
         try:
-            self.cmb_cot_cli.configure(values=lista)
+            etiquetas = ["--- Seleccione ---"]
+            mapa = {}
+            for d in (datos or []):
+                if isinstance(d, str):
+                    # Compatibilidad con listas guardadas en caché por versiones previas.
+                    if d and d not in etiquetas:
+                        etiquetas.append(d)
+                    continue
+                try:
+                    cod_val = str(d.get("codigo", "")).strip()
+                except Exception:
+                    continue
+                if not cod_val:
+                    continue
+                # El importe mostrado en la lista es el total que paga el cliente:
+                # Venta + 15% Fee + IGV (+ Financiamiento), igual que la cotización.
+                totales = calcular_totales_cotizacion(d.get("venta"), d.get("sin_fee"), d.get("fin_pct"))
+                registro = dict(d)
+                registro.update(totales)
+                mapa[cod_val] = registro
+                etiquetas.append(f"{cod_val} | {registro.get('cliente') or 'Cliente'} | {totales['total']:,.2f}")
+
+            self._datos_cotizaciones = mapa
+            self.cmb_cot_cli.configure(values=etiquetas)
             val_actual = self.cmb_cot_cli.get()
             if val_actual in ("Cargando...", "Cargando cotizaciones...", ""):
-                self.cmb_cot_cli.set(lista[0] if lista else "--- Seleccione ---")
+                self.cmb_cot_cli.set(etiquetas[0] if etiquetas else "--- Seleccione ---")
+        except Exception:
+            pass
+
+    def _pintar_desglose_cotizacion(self, registro):
+        """Muestra el desglose Venta + 15% Fee + IGV del importe cargado desde la cotización."""
+        try:
+            if not registro:
+                self.lbl_desglose.configure(text="")
+                return
+            moneda = cargar_configuracion_regional().get("simbolo_moneda", "S/.")
+            partes = []
+            if registro.get("venta") is not None:
+                partes.append(f"Venta: {moneda} {registro['venta']:,.2f}")
+            if "fee" in registro:
+                if registro.get("sin_fee"):
+                    partes.append("Fee 15%: exonerado")
+                else:
+                    partes.append(f"+ Fee 15%: {moneda} {registro['fee']:,.2f}")
+            partes.append(f"= Sin IGV: {moneda} {registro.get('sin_igv', 0.0):,.2f}")
+            partes.append(f"+ IGV ({registro.get('igv_pct', 18):g}%): {moneda} {registro.get('igv', 0.0):,.2f}")
+            if registro.get("financiamiento", 0.0):
+                partes.append(f"+ Financ. ({registro.get('fin_pct', 0):g}%): {moneda} {registro['financiamiento']:,.2f}")
+            partes.append(f"= Total OC: {moneda} {registro.get('total', 0.0):,.2f}")
+            self.lbl_desglose.configure(text="  ".join(partes))
         except Exception:
             pass
 
@@ -882,34 +1027,53 @@ class OrdenesCompraClienteApp:
             self.ent_subtotal.delete(0, tk.END)
             self.ent_igv.delete(0, tk.END)
             self.ent_desc.delete(0, tk.END)
+            self._pintar_desglose_cotizacion(None)
             return
-            
+
         partes = choice.split(" | ")
         if len(partes) >= 2:
             cod_cot = partes[0].strip()
             cli_val = partes[1].strip() if len(partes) > 1 else "Cliente Genérico"
-            tot_val = partes[2].strip() if len(partes) > 2 else "0.00"
             ev_val = f"Aprobación de la cotización {cod_cot}"
-            
+
+            # 🚀 Igual que en Cotizaciones: Venta + 15% Fee + IGV (+ Financiamiento).
+            registro = self._datos_cotizaciones.get(cod_cot)
+            if registro is None:
+                # Sin datos de la cotización (lista antigua en caché): el importe mostrado
+                # es el total con IGV, se retrocede para obtener el valor sin IGV.
+                igv_pct = obtener_porcentaje_igv()
+                total_visible = parsear_numero_seguro(partes[2]) if len(partes) > 2 else 0.0
+                sin_igv = total_visible / (1 + igv_pct / 100.0) if total_visible > 0 else 0.0
+                registro = {
+                    "sin_igv": sin_igv, "igv_pct": igv_pct,
+                    "igv": total_visible - sin_igv,
+                    "fin_pct": 0.0, "financiamiento": 0.0,
+                    "total": total_visible,
+                }
+
             self.ent_cliente_cli.configure(state="normal")
             self.ent_cliente_cli.delete(0, tk.END)
             self.ent_cliente_cli.insert(0, cli_val)
             self.ent_cliente_cli.configure(state="disabled")
-            
+
             self.ent_desc.delete(0, tk.END)
             self.ent_desc.insert(0, ev_val)
-            
+
             try:
-                tot = parsear_numero_seguro(tot_val)
-                sub = tot / 1.18
-                igv = tot - sub
                 if not self.ent_monto_cli.get().strip() or self.id_oc_en_edicion is None:
                     self.ent_monto_cli.delete(0, tk.END)
-                    self.ent_monto_cli.insert(0, f"{tot:.2f}")
+                    self.ent_monto_cli.insert(0, f"{registro.get('total', 0.0):.2f}")
                     self.ent_subtotal.delete(0, tk.END)
-                    self.ent_subtotal.insert(0, f"{sub:.2f}")
+                    self.ent_subtotal.insert(0, f"{registro.get('sin_igv', 0.0):.2f}")
                     self.ent_igv.delete(0, tk.END)
-                    self.ent_igv.insert(0, f"{igv:.2f}")
+                    self.ent_igv.insert(0, f"{registro.get('igv', 0.0):.2f}")
+                    self._pintar_desglose_cotizacion(registro)
+                elif abs(parsear_numero_seguro(self.ent_monto_cli.get()) - registro.get("total", 0.0)) <= 0.01:
+                    # Registro en edición cuyo importe sí proviene de la cotización elegida.
+                    self._pintar_desglose_cotizacion(registro)
+                else:
+                    # El importe guardado no corresponde a esta cotización: no se muestra desglose.
+                    self._pintar_desglose_cotizacion(None)
             except Exception:
                 pass
 
@@ -1169,6 +1333,7 @@ class OrdenesCompraClienteApp:
         self.ent_fec_cli.delete(0, tk.END)
         self.ent_fec_cli.insert(0, datetime.now().strftime("%d/%m/%Y"))
         self.cmb_cot_cli.set("--- Seleccione ---")
+        self._pintar_desglose_cotizacion(None)
 
     def cargar_tabla(self, reset_pagina=False):
         if self._esta_destruido:

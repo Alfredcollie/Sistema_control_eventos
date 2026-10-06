@@ -1044,6 +1044,7 @@ class VentanaCotizaciones:
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS tipo_cambio NUMERIC DEFAULT 3.75",
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS forma_pago TEXT DEFAULT '50% adelantado, 50% a 30 días de la primera factura.'",
                 "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS sin_fee BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE cotizaciones ADD COLUMN IF NOT EXISTS porcentaje_financiamiento NUMERIC DEFAULT 0",
                 "ALTER TABLE cotizacion_proveedores ADD COLUMN IF NOT EXISTS notas_internas TEXT DEFAULT ''",
             ):
                 try:
@@ -1051,15 +1052,30 @@ class VentanaCotizaciones:
                     conn.commit()
                 except Exception:
                     conn.rollback()
-            cursor.execute("SELECT nombre_empresa, nombre_evento, descripcion, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE id = %s", (id_cot,))
-            orig = cursor.fetchone()
+            # La nueva versión hereda también el % de financiamiento variable.
+            try:
+                cursor.execute("SELECT nombre_empresa, nombre_evento, descripcion, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee, porcentaje_financiamiento FROM cotizaciones WHERE id = %s", (id_cot,))
+                orig = cursor.fetchone()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                cursor.execute("SELECT nombre_empresa, nombre_evento, descripcion, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee FROM cotizaciones WHERE id = %s", (id_cot,))
+                orig = cursor.fetchone()
             if orig:
-                empresa, evento, desc, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee = orig
+                empresa, evento, desc, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee = orig[:9]
+                pct_financiamiento = 0
+                if len(orig) > 9 and orig[9] is not None:
+                    try:
+                        pct_financiamiento = max(0.0, float(orig[9]))
+                    except (TypeError, ValueError):
+                        pct_financiamiento = 0
                 nuevo_codigo = generar_nueva_version_evento_existente(conn, codigo_actual)
                 fecha_registro = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 
-                cursor.execute("INSERT INTO cotizaciones (codigo_cotizacion, nombre_empresa, nombre_evento, descripcion, fecha_registro, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                               (nuevo_codigo, empresa, evento, desc, fecha_registro, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee))
+                cursor.execute("INSERT INTO cotizaciones (codigo_cotizacion, nombre_empresa, nombre_evento, descripcion, fecha_registro, status, fecha_evento, locacion_evento, tipo_cambio, forma_pago, sin_fee, porcentaje_financiamiento) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                               (nuevo_codigo, empresa, evento, desc, fecha_registro, status, f_evento, locacion, tipo_cambio, forma_pago, sin_fee, pct_financiamiento))
                 cursor.execute("INSERT INTO cotizacion_detalles (codigo_cotizacion, categoria_suministro, cantidad) SELECT %s, categoria_suministro, cantidad FROM cotizacion_detalles WHERE codigo_cotizacion = %s ORDER BY id ASC", (nuevo_codigo, codigo_actual))
                 cursor.execute("INSERT INTO cotizacion_proveedores (codigo_cotizacion, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito) SELECT %s, categoria_suministro, proveedor_nombre, precio_lista, precio_descuento, tipo_ganancia, valor_ganancia, precio_final_venta, notes_negociacion, notas_internas, cantidad, dias_credito FROM cotizacion_proveedores WHERE codigo_cotizacion = %s ORDER BY id ASC", (nuevo_codigo, codigo_actual))
                 conn.commit()

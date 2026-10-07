@@ -9,7 +9,7 @@ Fecha de Comienzo del Sistema (corte contable):
 - Impide volver a cargar (SUNAT/SIRE o manual) movimientos anteriores a esa fecha.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 from conexion import conectar_db, liberar_conexion, registrar_auditoria
 
@@ -23,6 +23,11 @@ TABLAS_MOVIMIENTOS = (
     ("pagos_comprobantes", "fecha_pago", "Compras"),
     ("facturas_emitidas", "fecha", "Ventas"),
     ("pagos_clientes", "fecha_pago", "Ventas"),
+    # 🏦 Movimientos del módulo de Bancos: los egresos registrados desde el Banco
+    # crean su factura espejo en Compras; si se purga la compra hay que purgar
+    # también el movimiento bancario para que ambos módulos queden sincronizados.
+    ("conciliacion_bancaria", "fecha", "Compras"),
+    ("transferencias_bancarias", "fecha", "Compras"),
 )
 
 _FORMATOS_BASE = ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%d-%m-%y", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y")
@@ -73,6 +78,31 @@ def obtener_fecha_comienzo(config=None):
     """Fecha de comienzo configurada (datetime.date) o None si no hay corte definido."""
     cfg = _config_segura(config)
     return parsear_fecha(cfg.get(CLAVE_FECHA_COMIENZO), cfg.get("formato_fecha"))
+
+
+def dias_para_vencer(fecha, dias_credito, hoy=None, formato_preferido=None):
+    """Días que faltan para el vencimiento de una factura a crédito.
+
+    Vencimiento = fecha de la factura + días de crédito. Devuelve:
+      * un número positivo  -> todavía faltan esos días para pagar/cobrar,
+      * 0                   -> vence hoy,
+      * un número negativo  -> ya está vencida,
+      * None                -> la fecha no se pudo interpretar.
+
+    Lo usan Compras (cuentas por pagar) y Ventas (cuentas por cobrar) para pintar
+    las filas según la urgencia del vencimiento.
+    """
+    f = parsear_fecha(fecha, formato_preferido)
+    if f is None:
+        return None
+    try:
+        dias = int(float(str(dias_credito if dias_credito is not None else 0).replace(",", ".")))
+    except Exception:
+        dias = 0
+    if dias < 0:
+        dias = 0
+    base = hoy or date.today()
+    return (f + timedelta(days=dias) - base).days
 
 
 def texto_fecha_comienzo(config=None, defecto="Sin definir"):

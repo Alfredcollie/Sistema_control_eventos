@@ -337,28 +337,34 @@ class ControlGeneralEventos:
             "bitacora": "📜 Bitácora de Auditoría",
             "solicitud_proveedor": "📨 Solicitud a Proveedores",
         }
+        # Cada módulo se abre en SU PROPIA VENTANA (sistema multi-ventana).
+        # Estas funciones construyen el contenido del módulo dentro del marco que
+        # les pasa 'abrir_ventana_modulo' (para Configuración y Usuarios, que ya
+        # abren su propia ventana, se llaman directamente).
         self.funciones_modulos = {
-            "clientes": self.abrir_modulo_clientes,
-            "cotizaciones": self.abrir_modulo_cotizaciones,
-            "pautas": self.abrir_modulo_pautas,
-            "ordenes_cliente": self.abrir_modulo_ordenes_cliente,
-            "cronograma": self.abrir_modulo_cronograma,
-            "ordenes": self.abrir_modulo_ordenes,
-            "proveedores": self.abrir_modulo_proveedores,
-            "inventario": self.abrir_modulo_inventario,
-            "locaciones": self.abrir_modulo_locaciones,
-            "ventas": self.abrir_modulo_ventas,
-            "compras": self.abrir_modulo_compras,
-            "bancos": self.abrir_modulo_bancos,
-            "libro_diario": self.abrir_modulo_libro_diario,
-            "libro_mayor": self.abrir_modulo_libro_mayor,
-            "impuestos": self.abrir_calculo_impuestos,
-            "dashboard": self.abrir_estadisticas_financiera,
+            "clientes": self._crear_modulo_clientes,
+            "cotizaciones": self._crear_modulo_cotizaciones,
+            "pautas": self._crear_modulo_pautas,
+            "ordenes_cliente": self._crear_modulo_ordenes_cliente,
+            "cronograma": self._crear_modulo_cronograma,
+            "ordenes": self._crear_modulo_ordenes,
+            "proveedores": self._crear_modulo_proveedores,
+            "inventario": self._crear_modulo_inventario,
+            "locaciones": self._crear_modulo_locaciones,
+            "ventas": self._crear_modulo_ventas,
+            "compras": self._crear_modulo_compras,
+            "bancos": self._crear_modulo_bancos,
+            "libro_diario": self._crear_modulo_libro_diario,
+            "libro_mayor": self._crear_modulo_libro_mayor,
+            "impuestos": self._crear_calculo_impuestos,
+            "dashboard": self._crear_estadisticas_financiera,
             "configuracion": self.abrir_configuracion_general,
             "usuarios": self.abrir_gestion_usuarios,
-            "bitacora": self.abrir_modulo_bitacora,
-            "solicitud_proveedor": self.abrir_modulo_solicitud_proveedor,
+            "bitacora": self._crear_modulo_bitacora,
+            "solicitud_proveedor": self._crear_modulo_solicitud_proveedor,
         }
+        # 🪟 Ventanas de módulos abiertas: {clave_modulo: ventana}
+        self.ventanas_modulos = {}
         self.root.withdraw()
         self.abrir_ventana_login()
 
@@ -485,6 +491,8 @@ class ControlGeneralEventos:
         btn_entrar.pack(pady=5)
 
     def construir_dashboard_spa(self):
+        # 🪟 Al volver a entrar (o cambiar de usuario) se cierran las ventanas de módulos
+        self.cerrar_todas_las_ventanas()
         for widget in self.root.winfo_children():
             widget.destroy()
         # ⛶ Se vuelve al modo normal (el menú lateral siempre debe estar visible al entrar)
@@ -638,10 +646,12 @@ class ControlGeneralEventos:
 
         def cerrar_sistema():
             registrar_auditoria(self.usuario_activo, "Seguridad", "Cerró el sistema")
+            self.cerrar_todas_las_ventanas()      # 🪟 se cierran los módulos abiertos
             self.root.quit(); self.root.destroy()
 
         def cambiar_usuario():
             registrar_auditoria(self.usuario_activo, "Seguridad", "Cerró sesión para cambiar de usuario")
+            self.cerrar_todas_las_ventanas()      # 🪟 se cierran los módulos abiertos
             self.usuario_activo = "No autenticado"
             self.rol_activo = "Ninguno"
             self.permisos_activos = {}
@@ -679,12 +689,120 @@ class ControlGeneralEventos:
                 ctk.CTkLabel(self.menu_scrollable, text=titulo_grupo, font=("Arial", 9, "bold"), text_color="#7f8c8d").pack(anchor="w", padx=15, pady=(espaciado_sup, 2))
                 for key in modulos_permitidos:
                     if key in self.modulos_sistema and key in self.funciones_modulos:
-                        crear_btn_menu(self.modulos_sistema[key], self.funciones_modulos[key])
+                        # 🪟 Cada módulo se abre en su propia ventana (y si ya está
+                        # abierto, esa ventana se trae al frente)
+                        crear_btn_menu(self.modulos_sistema[key],
+                                       lambda k=key: self.abrir_ventana_modulo(k))
         self.mostrar_pantalla_bienvenida()
 
     def ciclo_sincronizacion_nube(self):
         lanzar_sync_background()
         self.root.after(600000, self.ciclo_sincronizacion_nube) 
+
+    # ==========================================================
+    # 🪟 SISTEMA MULTI-VENTANA: una ventana por módulo
+    # ==========================================================
+    def abrir_ventana_modulo(self, clave):
+        """Abre el módulo elegido en SU PROPIA VENTANA.
+
+        El sistema es MULTI-VENTANA: cada módulo queda abierto en una ventana
+        independiente (se pueden tener varios a la vez, incluso de módulos
+        distintos) y solo se cierra cuando el usuario pulsa la X de esa ventana.
+        Si el módulo ya está abierto, su ventana se trae al frente en lugar de
+        abrirse dos veces.
+        """
+        if not self.tiene_permiso(clave):
+            return messagebox.showerror("Acceso Denegado", "No tiene permisos para este módulo.")
+
+        # Configuración General y Usuarios ya abren su propia ventana
+        if clave in ("configuracion", "usuarios"):
+            abridor = self.funciones_modulos.get(clave)
+            if abridor is not None:
+                abridor()
+            return
+
+        # ¿Ya está abierto? -> se trae al frente
+        ventana = self.ventanas_modulos.get(clave)
+        if ventana is not None:
+            try:
+                if ventana.winfo_exists():
+                    ventana.deiconify()
+                    ventana.lift()
+                    ventana.focus_force()
+                    return
+            except Exception:
+                pass
+            self.ventanas_modulos.pop(clave, None)
+
+        creador = self.funciones_modulos.get(clave)
+        if creador is None:
+            return messagebox.showerror("Error", "Este módulo no está disponible.")
+
+        titulo_modulo = self.modulos_sistema.get(clave, clave)
+        ventana = ctk.CTkToplevel(self.root)
+        ventana.title(f"{titulo_modulo}  |  Sistema de Control de Eventos")
+        aplicar_icono_ventana(ventana)
+
+        # 📐 Tamaño y posición: en cascada, para que no queden una encima de otra
+        pantalla_w = ventana.winfo_screenwidth()
+        pantalla_h = ventana.winfo_screenheight()
+        ancho = min(1260, max(900, pantalla_w - 90))
+        alto = min(800, max(600, pantalla_h - 110))
+        posicion = len(self.ventanas_modulos)
+        x = max(0, min(40 + posicion * 32, pantalla_w - ancho - 30))
+        y = max(0, min(20 + posicion * 28, pantalla_h - alto - 60))
+        ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
+        try:
+            ventana.minsize(880, 560)
+        except Exception:
+            pass
+
+        contenedor = ctk.CTkFrame(ventana, corner_radius=0, fg_color="transparent")
+        contenedor.pack(fill="both", expand=True)
+        # Compatibilidad: algunos módulos llaman a estos métodos del marco contenedor
+        def dummy(*args, **kwargs): pass
+        for metodo in ("title", "geometry", "resizable", "iconbitmap"):
+            if not hasattr(contenedor, metodo):
+                setattr(contenedor, metodo, dummy)
+
+        self.ventanas_modulos[clave] = ventana
+        # La X de la ventana cierra el módulo y lo quita de la lista de abiertos
+        ventana.protocol("WM_DELETE_WINDOW", lambda c=clave: self.cerrar_ventana_modulo(c))
+        ventana.bind("<Destroy>", lambda e, c=clave: self._al_destruir_ventana(e, c), add="+")
+
+        try:
+            creador(contenedor)
+        except Exception as e:
+            messagebox.showerror("Error", f"Fallo al abrir {titulo_modulo}:\n{e}")
+            self.cerrar_ventana_modulo(clave)
+            return
+
+        registrar_auditoria(self.usuario_activo, "Sistema", f"Abrió el módulo {titulo_modulo}")
+
+    def _al_destruir_ventana(self, evento, clave):
+        """Quita la ventana del registro cuando se cierra (la X o el sistema)."""
+        try:
+            if evento.widget is not self.ventanas_modulos.get(clave):
+                return          # el evento es de un widget hijo, no de la ventana
+        except Exception:
+            pass
+        self.ventanas_modulos.pop(clave, None)
+
+    def cerrar_ventana_modulo(self, clave):
+        """Cierra la ventana de un módulo (lo usa la X de la ventana)."""
+        ventana = self.ventanas_modulos.pop(clave, None)
+        if ventana is None:
+            return
+        try:
+            ventana.destroy()
+        except Exception:
+            pass
+
+    def cerrar_todas_las_ventanas(self):
+        """Cierra todas las ventanas de módulos abiertas (al cambiar de usuario o salir)."""
+        for clave in list(getattr(self, "ventanas_modulos", {}) or {}):
+            self.cerrar_ventana_modulo(clave)
+        self.ventanas_modulos = {}
 
     def limpiar_contenedor(self):
         for widget in self.contenedor_central.winfo_children(): widget.destroy()
@@ -871,203 +989,149 @@ class ControlGeneralEventos:
             for color, txt in tareas_mostrar:
                 ctk.CTkLabel(self.f_agenda_container, text=txt, font=("Arial", 12, "bold"), text_color=color).pack(anchor="w", padx=15, pady=8)
 
-    def abrir_modulo_pautas(self):
-        if not self.tiene_permiso("pautas"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_pautas(self, contenedor):
         try:
             import pautas_evento
             importlib.reload(pautas_evento)
-            app = pautas_evento.PautasEventoApp(self.contenedor_central, self.usuario_activo)
+            app = pautas_evento.PautasEventoApp(contenedor, self.usuario_activo)
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_ventas(self):
-        if not self.tiene_permiso("ventas"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_ventas(self, contenedor):
         try:
             import modulo_ventas
             importlib.reload(modulo_ventas)
-            app = modulo_ventas.ModuloVentasApp(self.contenedor_central)
+            app = modulo_ventas.ModuloVentasApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_compras(self):
-        if not self.tiene_permiso("compras"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_compras(self, contenedor):
         try:
             import modulo_compras
             importlib.reload(modulo_compras)
-            app = modulo_compras.ModuloComprasApp(self.contenedor_central)
+            app = modulo_compras.ModuloComprasApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_bancos(self):
+    def _crear_modulo_bancos(self, contenedor):
         """🏦 Módulo de Bancos: saldos por cuenta y conciliación bancaria."""
-        if not self.tiene_permiso("bancos"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
         try:
             import modulo_banco
             importlib.reload(modulo_banco)
-            app = modulo_banco.ModuloBancoApp(self.contenedor_central, self.usuario_activo)
+            app = modulo_banco.ModuloBancoApp(contenedor, self.usuario_activo)
             app.usuario_activo = self.usuario_activo
             registrar_auditoria(self.usuario_activo, "Bancos", "Abrió el módulo de Bancos (saldos y conciliación)")
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir el módulo de Bancos:\n{e}")
 
-    def abrir_modulo_ordenes(self):
-        if not self.tiene_permiso("ordenes"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_ordenes(self, contenedor):
         try:
             import ordenes_compra
             importlib.reload(ordenes_compra)
-            app = ordenes_compra.OrdenesCompraApp(self.contenedor_central, self.usuario_activo)
+            app = ordenes_compra.OrdenesCompraApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_ordenes_cliente(self):
-        if not self.tiene_permiso("ordenes_cliente"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_ordenes_cliente(self, contenedor):
         try:
             import ordenes_compra_cliente
             importlib.reload(ordenes_compra_cliente)
-            app = ordenes_compra_cliente.OrdenesCompraClienteApp(self.contenedor_central, self.usuario_activo)
+            app = ordenes_compra_cliente.OrdenesCompraClienteApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_inventario(self):
-        if not self.tiene_permiso("inventario"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_inventario(self, contenedor):
         try:
             import inventario
             importlib.reload(inventario)
-            app = inventario.InventarioApp(self.contenedor_central, self.usuario_activo)
+            app = inventario.InventarioApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_locaciones(self):
-        if not self.tiene_permiso("locaciones"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_locaciones(self, contenedor):
         try:
             try:
                 import inventario_locacion as mod_loc
             except ImportError:
                 import Inventario_locacion as mod_loc
             importlib.reload(mod_loc)
-            app = mod_loc.InventarioLocacionesApp(self.contenedor_central)
+            app = mod_loc.InventarioLocacionesApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_estadisticas_financiera(self):
-        if not self.tiene_permiso("dashboard"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_estadisticas_financiera(self, contenedor):
         try:
             import estadisticas_financiera
             importlib.reload(estadisticas_financiera)
-            app = estadisticas_financiera.EstadisticasFinancieraApp(self.contenedor_central)
+            app = estadisticas_financiera.EstadisticasFinancieraApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_calculo_impuestos(self):
-        if not self.tiene_permiso("impuestos"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_calculo_impuestos(self, contenedor):
         try:
             import calculo_impuestos
             importlib.reload(calculo_impuestos)
-            app = calculo_impuestos.CalculoImpuestosApp(self.contenedor_central)
+            app = calculo_impuestos.CalculoImpuestosApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_proveedores(self):
-        if not self.tiene_permiso("proveedores"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_proveedores(self, contenedor):
         try:
             import proveedores
             importlib.reload(proveedores)
-            app = proveedores.SistemaProveedores(self.contenedor_central)
+            app = proveedores.SistemaProveedores(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_solicitud_proveedor(self):
-        if not self.tiene_permiso("solicitud_proveedor"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_solicitud_proveedor(self, contenedor):
         try:
             import solicitud_proveedor
             importlib.reload(solicitud_proveedor)
-            app = solicitud_proveedor.SolicitudProveedorApp(self.contenedor_central, self.usuario_activo)
+            app = solicitud_proveedor.SolicitudProveedorApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
 
-    def abrir_modulo_libro_diario(self):
-        if not self.tiene_permiso("libro_diario"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_libro_diario(self, contenedor):
         try:
             import libro_diario
             importlib.reload(libro_diario)
-            app = libro_diario.LibroDiarioApp(self.contenedor_central)
+            app = libro_diario.LibroDiarioApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_libro_mayor(self):
-        if not self.tiene_permiso("libro_mayor"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_libro_mayor(self, contenedor):
         try:
             import libro_mayor
             importlib.reload(libro_mayor)
-            app = libro_mayor.LibroMayorApp(self.contenedor_central)
+            app = libro_mayor.LibroMayorApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_clientes(self):
-        if not self.tiene_permiso("clientes"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_clientes(self, contenedor):
         try:
             import clientes
             importlib.reload(clientes)
-            app = clientes.SistemaClientes(self.contenedor_central)
+            app = clientes.SistemaClientes(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_cotizaciones(self):
-        if not self.tiene_permiso("cotizaciones"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_cotizaciones(self, contenedor):
         try:
             import cotizaciones
             importlib.reload(cotizaciones)
-            app = cotizaciones.VentanaCotizaciones(self.contenedor_central)
+            app = cotizaciones.VentanaCotizaciones(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_cronograma(self):
-        if not self.tiene_permiso("cronograma"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_cronograma(self, contenedor):
         try:
             import cronograma_tareas
             importlib.reload(cronograma_tareas)
-            app = cronograma_tareas.CronogramaApp(self.contenedor_central)
+            app = cronograma_tareas.CronogramaApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
 
-    def abrir_modulo_bitacora(self):
-        if not self.tiene_permiso("bitacora"):
-            return messagebox.showerror("Denegado", "No tiene permisos.")
-        self.limpiar_contenedor()
+    def _crear_modulo_bitacora(self, contenedor):
         try:
             import bitacora
             importlib.reload(bitacora)
-            bitacora.BitacoraApp(self.contenedor_central)
+            bitacora.BitacoraApp(contenedor)
             registrar_auditoria(self.usuario_activo, "Bitácora", "Accedió a revisar el historial de auditoría")
         except Exception as e: messagebox.showerror("Error", f"No se pudo cargar la Bitácora:\n{e}")
 

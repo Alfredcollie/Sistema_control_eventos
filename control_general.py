@@ -104,6 +104,48 @@ def maximizar_ventana(ventana):
         except Exception:
             pass
 
+def traer_al_frente(ventana, retrasos=(60, 260, 700, 1150)):
+    """🪟 Deja la ventana DELANTE de la ventana principal.
+
+    CustomTkinter oculta y vuelve a mostrar cada ventana nueva para pintarle la
+    barra de título (y a los 1000 ms vuelve a ajustar el tamaño mínimo): esos
+    ciclos hacen que la ventana termine DETRÁS de la principal. Por eso se trae al
+    frente varias veces, con un 'topmost' momentáneo que se suelta enseguida.
+    """
+    try:
+        ventana._windows_set_titlebar_color = lambda *a, **k: None
+    except Exception:
+        pass
+
+    def _soltar_topmost():
+        try:
+            if ventana.winfo_exists():
+                ventana.attributes("-topmost", False)
+        except Exception:
+            pass
+
+    def _traer():
+        try:
+            if not ventana.winfo_exists():
+                return
+            ventana.deiconify()
+            ventana.lift()
+            try:
+                ventana.attributes("-topmost", True)
+                ventana.after(450, _soltar_topmost)
+            except Exception:
+                pass
+            ventana.focus_force()
+        except Exception:
+            pass
+
+    for retardo in retrasos:
+        try:
+            ventana.after(retardo, _traer)
+        except Exception:
+            pass
+
+
 def ruta_recurso(ruta_relativa):
     try:
         ruta_base = sys._MEIPASS
@@ -743,6 +785,18 @@ class ControlGeneralEventos:
         ventana.title(f"{titulo_modulo}  |  Sistema de Control de Eventos")
         aplicar_icono_ventana(ventana)
 
+        # 🪟 La ventana del módulo debe quedar DELANTE de la ventana principal.
+        # CustomTkinter oculta y vuelve a mostrar la ventana para pintar la barra de
+        # título (y a los 1000 ms vuelve a ajustar el tamaño): esos ciclos hacían que
+        # el módulo quedara detrás. Por eso se trae al frente varias veces.
+        # 🪟 OJO: no se usa 'transient' a propósito. Las ventanas de los módulos son
+        # ventanas independientes y normales: así conservan sus botones de MINIMIZAR,
+        # maximizar y cerrar (Windows les quita minimizar a las ventanas dependientes).
+        try:
+            ventana.resizable(True, True)
+        except Exception:
+            pass
+
         # 📐 Tamaño y posición: en cascada, para que no queden una encima de otra
         pantalla_w = ventana.winfo_screenwidth()
         pantalla_h = ventana.winfo_screenheight()
@@ -776,6 +830,10 @@ class ControlGeneralEventos:
             messagebox.showerror("Error", f"Fallo al abrir {titulo_modulo}:\n{e}")
             self.cerrar_ventana_modulo(clave)
             return
+
+        # 🪟 Se trae al frente ahora y otra vez después de los ciclos internos de
+        # CustomTkinter (200 ms barra de título / icono, 1000 ms tamaño mínimo).
+        traer_al_frente(ventana)
 
         registrar_auditoria(self.usuario_activo, "Sistema", f"Abrió el módulo {titulo_modulo}")
 
@@ -1146,6 +1204,7 @@ class ControlGeneralEventos:
         v_conf.geometry("1000x750")
         v_conf.after(100, lambda: maximizar_ventana(v_conf))
         v_conf.grab_set()
+        traer_al_frente(v_conf)
         archivo_config = str(CONFIG_FILE)
         config_actual = cargar_configuracion_general()
         todas_guardadas = (
@@ -2149,6 +2208,7 @@ class ControlGeneralEventos:
         v_usr.title("Configuración de Usuarios y Permisos")
         v_usr.geometry("1000x580")
         v_usr.grab_set()
+        traer_al_frente(v_usr)
         main_split = ctk.CTkFrame(v_usr, fg_color="transparent")
         main_split.pack(fill="both", expand=True, padx=15, pady=15)
         left_panel = ctk.CTkFrame(main_split, fg_color="transparent")

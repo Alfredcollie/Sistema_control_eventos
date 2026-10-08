@@ -487,6 +487,12 @@ class ControlGeneralEventos:
     def construir_dashboard_spa(self):
         for widget in self.root.winfo_children():
             widget.destroy()
+        # ⛶ Se vuelve al modo normal (el menú lateral siempre debe estar visible al entrar)
+        try:
+            self.root.attributes("-fullscreen", False)
+        except Exception:
+            pass
+        self.modo_pantalla_completa = False
         config = cargar_configuracion_general()
         c_fondo = config.get("color_menu_fondo", "#1a252c")
         c_btn = config.get("color_menu_btn", "#1f538d")
@@ -564,6 +570,72 @@ class ControlGeneralEventos:
         lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text=f"Software desarrollado por Alfred Collie\nVersión {VERSION_ACTUAL} © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
         lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
 
+        # ==================================================
+        # ⛶ PANTALLA COMPLETA (oculta todo el menú de la izquierda)
+        # ==================================================
+        self.modo_pantalla_completa = False
+
+        def _salir_de_pantalla_completa():
+            """Restaura el menú lateral y el tamaño normal de la ventana."""
+            self.modo_pantalla_completa = False
+            try:
+                self.root.attributes("-fullscreen", False)
+            except Exception:
+                pass
+            try:
+                self.btn_volver_pantalla.place_forget()
+            except Exception:
+                pass
+            try:
+                self.sidebar.pack(side="left", fill="y", before=self.contenedor_central)
+                self.sidebar.pack_propagate(False)
+            except Exception:
+                pass
+            try:
+                self.btn_pantalla_completa.configure(text="⛶ Pantalla Completa")
+            except Exception:
+                pass
+            maximizar_ventana(self.root)
+
+        def alternar_pantalla_completa():
+            """⛶ Pone la ventana a pantalla completa y esconde el menú lateral.
+
+            Para volver se usa el botón flotante 'Salir de Pantalla Completa'
+            (arriba a la derecha) o la tecla Escape / F11.
+            """
+            if getattr(self, "modo_pantalla_completa", False):
+                _salir_de_pantalla_completa()
+                return
+            self.modo_pantalla_completa = True
+            try:
+                self.sidebar.pack_forget()          # se elimina todo el menú lateral
+            except Exception:
+                pass
+            try:
+                self.root.attributes("-fullscreen", True)
+            except Exception:
+                maximizar_ventana(self.root)
+            try:
+                self.btn_volver_pantalla.place(relx=1.0, y=10, x=-14, anchor="ne")
+                self.btn_volver_pantalla.lift()
+            except Exception:
+                pass
+            try:
+                self.btn_pantalla_completa.configure(text="⛶ Salir de Pantalla Completa")
+            except Exception:
+                pass
+
+        # Botón flotante: es la única forma de volver mientras el menú está oculto
+        self.btn_volver_pantalla = ctk.CTkButton(
+            self.root, text="⛶ Salir de Pantalla Completa", command=alternar_pantalla_completa,
+            height=28, font=("Arial", 11, "bold"), fg_color="#2c3e50", hover_color="#1b2631")
+        try:
+            self.root.bind("<F11>", lambda _e: alternar_pantalla_completa())
+            self.root.bind("<Escape>", lambda _e: _salir_de_pantalla_completa()
+                           if getattr(self, "modo_pantalla_completa", False) else None)
+        except Exception:
+            pass
+
         def cerrar_sistema():
             registrar_auditoria(self.usuario_activo, "Seguridad", "Cerró el sistema")
             self.root.quit(); self.root.destroy()
@@ -580,6 +652,11 @@ class ControlGeneralEventos:
         btn_salir.pack(side="bottom", pady=(2, 5))
         btn_cambio = ctk.CTkButton(frame_bottom_sidebar, text="🔄 Cambiar Usuario", command=cambiar_usuario, width=240, height=30, font=("Arial", 11, "bold"), fg_color="#555555", hover_color="#333333")
         btn_cambio.pack(side="bottom", pady=(2, 5))
+        # ⛶ Queda arriba del botón "Cambiar Usuario"
+        self.btn_pantalla_completa = ctk.CTkButton(
+            frame_bottom_sidebar, text="⛶ Pantalla Completa", command=alternar_pantalla_completa,
+            width=240, height=30, font=("Arial", 11, "bold"), fg_color="#2c3e50", hover_color="#1b2631")
+        self.btn_pantalla_completa.pack(side="bottom", pady=(2, 5))
         linea_separadora = ctk.CTkFrame(frame_bottom_sidebar, height=2, fg_color="#34495e")
         linea_separadora.pack(side="bottom", fill="x", padx=20, pady=(5, 5))
         self.menu_scrollable = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent", scrollbar_button_color="#34495e")

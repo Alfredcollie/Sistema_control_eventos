@@ -80,17 +80,11 @@ def obtener_fecha_comienzo(config=None):
     return parsear_fecha(cfg.get(CLAVE_FECHA_COMIENZO), cfg.get("formato_fecha"))
 
 
-def dias_para_vencer(fecha, dias_credito, hoy=None, formato_preferido=None):
-    """Días que faltan para el vencimiento de una factura a crédito.
+def fecha_vencimiento(fecha, dias_credito, formato_preferido=None):
+    """Fecha (datetime.date) en que vence una factura a crédito.
 
-    Vencimiento = fecha de la factura + días de crédito. Devuelve:
-      * un número positivo  -> todavía faltan esos días para pagar/cobrar,
-      * 0                   -> vence hoy,
-      * un número negativo  -> ya está vencida,
-      * None                -> la fecha no se pudo interpretar.
-
-    Lo usan Compras (cuentas por pagar) y Ventas (cuentas por cobrar) para pintar
-    las filas según la urgencia del vencimiento.
+    Vencimiento = fecha de la factura + días de crédito. Devuelve None si la
+    fecha no se puede interpretar.
     """
     f = parsear_fecha(fecha, formato_preferido)
     if f is None:
@@ -101,8 +95,26 @@ def dias_para_vencer(fecha, dias_credito, hoy=None, formato_preferido=None):
         dias = 0
     if dias < 0:
         dias = 0
-    base = hoy or date.today()
-    return (f + timedelta(days=dias) - base).days
+    return f + timedelta(days=dias)
+
+
+def dias_para_vencer(fecha, dias_credito, hoy=None, formato_preferido=None):
+    """Días que faltan para el vencimiento de una factura a crédito.
+
+    Devuelve:
+      * un número positivo  -> todavía faltan esos días para pagar/cobrar,
+      * 0                   -> vence hoy,
+      * un número negativo  -> ya está vencida,
+      * None                -> la fecha no se pudo interpretar.
+
+    Lo usan Compras (cuentas por pagar) y Ventas (cuentas por cobrar) para pintar
+    las filas según la urgencia del vencimiento y para el cuadrito que aparece al
+    pasar el mouse por encima de cada factura.
+    """
+    vencimiento = fecha_vencimiento(fecha, dias_credito, formato_preferido)
+    if vencimiento is None:
+        return None
+    return (vencimiento - (hoy or date.today())).days
 
 
 def texto_fecha_comienzo(config=None, defecto="Sin definir"):

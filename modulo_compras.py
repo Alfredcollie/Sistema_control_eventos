@@ -33,13 +33,33 @@ from datetime import datetime
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 
+# 🏦 Cuentas bancarias del sistema (las mismas que usa el módulo de Bancos):
+# al registrar un pago se indica de qué cuenta salió el dinero.
+try:
+    from bancos import cargar_bancos, etiqueta_banco
+except Exception:
+    cargar_bancos = None
+    etiqueta_banco = None
+
 # 🚀 CORTE DEL SISTEMA: fecha de comienzo (bloquea compras anteriores a esa fecha)
 try:
     from fecha_sistema import (
         sugerir_periodo_sire, validar_periodo_sire, validar_fecha_registro, texto_fecha_comienzo,
+        dias_para_vencer,   # 🎨 días que faltan para el vencimiento (colores de la tabla)
+        fecha_vencimiento,  # 🖱️ fecha de vencimiento (cuadrito al pasar el mouse)
     )
 except Exception:
     sugerir_periodo_sire = validar_periodo_sire = validar_fecha_registro = texto_fecha_comienzo = None
+    def dias_para_vencer(fecha, dias_credito, hoy=None, formato_preferido=None):
+        return None
+    def fecha_vencimiento(fecha, dias_credito, formato_preferido=None):
+        return None
+
+# 🖱️ Cuadrito con los días que faltan para el vencimiento (al pasar el mouse por la factura)
+try:
+    from tooltip_tabla import TooltipVencimiento
+except Exception:
+    TooltipVencimiento = None
 
 try:
     import pdfplumber
@@ -1406,6 +1426,11 @@ class CuentasPorPagarTab:
         
         btn_editar = ctk.CTkButton(frame_acciones, text="✏️ Editar Pagos", font=("Arial", 12, "bold"), command=self.abrir_ventana_edicion, fg_color="#34495e", hover_color="#2c3e50")
         btn_editar.pack(side="left", padx=5, pady=5)
+
+        # 📅 Listado de TODAS las facturas por pagar ordenadas por días para vencer
+        btn_vencer = ctk.CTkButton(frame_acciones, text="📅 Ver por Días por Vencer", font=("Arial", 12, "bold"),
+                                   command=self.ver_por_vencer, fg_color="#8e44ad", hover_color="#703688")
+        btn_vencer.pack(side="left", padx=5, pady=5)
         
         btn_refresh = ctk.CTkButton(frame_acciones, text="🔄 Actualizar", font=("Arial", 12, "bold"), command=lambda: self.cargar_datos_pagar(reset_pagina=True), fg_color="#7f8c8d", hover_color="#606b6b")
         btn_refresh.pack(side="right", padx=10, pady=5)
@@ -1454,11 +1479,39 @@ class CuentasPorPagarTab:
 
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "proveedor", "evento", "concepto", "neto_facturado", "pagado", "saldo", "archivos"))
         self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos)
-        
+
+        # 🎨 Colores de las filas según el vencimiento del crédito (ver leyenda abajo)
+        self.tabla.tag_configure("pagado", background="#d5f5e3")     # 🟢 ya pagada
+        self.tabla.tag_configure("urgente", background="#f8d7da")    # 🔴 vence en 5 días o menos
+        self.tabla.tag_configure("proximo", background="#d6eaf8")    # 🔵 vence en 6 a 15 días
+
         scroll_y = ctk.CTkScrollbar(f_tabla, orientation="vertical", command=self.tabla.yview)
         self.tabla.configure(yscrollcommand=scroll_y.set)
         self.tabla.pack(side="left", fill="both", expand=True)
         scroll_y.pack(side="right", fill="y")
+
+        # 🏷️ LEYENDA: explica el color de cada fila de la tabla
+        f_leyenda = ctk.CTkFrame(self.tab_frame, fg_color="#f8f9fa", corner_radius=6,
+                                 border_width=1, border_color="#e0e0e0")
+        f_leyenda.pack(fill="x", padx=15, pady=(8, 0))
+        ctk.CTkLabel(f_leyenda, text="Leyenda:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 8), pady=5)
+        for color_fondo, color_texto, texto_leyenda in (
+            ("#f8d7da", "#c0392b", "🔴 Vence en 5 días o menos (o ya vencida)"),
+            ("#d6eaf8", "#1f538d", "🔵 Vence entre 6 y 15 días"),
+            ("#d5f5e3", "#1e8449", "🟢 Factura pagada"),
+            ("#ffffff", "#7f8c8d", "⚪ Más de 15 días de plazo"),
+        ):
+            chip = ctk.CTkFrame(f_leyenda, fg_color=color_fondo, corner_radius=4,
+                                border_width=1, border_color="#d0d0d0")
+            chip.pack(side="left", padx=4, pady=5)
+            ctk.CTkLabel(chip, text=texto_leyenda, font=("Arial", 10, "bold"),
+                         text_color=color_texto).pack(padx=8, pady=2)
+
+        # 🖱️ Al pasar el mouse por encima de una factura aparece un cuadrito con los
+        # días que le faltan para vencerse (y la fecha de vencimiento).
+        if TooltipVencimiento is not None:
+            self.vencimientos_filas = {}
+            self.tooltip_vencimiento = TooltipVencimiento(self.tabla, self._datos_tooltip)
 
         self.frame_bottom = ctk.CTkFrame(self.tab_frame, fg_color="transparent")
         self.frame_bottom.pack(fill="x", padx=15, pady=10)
@@ -1482,6 +1535,224 @@ class CuentasPorPagarTab:
         self.lbl_total_general.pack(side="right")
 
         self.main_root.after(100, lambda: self.cargar_datos_pagar(reset_pagina=True))
+
+    def _datos_tooltip(self, iid):
+        """(vencimiento, pagada) de una fila, para el cuadrito del mouse.
+
+        El vencimiento viene como 'YYYY-MM-DD' (o '' si no se pudo calcular).
+        """
+        datos = getattr(self, "vencimientos_filas", {}).get(iid)
+        if not datos:
+            return None
+        return datos
+
+    # ==================================================================
+    # 📅 FACTURAS POR PAGAR ORDENADAS POR DÍAS PARA VENCER
+    # ==================================================================
+    def ver_por_vencer(self):
+        """Abre una ventana con TODAS las facturas por pagar en orden de urgencia.
+
+        Primero las vencidas, después las que vencen en 5 días o menos, luego las
+        de 6 a 15 días y al final las que tienen más plazo. Se puede incluir
+        también las ya pagadas.
+        """
+        # La ventana cuelga de la ventana principal del sistema (no del marco interno)
+        padre = self.tab_frame.winfo_toplevel()
+        v = ctk.CTkToplevel(padre)
+        v.title("Facturas por Pagar - Ordenadas por Días para Vencer")
+        v.geometry("1240x640")
+        try:
+            v.transient(padre)
+        except Exception:
+            pass
+        try:
+            v.after(80, lambda: v.focus_force())
+        except Exception:
+            pass
+
+        ctk.CTkLabel(v, text="📅 FACTURAS POR PAGAR ORDENADAS POR DÍAS PARA VENCER",
+                     font=("Arial", 16, "bold"), text_color="#1f538d").pack(pady=(12, 2))
+
+        f_top = ctk.CTkFrame(v, fg_color="#f8f9fa", corner_radius=8, border_width=1,
+                             border_color="#e0e0e0")
+        f_top.pack(fill="x", padx=12, pady=(6, 6))
+        var_pagadas = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(f_top, text="Incluir facturas ya pagadas", variable=var_pagadas,
+                        font=("Arial", 11, "bold")).pack(side="left", padx=12, pady=8)
+        lbl_resumen_venc = ctk.CTkLabel(f_top, text="Cargando...", font=("Arial", 12, "bold"),
+                                        text_color="#1f538d", justify="left")
+        lbl_resumen_venc.pack(side="left", padx=12, pady=8)
+        ctk.CTkButton(f_top, text="🔄 Actualizar", width=120, font=("Arial", 11, "bold"),
+                      fg_color="#1f538d", hover_color="#163b65",
+                      command=lambda: _cargar()).pack(side="right", padx=10, pady=8)
+
+        f_tabla = ctk.CTkFrame(v, fg_color="transparent")
+        f_tabla.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        columnas = ("dias", "vence", "nro_doc", "proveedor", "evento", "neto", "saldo", "estado")
+        tabla_venc = ttk.Treeview(f_tabla, columns=columnas, show="headings")
+        for col, txt, ancho, anc in (("dias", "Días para vencer", 130, "center"),
+                                     ("vence", "Vence el", 95, "center"),
+                                     ("nro_doc", "N° Documento", 110, "center"),
+                                     ("proveedor", "Proveedor", 260, "w"),
+                                     ("evento", "Evento Asociado", 200, "w"),
+                                     ("neto", "Neto a Pagar", 105, "e"),
+                                     ("saldo", "Saldo Pendiente", 115, "e"),
+                                     ("estado", "Estado", 150, "center")):
+            tabla_venc.heading(col, text=txt)
+            tabla_venc.column(col, width=ancho, anchor=anc)
+        tabla_venc.tag_configure("vencido", background="#f8d7da")
+        tabla_venc.tag_configure("urgente", background="#f8d7da")
+        tabla_venc.tag_configure("proximo", background="#d6eaf8")
+        tabla_venc.tag_configure("lejano", background="#f4f6f7")
+        tabla_venc.tag_configure("pagado", background="#d5f5e3")
+        scroll_v = ctk.CTkScrollbar(f_tabla, orientation="vertical", command=tabla_venc.yview)
+        tabla_venc.configure(yscrollcommand=scroll_v.set)
+        tabla_venc.pack(side="left", fill="both", expand=True)
+        scroll_v.pack(side="right", fill="y")
+
+        # 🖱️ El mismo cuadrito de días al pasar el mouse por encima
+        if TooltipVencimiento is not None:
+            v.vencimientos_filas = {}
+            TooltipVencimiento(tabla_venc,
+                               lambda iid, v=v: getattr(v, "vencimientos_filas", {}).get(iid))
+
+        ctk.CTkButton(v, text="Cerrar", width=120, fg_color="#34495e", hover_color="#2c3e50",
+                      command=v.destroy).pack(pady=(0, 10))
+
+        # Referencias para poder dibujar desde el hilo principal
+        v.tabla_venc_ref = tabla_venc
+        v.lbl_resumen_venc_ref = lbl_resumen_venc
+
+        def _cargar():
+            tabla_venc.delete(*tabla_venc.get_children())
+            v.vencimientos_filas = {}
+            lbl_resumen_venc.configure(text="⏳ Cargando las facturas...")
+            threading.Thread(target=self._worker_vencimientos,
+                             args=(v, bool(var_pagadas.get())), daemon=True).start()
+
+        var_pagadas.trace_add("write", lambda *_: _cargar())
+        _cargar()
+
+    def _worker_vencimientos(self, v, incluir_pagadas):
+        """Trae TODAS las facturas con su saldo y su vencimiento (en segundo plano)."""
+        filas = []
+        conn = obtener_conexion_segura(mostrar_aviso=False)
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, fecha, numero_documento, proveedor, evento_asociado, subtotal,
+                           impuesto, total, COALESCE(det_monto, 0), tipo_documento,
+                           COALESCE(dias_credito, 0)
+                    FROM facturas_recibidas ORDER BY id DESC
+                """)
+                registros = cursor.fetchall()
+                cursor.execute("SELECT id_factura, SUM(monto_pagado) FROM pagos_comprobantes GROUP BY id_factura")
+                pagos_lookup = {r[0]: float(r[1] or 0) for r in cursor.fetchall()}
+            except Exception:
+                registros, pagos_lookup = [], {}
+            finally:
+                liberar_conexion(conn)
+
+            hoy = datetime.now().date()
+            for reg in registros:
+                (id_fac, fecha, nro, prov, evento, sub, imp, tot, det, tipo_doc,
+                 dias_cred) = reg[:11]
+                tot_val = float(tot) if tot else 0.0
+                imp_val = float(imp) if imp else 0.0
+                det_val = float(det) if det else 0.0
+                if tipo_doc and "Recibo" in str(tipo_doc) and "8%" in str(tipo_doc):
+                    neto = tot_val - imp_val - det_val
+                else:
+                    neto = tot_val - det_val
+                saldo = max(0.0, neto - pagos_lookup.get(id_fac, 0.0))
+                if not incluir_pagadas and saldo <= 0.01:
+                    continue
+                vencimiento = fecha_vencimiento(fecha, dias_cred)
+                dias = (vencimiento - hoy).days if vencimiento else None
+                if saldo <= 0.01:
+                    estado = "pagado"
+                elif dias is None:
+                    estado = "lejano"
+                elif dias < 0:
+                    estado = "vencido"
+                elif dias <= 5:
+                    estado = "urgente"
+                elif dias <= 15:
+                    estado = "proximo"
+                else:
+                    estado = "lejano"
+                filas.append({
+                    "dias": dias, "vencimiento": vencimiento, "nro_doc": nro or "S/N",
+                    "proveedor": prov or "", "evento": evento or "", "neto": neto,
+                    "saldo": saldo, "estado": estado,
+                })
+
+        # 🔽 Orden por urgencia: primero lo vencido y lo que vence antes
+        filas.sort(key=lambda f: (f["dias"] is None,
+                                  f["dias"] if f["dias"] is not None else 99999,
+                                  -f["saldo"]))
+        self.main_root.after(0, lambda: self._pintar_vencimientos(v, filas))
+
+    def _pintar_vencimientos(self, v, filas):
+        """Dibuja el listado ordenado por vencimiento (hilo principal)."""
+        try:
+            if not v.winfo_exists():
+                return
+        except Exception:
+            return
+        tabla = getattr(v, "tabla_venc_ref", None)
+        etiqueta = getattr(v, "lbl_resumen_venc_ref", None)
+        if tabla is None:
+            return
+        try:
+            tabla.delete(*tabla.get_children())
+        except Exception:
+            return
+
+        grupos = {"vencido": [0, 0.0], "urgente": [0, 0.0], "proximo": [0, 0.0],
+                  "lejano": [0, 0.0], "pagado": [0, 0.0]}
+        vencimientos_filas = {}
+        v.vencimientos_filas = vencimientos_filas      # 🖱️ lo usa el cuadrito del mouse
+        for f in filas:
+            dias = f["dias"]
+            plural = "día" if abs(dias or 0) == 1 else "días"
+            if dias is None:
+                dias_txt = "Sin fecha"
+            elif dias < 0:
+                dias_txt = f"Vencida hace {abs(dias)} {plural}"
+            elif dias == 0:
+                dias_txt = "¡VENCE HOY!"
+            else:
+                dias_txt = f"{dias} {plural}"
+            vence_txt = f["vencimiento"].strftime("%d/%m/%Y") if f["vencimiento"] else "-"
+            estados = {"vencido": "🔴 Vencida", "urgente": "🔴 Vence en 5 días o menos",
+                       "proximo": "🔵 Vence en 6 a 15 días", "lejano": "⚪ Más de 15 días",
+                       "pagado": "🟢 Pagada"}
+            iid = tabla.insert("", tk.END, values=(dias_txt, vence_txt, f["nro_doc"], f["proveedor"],
+                                                   f["evento"], formatear_moneda(f["neto"]),
+                                                   formatear_moneda(f["saldo"]),
+                                                   estados.get(f["estado"], "")),
+                               tags=(f["estado"],))
+            if f["estado"] != "pagado":
+                vencimientos_filas[iid] = (f["vencimiento"].strftime("%Y-%m-%d")
+                                           if f["vencimiento"] else "", False)
+            grupos[f["estado"]][0] += 1
+            grupos[f["estado"]][1] += f["saldo"]
+
+        total_pendiente = sum(g[1] for k, g in grupos.items() if k != "pagado")
+        resumen = (f"🔴 Vencidas: {grupos['vencido'][0]} ({formatear_moneda(grupos['vencido'][1])})   |   "
+                   f"🔴 ≤5 días: {grupos['urgente'][0]} ({formatear_moneda(grupos['urgente'][1])})   |   "
+                   f"🔵 6-15 días: {grupos['proximo'][0]} ({formatear_moneda(grupos['proximo'][1])})   |   "
+                   f"⚪ +15 días: {grupos['lejano'][0]} ({formatear_moneda(grupos['lejano'][1])})   |   "
+                   f"TOTAL POR PAGAR: {formatear_moneda(total_pendiente)}")
+        if grupos["pagado"][0]:
+            resumen += f"   |   🟢 Pagadas: {grupos['pagado'][0]}"
+        if etiqueta is not None:
+            try:
+                etiqueta.configure(text=resumen)
+            except Exception:
+                pass
 
     def pagina_anterior(self):
         if self.pagina_actual > 1: 
@@ -1698,7 +1969,8 @@ class CuentasPorPagarTab:
         datos = cache_sistema.obtener(clave_cache)
 
         if datos is not None:
-            self._pintar_tabla_cobros(datos["filas"], datos["total"], token)
+            self._pintar_tabla_cobros(datos["filas"], datos["total"], token,
+                                      datos.get("estados"), datos.get("vencimientos"))
         else:
             self.tabla.delete(*self.tabla.get_children())
                 
@@ -1712,11 +1984,13 @@ class CuentasPorPagarTab:
 
     def _worker_cargar_datos_pagar(self, filtro, token, offset, clave_cache):
         filas_resultado = []
+        estados = []            # 🎨 color de cada fila (mismo orden que filas_resultado)
+        vencimientos = []       # 🖱️ fecha de vencimiento de cada fila ('YYYY-MM-DD' o '')
         total_pendiente = 0.0
         conn = obtener_conexion_segura(mostrar_aviso=False)
         
         if not conn:
-            self.main_root.after(0, lambda: self._pintar_tabla_cobros([], 0.0, token))
+            self.main_root.after(0, lambda: self._pintar_tabla_cobros([], 0.0, token, []))
             return
             
         try:
@@ -1725,14 +1999,16 @@ class CuentasPorPagarTab:
             if filtro == "":
                 cursor.execute("""
                     SELECT id, fecha, numero_documento, proveedor, evento_asociado, descripcion, 
-                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento 
+                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento,
+                           COALESCE(dias_credito, 0)
                     FROM facturas_recibidas ORDER BY id DESC LIMIT %s OFFSET %s
                 """, (self.registros_por_pagina, offset))
             else:
                 val = f"%{filtro}%"
                 cursor.execute("""
                     SELECT id, fecha, numero_documento, proveedor, evento_asociado, descripcion, 
-                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento 
+                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento,
+                           COALESCE(dias_credito, 0)
                     FROM facturas_recibidas 
                     WHERE numero_documento ILIKE %s OR proveedor ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s
                     ORDER BY id DESC LIMIT %s OFFSET %s
@@ -1753,7 +2029,8 @@ class CuentasPorPagarTab:
                 pagos_lookup[id_f] = (float(sum_m) if sum_m else 0.0, int(cnt) if cnt else 0)
             
             for reg in registros:
-                id_factura, fecha, nro_doc, proveedor, evento, concepto, subtotal, impuesto, tot_bruto, det_monto, tipo_doc = reg
+                (id_factura, fecha, nro_doc, proveedor, evento, concepto, subtotal, impuesto,
+                 tot_bruto, det_monto, tipo_doc, dias_credito) = reg[:12]
                 
                 sub_val = float(subtotal) if subtotal else 0.0
                 imp_val = float(impuesto) if impuesto else 0.0
@@ -1788,26 +2065,54 @@ class CuentasPorPagarTab:
                     txt_adjuntos
                 )
                 
+                # 🎨 Color de la fila según el vencimiento del crédito:
+                # 🟢 pagada · 🔴 vence en 5 días o menos (o vencida) · 🔵 vence en 6 a 15 días
+                dias_restantes = dias_para_vencer(fecha, dias_credito)
+                if saldo_pendiente <= 0.01:
+                    estado_fila = "pagado"
+                elif dias_restantes is None:
+                    estado_fila = ""
+                elif dias_restantes <= 5:
+                    estado_fila = "urgente"
+                elif dias_restantes <= 15:
+                    estado_fila = "proximo"
+                else:
+                    estado_fila = ""
+                estados.append(estado_fila)
+                # 🖱️ Fecha de vencimiento: la usa el cuadrito que aparece al pasar el mouse
+                vencimiento = fecha_vencimiento(fecha, dias_credito)
+                vencimientos.append(vencimiento.strftime("%Y-%m-%d") if vencimiento else "")
+
                 total_pendiente += saldo_pendiente
                 filas_resultado.append(row_vals)
                 contador += 1
                 
-            cache_sistema.guardar(clave_cache, {"filas": filas_resultado, "total": total_pendiente})
+            cache_sistema.guardar(clave_cache, {"filas": filas_resultado, "total": total_pendiente,
+                                                "estados": estados, "vencimientos": vencimientos})
         except Exception: 
             pass
         finally: 
             liberar_conexion(conn)
             
-        self.main_root.after(0, lambda: self._pintar_tabla_cobros(filas_resultado, total_pendiente, token))
+        self.main_root.after(0, lambda: self._pintar_tabla_cobros(filas_resultado, total_pendiente,
+                                                                  token, estados, vencimientos))
 
-    def _pintar_tabla_cobros(self, filas_resultado, total_pendiente, token_actual):
+    def _pintar_tabla_cobros(self, filas_resultado, total_pendiente, token_actual, estados=None,
+                             vencimientos=None):
         if token_actual != getattr(self, '_carga_pagos_token', token_actual):
             return
             
         self.tabla.delete(*self.tabla.get_children())
+        # 🖱️ Vencimiento de cada fila, para el cuadrito que sale al pasar el mouse
+        self.vencimientos_filas = {}
             
-        for row_vals in filas_resultado:
-            self.tabla.insert("", tk.END, values=row_vals)
+        for i, row_vals in enumerate(filas_resultado):
+            # 🎨 Se pinta la fila con el color de su vencimiento (leyenda debajo de la tabla)
+            estado = estados[i] if estados and i < len(estados) else ""
+            iid = self.tabla.insert("", tk.END, values=row_vals, tags=(estado,) if estado else ())
+            self.vencimientos_filas[iid] = (
+                (vencimientos[i] if vencimientos and i < len(vencimientos) else ""),
+                estado == "pagado")
             
         self.lbl_total_general.configure(text=f"Total Pendiente Filtrado: {formatear_moneda(total_pendiente)}")
         
@@ -1839,7 +2144,7 @@ class CuentasPorPagarTab:
 
         v_pago = ctk.CTkToplevel(self.main_root)
         v_pago.title("Registrar Nuevo Pago")
-        v_pago.geometry("400x350")
+        v_pago.geometry("400x470")
         v_pago.transient(self.main_root)
         v_pago.grab_set()
 
@@ -1858,6 +2163,15 @@ class CuentasPorPagarTab:
         ent_fecha = ctk.CTkEntry(f_form)
         ent_fecha.pack(fill="x", pady=(0, 10))
         ent_fecha.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        # 🏦 Cuenta bancaria de la que salió el dinero (la usa el módulo de Bancos)
+        ctk.CTkLabel(f_form, text="🏦 Pagado desde (cuenta bancaria):", font=("Arial", 11, "bold")).pack(anchor="w")
+        etiquetas_cuentas = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else [])
+        cmb_cuenta_pago = ctk.CTkComboBox(f_form, values=etiquetas_cuentas, state="readonly")
+        cmb_cuenta_pago.pack(fill="x", pady=(0, 2))
+        cmb_cuenta_pago.set(etiquetas_cuentas[0])
+        ctk.CTkLabel(f_form, text="Sirve para que el saldo de esa cuenta cuadre en el módulo de Bancos.",
+                     font=("Arial", 9, "italic"), text_color="gray", wraplength=340,
+                     justify="left").pack(anchor="w", pady=(0, 10))
 
         def procesar_pago(event=None):
             try:
@@ -1906,8 +2220,10 @@ class CuentasPorPagarTab:
                 cat_res = cursor.fetchone()
                 categoria_db = cat_res[0] if cat_res and cat_res[0] else "GENERAL"
                 
-                cursor.execute("INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago, categoria_suministro, codigo_cotizacion) VALUES (%s, %s, %s, %s, %s, %s, %s)", 
-                               (id_factura, monto_val, ruta_destino, proveedor, fecha_val, categoria_db, nro_doc))
+                cuenta_val = cmb_cuenta_pago.get().strip()
+                if cuenta_val == "(No especificada)": cuenta_val = ""
+                cursor.execute("INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago, categoria_suministro, codigo_cotizacion, cuenta_origen) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
+                               (id_factura, monto_val, ruta_destino, proveedor, fecha_val, categoria_db, nro_doc, cuenta_val))
                 conn.commit()
                 
                 cache_sistema.invalidar()
@@ -1969,9 +2285,9 @@ class CuentasPorPagarTab:
         frame_cuerpo = ctk.CTkFrame(v_edit, fg_color="transparent")
         frame_cuerpo.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        sub_tabla = ttk.Treeview(frame_cuerpo, columns=("id", "monto", "fecha", "tiene_archivo"), show="headings", height=8)
-        sub_tabla.heading("id", text="ID Pago"); sub_tabla.heading("monto", text="Monto"); sub_tabla.heading("fecha", text="Fecha"); sub_tabla.heading("tiene_archivo", text="¿Soporte?")
-        sub_tabla.column("id", width=60, anchor="center"); sub_tabla.column("monto", width=110, anchor="e"); sub_tabla.column("fecha", width=110, anchor="center"); sub_tabla.column("tiene_archivo", width=130, anchor="center")
+        sub_tabla = ttk.Treeview(frame_cuerpo, columns=("id", "monto", "fecha", "cuenta", "tiene_archivo"), show="headings", height=8)
+        sub_tabla.heading("id", text="ID Pago"); sub_tabla.heading("monto", text="Monto"); sub_tabla.heading("fecha", text="Fecha"); sub_tabla.heading("cuenta", text="🏦 Cuenta bancaria"); sub_tabla.heading("tiene_archivo", text="¿Soporte?")
+        sub_tabla.column("id", width=60, anchor="center"); sub_tabla.column("monto", width=100, anchor="e"); sub_tabla.column("fecha", width=95, anchor="center"); sub_tabla.column("cuenta", width=210, anchor="w"); sub_tabla.column("tiene_archivo", width=90, anchor="center")
         sub_tabla.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
         def refrescar_subtabla():
@@ -1980,9 +2296,9 @@ class CuentasPorPagarTab:
                 conn = obtener_conexion_segura(parent=v_edit)
                 if not conn: return
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, monto_pagado, fecha_pago, archivo_ruta FROM pagos_comprobantes WHERE id_factura = %s", (id_factura,))
+                cursor.execute("SELECT id, monto_pagado, fecha_pago, COALESCE(cuenta_origen, ''), archivo_ruta FROM pagos_comprobantes WHERE id_factura = %s", (id_factura,))
                 for a in cursor.fetchall(): 
-                    sub_tabla.insert("", tk.END, values=(a[0], formatear_moneda(a[1]), a[2] if a[2] else "Sin fecha", "✅ Sí" if (a[3] and os.path.exists(a[3])) else "❌ No"))
+                    sub_tabla.insert("", tk.END, values=(a[0], formatear_moneda(a[1]), a[2] if a[2] else "Sin fecha", a[3] if a[3] else "(No especificada)", "✅ Sí" if (a[4] and os.path.exists(a[4])) else "❌ No"))
                 liberar_conexion(conn)
             except Exception: pass
             
@@ -1997,13 +2313,15 @@ class CuentasPorPagarTab:
             conn = obtener_conexion_segura(parent=v_edit)
             if not conn: return
             cursor = conn.cursor()
-            cursor.execute("SELECT monto_pagado, fecha_pago FROM pagos_comprobantes WHERE id = %s", (id_pago,))
-            monto_actual, fecha_actual = cursor.fetchone()
+            cursor.execute("SELECT monto_pagado, fecha_pago, COALESCE(cuenta_origen, '') FROM pagos_comprobantes WHERE id = %s", (id_pago,))
+            fila_pago = cursor.fetchone()
+            monto_actual, fecha_actual = fila_pago[0], fila_pago[1]
+            cuenta_actual = fila_pago[2] if len(fila_pago) > 2 else ""
             liberar_conexion(conn)
 
             v_mod_pago = ctk.CTkToplevel(v_edit)
             v_mod_pago.title("Modificar Pago")
-            v_mod_pago.geometry("350x250")
+            v_mod_pago.geometry("380x390")
             v_mod_pago.transient(v_edit)
             v_mod_pago.grab_set()
 
@@ -2021,6 +2339,13 @@ class CuentasPorPagarTab:
             ent_mod_fecha = ctk.CTkEntry(f_form)
             ent_mod_fecha.pack(fill="x", pady=(0, 10))
             ent_mod_fecha.insert(0, str(fecha_actual) if fecha_actual else datetime.now().strftime("%Y-%m-%d"))
+            # 🏦 Cuenta bancaria de la que salió el dinero (se puede corregir aquí)
+            ctk.CTkLabel(f_form, text="🏦 Pagado desde (cuenta bancaria):", font=("Arial", 11, "bold")).pack(anchor="w")
+            etiquetas_mod = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else [])
+            if cuenta_actual and cuenta_actual not in etiquetas_mod: etiquetas_mod.append(cuenta_actual)
+            cmb_mod_cuenta = ctk.CTkComboBox(f_form, values=etiquetas_mod, state="readonly")
+            cmb_mod_cuenta.pack(fill="x", pady=(0, 10))
+            cmb_mod_cuenta.set(cuenta_actual if cuenta_actual in etiquetas_mod else etiquetas_mod[0])
 
             def guardar_mod(event=None):
                 nonlocal saldo_actual_global
@@ -2048,10 +2373,12 @@ class CuentasPorPagarTab:
                         registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Pagar", f"Eliminó el pago ID {id_pago}")
                 else:
                     nueva_fecha = ent_mod_fecha.get().strip() or fecha_actual
+                    nueva_cuenta = cmb_mod_cuenta.get().strip()
+                    if nueva_cuenta == "(No especificada)": nueva_cuenta = ""
                     conn = obtener_conexion_segura(parent=v_mod_pago)
                     if not conn: return
                     cursor = conn.cursor()
-                    cursor.execute("UPDATE pagos_comprobantes SET monto_pagado = %s, fecha_pago = %s WHERE id = %s", (nuevo_monto, nueva_fecha, id_pago))
+                    cursor.execute("UPDATE pagos_comprobantes SET monto_pagado = %s, fecha_pago = %s, cuenta_origen = %s WHERE id = %s", (nuevo_monto, nueva_fecha, nueva_cuenta, id_pago))
                     conn.commit()
                     liberar_conexion(conn)
                     cache_sistema.invalidar()

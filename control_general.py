@@ -15,6 +15,7 @@ import ctypes
 import os
 import json
 import importlib
+import inspect
 import urllib.request
 import ssl
 import bcrypt
@@ -87,11 +88,50 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+def ajustar_al_area_de_trabajo(ventana):
+    """🪟 En Windows, si la ventana maximizada sobresale del área de trabajo (la
+    barra de tareas tapa el borde inferior), se ajusta para que se vea completa:
+    así la barra de pestañas de abajo nunca queda oculta."""
+    if sys.platform != "win32":
+        return
+    try:
+        u = ctypes.windll.user32
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        area = RECT()
+        if not u.SystemParametersInfoW(0x0030, 0, ctypes.byref(area), 0):   # SPI_GETWORKAREA
+            return
+        class PUNTO(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        hwnd = u.GetParent(ventana.winfo_id()) or ventana.winfo_id()
+        cliente = RECT()
+        u.GetClientRect(hwnd, ctypes.byref(cliente))
+        origen = PUNTO(0, 0)
+        u.ClientToScreen(hwnd, ctypes.byref(origen))
+        x1, y1 = origen.x, origen.y
+        x2, y2 = x1 + cliente.right, y1 + cliente.bottom
+        if x1 >= area.left and y1 >= area.top and x2 <= area.right and y2 <= area.bottom:
+            return                       # ya entra completo: no se toca
+        ancho = area.right - area.left
+        alto = area.bottom - area.top
+        ventana.geometry(f"{ancho}x{alto}+{area.left}+{area.top}")
+    except Exception:
+        pass
+
+
 def maximizar_ventana(ventana):
     """Maximiza ventanas sin errores en macOS ni Windows."""
     try:
         if sys.platform == "win32":
             ventana.state("zoomed")
+            try:
+                ventana.after(150, lambda v=ventana: ajustar_al_area_de_trabajo(v))
+            except Exception:
+                pass
         else:
             w = ventana.winfo_screenwidth()
             h = ventana.winfo_screenheight()
@@ -144,6 +184,95 @@ def traer_al_frente(ventana, retrasos=(60, 260, 700, 1150)):
             ventana.after(retardo, _traer)
         except Exception:
             pass
+
+
+# ==========================================================
+# 🪟 AYUDAS DE LAS VENTANAS DE MÓDULOS
+# ==========================================================
+# Métodos que vuelven a traer los datos de un módulo desde la base de datos.
+# El sistema los usa cuando se abre un módulo que YA estaba abierto, para que la
+# ventana que se trae al frente muestre la información actualizada.
+METODOS_RECARGA_MODULOS = (
+    "cargar_datos_tabla", "cargar_datos_cobrar", "cargar_datos_pagar", "cargar_datos_nc",
+    "cargar_clientes_tabla", "cargar_proveedores_tabla", "cargar_tabla",
+    "cargar_historial_ordenes", "cargar_historial", "cargar_registros",
+    "cargar_solicitudes_tab", "cargar_datos_diario", "cargar_datos_mayor", "cargar_datos_db",
+    "cargar_kpis", "cargar_categorias", "cargar_combos",
+    "refrescar_saldos", "refrescar_transferencias", "refrescar_tree",
+    "refrescar_tabla_categorias", "refrescar_datos", "actualizar_tabla", "recargar_datos",
+)
+
+
+def _acepta_reset_pagina(metodo):
+    """¿El método de recarga acepta el argumento reset_pagina?"""
+    try:
+        return "reset_pagina" in inspect.signature(metodo).parameters
+    except Exception:
+        return False
+
+
+def _buscar_metodos_recarga(objeto, encontrados, vistos, profundidad=0):
+    """Busca (sin repetir) los métodos de recarga dentro de un módulo abierto.
+
+    Entra también en los paneles internos (las pestañas del módulo) pero nunca en
+    los widgets: sus métodos no recargan datos y son cientos.
+    """
+    if objeto is None or id(objeto) in vistos or profundidad > 2:
+        return
+    vistos.add(id(objeto))
+    for nombre in dir(objeto):
+        if nombre.startswith("_"):
+            continue
+        try:
+            valor = getattr(objeto, nombre)
+        except Exception:
+            continue
+        if callable(valor):
+            if nombre in METODOS_RECARGA_MODULOS:
+                encontrados.append(valor)
+        elif not isinstance(valor, (str, bytes, int, float, bool, list, tuple, dict, set)):
+            if not isinstance(valor, tk.Misc):
+                _buscar_metodos_recarga(valor, encontrados, vistos, profundidad + 1)
+
+
+def refrescar_instancia_modulo(instancia):
+    """🔄 Vuelve a cargar los datos de un módulo abierto.
+
+    Devuelve cuántos apartados se recargaron (0 si el módulo no expone ninguno).
+    """
+    encontrados = []
+    try:
+        _buscar_metodos_recarga(instancia, encontrados, set())
+    except Exception:
+        return 0
+    ejecutados = 0
+    for metodo in encontrados:
+        try:
+            if _acepta_reset_pagina(metodo):
+                metodo(reset_pagina=True)
+            else:
+                metodo()
+            ejecutados += 1
+        except Exception:
+            pass
+    return ejecutados
+
+
+def poner_ventana_en_barra_tareas(ventana):
+    """🪟 En Windows asegura que la ventana del módulo tenga su propio botón en la
+    barra de tareas: así se puede minimizar, restaurar y cerrar desde ahí."""
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetParent(ventana.winfo_id()) or ventana.winfo_id()
+        GWL_EXSTYLE, WS_EX_APPWINDOW = -20, 0x00040000
+        estilo = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, estilo | WS_EX_APPWINDOW)
+        SWP = 0x0020 | 0x0002 | 0x0001 | 0x0004      # FRAMECHANGED | NOMOVE | NOSIZE | NOZORDER
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, SWP)
+    except Exception:
+        pass
 
 
 def ruta_recurso(ruta_relativa):
@@ -407,6 +536,9 @@ class ControlGeneralEventos:
         }
         # 🪟 Ventanas de módulos abiertas: {clave_modulo: ventana}
         self.ventanas_modulos = {}
+        # 🪟 Instancia de cada módulo abierto: sirve para ACTUALIZAR sus datos
+        # cuando se vuelve a pulsar el módulo en el menú lateral.
+        self.instancias_modulos = {}
         self.root.withdraw()
         self.abrir_ventana_login()
 
@@ -605,6 +737,32 @@ class ControlGeneralEventos:
         self.sidebar.pack(side="left", fill="y"); self.sidebar.pack_propagate(False)
         self.contenedor_central = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
         self.contenedor_central.pack(side="right", fill="both", expand=True)
+
+        # ==================================================
+        # 🪟 PESTAÑAS DE LOS MÓDULOS ABIERTOS (parte de abajo)
+        # Cada módulo abierto aparece aquí como una pestaña: al pulsarla se trae al
+        # frente y se actualiza; con su ✖ se cierra. Se arma sola.
+        # ==================================================
+        # Línea superior: separa visualmente la barra de pestañas del contenido
+        self.linea_pestanas = ctk.CTkFrame(self.contenedor_central, height=2, corner_radius=0,
+                                           fg_color=c_btn)
+        self.linea_pestanas.pack(side="bottom", fill="x")
+        self.barra_pestanas = ctk.CTkFrame(self.contenedor_central, corner_radius=0,
+                                           fg_color=fondo_seguro, height=42)
+        self.barra_pestanas.pack(side="bottom", fill="x")
+        self.barra_pestanas.pack_propagate(False)
+        self.lbl_pestanas = ctk.CTkLabel(self.barra_pestanas, text="🪟 Módulos abiertos: (ninguno)",
+                                         font=("Arial", 10, "bold"), text_color="#7fb3d5")
+        self.lbl_pestanas.pack(side="left", padx=(12, 6))
+        # 🖱️ Aquí se dibujan las pestañas. Es un marco normal (no un CTkScrollableFrame):
+        # dentro de una barra con pack_propagate(False) el marco con scroll se aplastaba
+        # y las pestañas quedaban de 7 píxeles (invisibles).
+        self.pestanas_area = ctk.CTkFrame(self.barra_pestanas, fg_color="transparent")
+        self.pestanas_area.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=4)
+        # 🖱️ Pestañas dibujadas: {clave_modulo: marco de la pestaña}
+        self.pestanas_modulos = {}
+        # 🪟 Módulo que tiene el foco (su pestaña se pinta resaltada)
+        self._modulo_activo = None
         frame_top_sidebar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         frame_top_sidebar.pack(side="top", fill="x", pady=(10, 5))
         ruta_logo_sidebar = ruta_recurso("logo.png")
@@ -619,6 +777,7 @@ class ControlGeneralEventos:
         frame_bottom_sidebar.pack(side="bottom", fill="x", pady=(5, 10))
         lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text=f"Software desarrollado por Alfred Collie\nVersión {VERSION_ACTUAL} © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
         lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
+
 
         # ==================================================
         # ⛶ PANTALLA COMPLETA (oculta todo el menú de la izquierda)
@@ -756,25 +915,24 @@ class ControlGeneralEventos:
         if not self.tiene_permiso(clave):
             return messagebox.showerror("Acceso Denegado", "No tiene permisos para este módulo.")
 
-        # Configuración General y Usuarios ya abren su propia ventana
+        # Configuración General y Usuarios ya abren su propia ventana: si esa
+        # ventana ya está abierta se trae al frente en lugar de abrir otra.
         if clave in ("configuracion", "usuarios"):
+            if self._ventana_viva(self.ventanas_modulos.get(clave)):
+                return self.traer_al_frente_ventana_modulo(clave)
+            self.ventanas_modulos.pop(clave, None)
             abridor = self.funciones_modulos.get(clave)
             if abridor is not None:
                 abridor()
             return
 
-        # ¿Ya está abierto? -> se trae al frente
-        ventana = self.ventanas_modulos.get(clave)
-        if ventana is not None:
-            try:
-                if ventana.winfo_exists():
-                    ventana.deiconify()
-                    ventana.lift()
-                    ventana.focus_force()
-                    return
-            except Exception:
-                pass
-            self.ventanas_modulos.pop(clave, None)
+        # ¿Ya está abierto? -> se trae al frente y se ACTUALIZA la información
+        if self._ventana_viva(self.ventanas_modulos.get(clave)):
+            self.traer_al_frente_ventana_modulo(clave)
+            self.refrescar_ventana_modulo(clave)
+            return
+        self.ventanas_modulos.pop(clave, None)
+        self.instancias_modulos.pop(clave, None)
 
         creador = self.funciones_modulos.get(clave)
         if creador is None:
@@ -811,6 +969,35 @@ class ControlGeneralEventos:
         except Exception:
             pass
 
+        # ==================================================
+        # 🪟 BARRA DE LA VENTANA: actualizar, minimizar, expandir y cerrar
+        # (además de los botones normales de la barra de título del sistema)
+        # ==================================================
+        barra = ctk.CTkFrame(ventana, corner_radius=0, fg_color="#1a252c", height=34)
+        barra.pack(side="top", fill="x")
+        ctk.CTkLabel(barra, text=f"🪟 {titulo_modulo}", font=("Arial", 11, "bold"),
+                     text_color="white", anchor="w").pack(side="left", padx=(10, 6), pady=5)
+
+        def _cerrar(c=clave): self.cerrar_ventana_modulo(c)
+        def _minimizar(c=clave): self.minimizar_ventana_modulo(c)
+        def _expandir(c=clave): self.alternar_maximizar_ventana_modulo(c)
+        def _actualizar(c=clave): self.refrescar_ventana_modulo(c, aviso=True)
+
+        ctk.CTkButton(barra, text="✖ Cerrar", width=86, height=24, font=("Arial", 10, "bold"),
+                      fg_color="#c0392b", hover_color="#922b21", command=_cerrar
+                      ).pack(side="right", padx=(2, 8), pady=5)
+        btn_expandir = ctk.CTkButton(barra, text="🗖 Expandir", width=98, height=24, font=("Arial", 10, "bold"),
+                                     fg_color="#34495e", hover_color="#2c3e50", command=_expandir)
+        btn_expandir.pack(side="right", padx=2, pady=5)
+        ctk.CTkButton(barra, text="🗕 Minimizar", width=100, height=24, font=("Arial", 10, "bold"),
+                      fg_color="#34495e", hover_color="#2c3e50", command=_minimizar
+                      ).pack(side="right", padx=2, pady=5)
+        ctk.CTkButton(barra, text="🔄 Actualizar", width=105, height=24, font=("Arial", 10, "bold"),
+                      fg_color="#1f538d", hover_color="#163b65", command=_actualizar
+                      ).pack(side="right", padx=2, pady=5)
+        ctk.CTkLabel(barra, text="Atajos: F5 actualizar · F11 expandir",
+                     font=("Arial", 9, "italic"), text_color="#7f8c8d").pack(side="right", padx=10)
+
         contenedor = ctk.CTkFrame(ventana, corner_radius=0, fg_color="transparent")
         contenedor.pack(fill="both", expand=True)
         # Compatibilidad: algunos módulos llaman a estos métodos del marco contenedor
@@ -820,22 +1007,251 @@ class ControlGeneralEventos:
                 setattr(contenedor, metodo, dummy)
 
         self.ventanas_modulos[clave] = ventana
+        ventana._btn_expandir = btn_expandir          # para cambiar su texto al expandir
+        ventana._modulo_maximizado = False
         # La X de la ventana cierra el módulo y lo quita de la lista de abiertos
         ventana.protocol("WM_DELETE_WINDOW", lambda c=clave: self.cerrar_ventana_modulo(c))
         ventana.bind("<Destroy>", lambda e, c=clave: self._al_destruir_ventana(e, c), add="+")
+        # ⌨️ Atajos de la ventana del módulo: F5 actualiza · F11 expande o restaura
+        ventana.bind("<F5>", lambda _e, c=clave: self.refrescar_ventana_modulo(c, aviso=True), add="+")
+        ventana.bind("<F11>", lambda _e, c=clave: self.alternar_maximizar_ventana_modulo(c), add="+")
+        # 🪟 Al usar esta ventana, su pestaña de abajo queda resaltada
+        ventana.bind("<FocusIn>", lambda _e, c=clave: self._marcar_modulo_activo(c), add="+")
 
         try:
-            creador(contenedor)
+            # La función creadora devuelve la instancia del módulo: se guarda para
+            # poder ACTUALIZAR sus datos cuando se vuelva a abrir el módulo.
+            instancia = creador(contenedor)
+            if instancia is not None:
+                self.instancias_modulos[clave] = instancia
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir {titulo_modulo}:\n{e}")
             self.cerrar_ventana_modulo(clave)
             return
 
-        # 🪟 Se trae al frente ahora y otra vez después de los ciclos internos de
-        # CustomTkinter (200 ms barra de título / icono, 1000 ms tamaño mínimo).
+        # 🪟 Botón propio en la barra de tareas (Windows), ventana al frente y
+        # pestaña del módulo en la barra de abajo.
+        poner_ventana_en_barra_tareas(ventana)
         traer_al_frente(ventana)
+        self._modulo_activo = clave          # su pestaña queda resaltada
+        self._actualizar_pestanas_modulos()
 
         registrar_auditoria(self.usuario_activo, "Sistema", f"Abrió el módulo {titulo_modulo}")
+
+    # ------------------------------------------------------------------
+    # 🪟 ACCIONES SOBRE LAS VENTANAS DE LOS MÓDULOS
+    # ------------------------------------------------------------------
+    def _ventana_viva(self, ventana):
+        """¿La ventana existe todavía?"""
+        if ventana is None:
+            return False
+        try:
+            return bool(ventana.winfo_exists())
+        except Exception:
+            return False
+
+    def traer_al_frente_ventana_modulo(self, clave):
+        """🪟 Restaura (si estaba minimizada), trae al frente y enfoca la ventana."""
+        ventana = self.ventanas_modulos.get(clave)
+        if not self._ventana_viva(ventana):
+            return
+        try:
+            if str(ventana.state()) == "iconic":
+                ventana.deiconify()          # estaba minimizada: se restaura
+        except Exception:
+            pass
+        try:
+            ventana.deiconify()
+        except Exception:
+            pass
+        try:
+            ventana.lift()
+        except Exception:
+            pass
+        # Un 'topmost' momentáneo: garantiza que quede delante de la ventana
+        # principal (CustomTkinter repinta la barra de título y la manda atrás).
+        def _soltar():
+            try:
+                if self._ventana_viva(ventana):
+                    ventana.attributes("-topmost", False)
+            except Exception:
+                pass
+        try:
+            ventana.attributes("-topmost", True)
+            ventana.after(400, _soltar)
+        except Exception:
+            pass
+        try:
+            ventana.focus_force()
+        except Exception:
+            pass
+
+    def refrescar_ventana_modulo(self, clave, aviso=False):
+        """🔄 Vuelve a cargar los datos del módulo abierto.
+
+        Se llama al pulsar otra vez el módulo en el menú lateral (o el botón
+        '🔄 Actualizar' de la ventana), para que la información esté al día.
+        """
+        instancia = self.instancias_modulos.get(clave)
+        if instancia is None:
+            if aviso:
+                messagebox.showinfo("Actualizar", "Este módulo no tiene datos para actualizar.")
+            return 0
+
+        def _hacer():
+            recargados = refrescar_instancia_modulo(instancia)
+            if aviso:
+                if recargados:
+                    messagebox.showinfo("Actualizar", "✅ Información actualizada.")
+                else:
+                    messagebox.showinfo("Actualizar",
+                                        "El módulo ya está al día (usa sus propios botones de actualizar).")
+
+        try:
+            self.root.after(60, _hacer)      # se deja que la ventana pinte primero
+        except Exception:
+            _hacer()
+        return True
+
+    def minimizar_ventana_modulo(self, clave):
+        """🗕 Minimiza la ventana del módulo (queda en la barra de tareas)."""
+        ventana = self.ventanas_modulos.get(clave)
+        if not self._ventana_viva(ventana):
+            return
+        try:
+            ventana.iconify()
+        except Exception:
+            pass
+
+    def alternar_maximizar_ventana_modulo(self, clave):
+        """🗖 Expande la ventana del módulo a toda la pantalla y la vuelve a su
+        tamaño anterior si ya estaba expandida."""
+        ventana = self.ventanas_modulos.get(clave)
+        if not self._ventana_viva(ventana):
+            return
+        boton = getattr(ventana, "_btn_expandir", None)
+        if getattr(ventana, "_modulo_maximizado", False):
+            # 🔽 Restaurar: se vuelve al tamaño y posición que tenía antes
+            try:
+                if sys.platform == "win32":
+                    ventana.state("normal")
+            except Exception:
+                pass
+            geometria = getattr(ventana, "_modulo_geometria_previa", None)
+            if geometria:
+                try:
+                    ventana.geometry(geometria)
+                except Exception:
+                    pass
+            ventana._modulo_maximizado = False
+            try:
+                if boton is not None:
+                    boton.configure(text="🗖 Expandir")
+            except Exception:
+                pass
+        else:
+            try:
+                ventana._modulo_geometria_previa = ventana.geometry()
+            except Exception:
+                pass
+            maximizar_ventana(ventana)
+            ventana._modulo_maximizado = True
+            try:
+                if boton is not None:
+                    boton.configure(text="🗗 Restaurar")
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # 🪟 PESTAÑAS DE MÓDULOS ABIERTOS (parte inferior de la ventana)
+    # ------------------------------------------------------------------
+    def _etiqueta_corta_modulo(self, clave):
+        """Nombre corto del módulo para la pestaña: '💼 Ventas (Facturas y Cobros)' -> 'Ventas'."""
+        titulo = str(self.modulos_sistema.get(clave, clave) or clave).strip()
+        partes = titulo.split(" ", 1)
+        if len(partes) == 2 and not partes[0][:1].isalnum():
+            titulo = partes[1]          # se quita el icono del principio
+        if "(" in titulo:
+            titulo = titulo.split("(")[0]
+        titulo = titulo.strip() or clave
+        if len(titulo) > 16:                 # los nombres largos se abrevian
+            titulo = titulo[:15].rstrip() + "…"
+        return titulo
+
+    def _actualizar_pestanas_modulos(self):
+        """Redibuja las pestañas de los módulos abiertos (parte de abajo)."""
+        contenedor = getattr(self, "pestanas_area", None)
+        if contenedor is None:
+            return
+        try:
+            for widget in contenedor.winfo_children():
+                widget.destroy()
+            self.pestanas_modulos = {}
+
+            abiertos = [(c, v) for c, v in (getattr(self, "ventanas_modulos", {}) or {}).items()
+                        if self._ventana_viva(v)]
+            try:
+                if abiertos:
+                    self.lbl_pestanas.configure(text=f"🪟 Módulos abiertos ({len(abiertos)}):")
+                else:
+                    self.lbl_pestanas.configure(text="🪟 Módulos abiertos: (ninguno)")
+            except Exception:
+                pass
+
+            # 📐 Ancho de cada pestaña: se reparte el espacio disponible para que
+            # TODAS se vean, aunque haya muchos módulos abiertos.
+            ancho_area = contenedor.winfo_width()
+            if ancho_area < 120:                 # todavía no se dibujó el área
+                try:
+                    ancho_area = max(420, self.root.winfo_width() - 300)
+                except Exception:
+                    ancho_area = 800
+            cuantas = max(1, len(abiertos))
+            ancho_fila = max(46, (ancho_area - 12) // cuantas - 6)
+            mostrar_cerrar = ancho_fila >= 104   # en pestañas angostas no cabe la ✖
+            ancho_boton = max(28, ancho_fila - (30 if mostrar_cerrar else 10))
+            # Cuántos caracteres caben en el nombre (letra de 10 px ≈ 7,2 px por carácter)
+            limite_txt = max(3, int(ancho_boton / 7.2) - 1)
+
+            activo = getattr(self, "_modulo_activo", None)
+            for clave, _ventana in abiertos:
+                es_activo = (clave == activo)
+                color_fondo = "#1f538d" if es_activo else "#22303a"
+                color_hover = "#163b65" if es_activo else "#34495e"
+                titulo = self._etiqueta_corta_modulo(clave)
+                if len(titulo) > limite_txt:
+                    titulo = titulo[:limite_txt].rstrip() + "…"
+                fila = ctk.CTkFrame(contenedor, fg_color=color_fondo, corner_radius=6,
+                                    width=ancho_fila, height=30)
+                fila.pack(side="left", padx=3, pady=2)
+                fila.pack_propagate(False)
+                ctk.CTkButton(fila, text=titulo, width=ancho_boton, height=26, corner_radius=4,
+                              font=("Arial", 10, "bold"), fg_color="transparent", text_color="white",
+                              hover_color=color_hover, anchor="w",
+                              command=lambda c=clave: self._ir_a_modulo(c)
+                              ).pack(side="left", padx=(4, 2), pady=2)
+                if mostrar_cerrar:
+                    ctk.CTkButton(fila, text="✖", width=20, height=20, corner_radius=4,
+                                  font=("Arial", 9, "bold"), fg_color="#c0392b", hover_color="#922b21",
+                                  command=lambda c=clave: self.cerrar_ventana_modulo(c)
+                                  ).pack(side="left", padx=(0, 4), pady=2)
+                self.pestanas_modulos[clave] = fila
+        except Exception:
+            pass
+
+    def _marcar_modulo_activo(self, clave):
+        """Resalta la pestaña del módulo que tiene el foco."""
+        if getattr(self, "_modulo_activo", None) == clave:
+            return
+        self._modulo_activo = clave
+        self._actualizar_pestanas_modulos()
+
+    def _ir_a_modulo(self, clave):
+        """Trae al frente la ventana de un módulo y actualiza su información."""
+        self._modulo_activo = clave
+        self.traer_al_frente_ventana_modulo(clave)
+        self.refrescar_ventana_modulo(clave)
+        self._actualizar_pestanas_modulos()
 
     def _al_destruir_ventana(self, evento, clave):
         """Quita la ventana del registro cuando se cierra (la X o el sistema)."""
@@ -845,25 +1261,34 @@ class ControlGeneralEventos:
         except Exception:
             pass
         self.ventanas_modulos.pop(clave, None)
+        self.instancias_modulos.pop(clave, None)
+        self._actualizar_pestanas_modulos()
 
     def cerrar_ventana_modulo(self, clave):
-        """Cierra la ventana de un módulo (lo usa la X de la ventana)."""
+        """❌ Cierra la ventana de un módulo (la X de la ventana o los botones)."""
         ventana = self.ventanas_modulos.pop(clave, None)
-        if ventana is None:
-            return
-        try:
-            ventana.destroy()
-        except Exception:
-            pass
+        self.instancias_modulos.pop(clave, None)
+        if ventana is not None:
+            try:
+                ventana.destroy()
+            except Exception:
+                pass
+        self._actualizar_pestanas_modulos()
 
     def cerrar_todas_las_ventanas(self):
         """Cierra todas las ventanas de módulos abiertas (al cambiar de usuario o salir)."""
         for clave in list(getattr(self, "ventanas_modulos", {}) or {}):
             self.cerrar_ventana_modulo(clave)
         self.ventanas_modulos = {}
+        self.instancias_modulos = {}
+        self._actualizar_pestanas_modulos()
 
     def limpiar_contenedor(self):
-        for widget in self.contenedor_central.winfo_children(): widget.destroy()
+        barra_pestanas = getattr(self, "barra_pestanas", None)
+        for widget in self.contenedor_central.winfo_children():
+            if widget is barra_pestanas:
+                continue          # 🪟 las pestañas de módulos abiertos siempre quedan
+            widget.destroy()
         def dummy(*args, **kwargs): pass
         if not hasattr(self.contenedor_central, 'title'): self.contenedor_central.title = dummy
         if not hasattr(self.contenedor_central, 'geometry'): self.contenedor_central.geometry = dummy
@@ -1054,6 +1479,7 @@ class ControlGeneralEventos:
             app = pautas_evento.PautasEventoApp(contenedor, self.usuario_activo)
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_ventas(self, contenedor):
         try:
@@ -1062,6 +1488,7 @@ class ControlGeneralEventos:
             app = modulo_ventas.ModuloVentasApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_compras(self, contenedor):
         try:
@@ -1070,6 +1497,7 @@ class ControlGeneralEventos:
             app = modulo_compras.ModuloComprasApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_bancos(self, contenedor):
         """🏦 Módulo de Bancos: saldos por cuenta y conciliación bancaria."""
@@ -1081,6 +1509,7 @@ class ControlGeneralEventos:
             registrar_auditoria(self.usuario_activo, "Bancos", "Abrió el módulo de Bancos (saldos y conciliación)")
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir el módulo de Bancos:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_ordenes(self, contenedor):
         try:
@@ -1088,6 +1517,7 @@ class ControlGeneralEventos:
             importlib.reload(ordenes_compra)
             app = ordenes_compra.OrdenesCompraApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_ordenes_cliente(self, contenedor):
         try:
@@ -1095,6 +1525,7 @@ class ControlGeneralEventos:
             importlib.reload(ordenes_compra_cliente)
             app = ordenes_compra_cliente.OrdenesCompraClienteApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_inventario(self, contenedor):
         try:
@@ -1102,6 +1533,7 @@ class ControlGeneralEventos:
             importlib.reload(inventario)
             app = inventario.InventarioApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_locaciones(self, contenedor):
         try:
@@ -1113,6 +1545,7 @@ class ControlGeneralEventos:
             app = mod_loc.InventarioLocacionesApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_estadisticas_financiera(self, contenedor):
         try:
@@ -1121,6 +1554,7 @@ class ControlGeneralEventos:
             app = estadisticas_financiera.EstadisticasFinancieraApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_calculo_impuestos(self, contenedor):
         try:
@@ -1129,6 +1563,7 @@ class ControlGeneralEventos:
             app = calculo_impuestos.CalculoImpuestosApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_proveedores(self, contenedor):
         try:
@@ -1137,6 +1572,7 @@ class ControlGeneralEventos:
             app = proveedores.SistemaProveedores(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_solicitud_proveedor(self, contenedor):
         try:
@@ -1144,6 +1580,7 @@ class ControlGeneralEventos:
             importlib.reload(solicitud_proveedor)
             app = solicitud_proveedor.SolicitudProveedorApp(contenedor, self.usuario_activo)
         except Exception as e: messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_libro_diario(self, contenedor):
         try:
@@ -1152,6 +1589,7 @@ class ControlGeneralEventos:
             app = libro_diario.LibroDiarioApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_libro_mayor(self, contenedor):
         try:
@@ -1160,6 +1598,7 @@ class ControlGeneralEventos:
             app = libro_mayor.LibroMayorApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_clientes(self, contenedor):
         try:
@@ -1168,6 +1607,7 @@ class ControlGeneralEventos:
             app = clientes.SistemaClientes(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_cotizaciones(self, contenedor):
         try:
@@ -1176,6 +1616,7 @@ class ControlGeneralEventos:
             app = cotizaciones.VentanaCotizaciones(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_cronograma(self, contenedor):
         try:
@@ -1184,6 +1625,7 @@ class ControlGeneralEventos:
             app = cronograma_tareas.CronogramaApp(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_bitacora(self, contenedor):
         try:
@@ -1192,6 +1634,7 @@ class ControlGeneralEventos:
             bitacora.BitacoraApp(contenedor)
             registrar_auditoria(self.usuario_activo, "Bitácora", "Accedió a revisar el historial de auditoría")
         except Exception as e: messagebox.showerror("Error", f"No se pudo cargar la Bitácora:\n{e}")
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     # =======================================================
     # CONFIGURACIÓN GENERAL (EVENTOS) - 100% COMPLETA
@@ -1203,7 +1646,13 @@ class ControlGeneralEventos:
         v_conf.title("Configuración General del Sistema")
         v_conf.geometry("1000x750")
         v_conf.after(100, lambda: maximizar_ventana(v_conf))
-        v_conf.grab_set()
+        # 🪟 Ya NO se usa grab_set(): el sistema es multi-ventana y esta ventana no
+        # debe bloquear los demás módulos que queden abiertos.
+        # 🪟 Se registra como un módulo más: aparece en "Módulos abiertos" y si se
+        # vuelve a pulsar en el menú se trae al frente en vez de abrir otra copia.
+        self.ventanas_modulos["configuracion"] = v_conf
+        v_conf.bind("<Destroy>", lambda e, c="configuracion": self._al_destruir_ventana(e, c), add="+")
+        self._actualizar_pestanas_modulos()
         traer_al_frente(v_conf)
         archivo_config = str(CONFIG_FILE)
         config_actual = cargar_configuracion_general()
@@ -2207,7 +2656,10 @@ class ControlGeneralEventos:
         v_usr = ctk.CTkToplevel(self.root)
         v_usr.title("Configuración de Usuarios y Permisos")
         v_usr.geometry("1000x580")
-        v_usr.grab_set()
+        # 🪟 Sin grab_set(): no debe bloquear los demás módulos abiertos.
+        self.ventanas_modulos["usuarios"] = v_usr
+        v_usr.bind("<Destroy>", lambda e, c="usuarios": self._al_destruir_ventana(e, c), add="+")
+        self._actualizar_pestanas_modulos()
         traer_al_frente(v_usr)
         main_split = ctk.CTkFrame(v_usr, fg_color="transparent")
         main_split.pack(fill="both", expand=True, padx=15, pady=15)

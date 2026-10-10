@@ -2188,6 +2188,13 @@ class CuentasPorPagarTab:
             if not fecha_val:
                 fecha_val = datetime.now().strftime("%Y-%m-%d")
 
+            # 🏦 IMPORTANTE: la cuenta bancaria se lee ANTES de cerrar la ventana.
+            # Si se leyera después de v_pago.destroy(), los widgets ya no existirían
+            # y al pulsar ✅ Confirmar (justo cuando se pide el soporte en PDF/JPG)
+            # saltaba el error: invalid command name ".!ctktoplevel.!ctkcombobox..."
+            cuenta_val = cmb_cuenta_pago.get().strip()
+            if cuenta_val == "(No especificada)": cuenta_val = ""
+
             v_pago.destroy()
 
             tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
@@ -2220,8 +2227,6 @@ class CuentasPorPagarTab:
                 cat_res = cursor.fetchone()
                 categoria_db = cat_res[0] if cat_res and cat_res[0] else "GENERAL"
                 
-                cuenta_val = cmb_cuenta_pago.get().strip()
-                if cuenta_val == "(No especificada)": cuenta_val = ""
                 cursor.execute("INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago, categoria_suministro, codigo_cotizacion, cuenta_origen) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
                                (id_factura, monto_val, ruta_destino, proveedor, fecha_val, categoria_db, nro_doc, cuenta_val))
                 conn.commit()

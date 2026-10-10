@@ -1449,6 +1449,12 @@ class CuentasPorCobrarTab:
             if monto_val > (saldo_actual + 0.01): return messagebox.showerror("Error", "El monto supera el saldo pendiente.", parent=v_cobro)
             fecha_val = ent_fecha.get().strip()
             if not fecha_val: fecha_val = datetime.now().strftime("%Y-%m-%d")
+            # 🏦 IMPORTANTE: la cuenta bancaria se lee ANTES de cerrar la ventana.
+            # Si se leyera después de v_cobro.destroy(), los widgets ya no existirían
+            # y al pulsar ✅ Confirmar (justo cuando se pide el soporte en PDF/JPG)
+            # saltaba el error: invalid command name ".!ctktoplevel.!ctkcombobox..."
+            cuenta_val = cmb_cuenta_cobro.get().strip()
+            if cuenta_val == "(No especificada)": cuenta_val = ""
             v_cobro.destroy()
             tipos_seguros = [("Soportes", "*.pdf *.png *.jpg *.jpeg"), ("Todos", "*.*")]
             ruta_origen = filedialog.askopenfilename(title="Seleccionar Soporte de Ingreso", filetypes=tipos_seguros)
@@ -1467,8 +1473,6 @@ class CuentasPorCobrarTab:
                 conn = obtener_conexion_segura()
                 if not conn: return
                 cursor = conn.cursor()
-                cuenta_val = cmb_cuenta_cobro.get().strip()
-                if cuenta_val == "(No especificada)": cuenta_val = ""
                 cursor.execute("INSERT INTO pagos_clientes (id_factura, monto_pagado, archivo_ruta, cliente_nombre, fecha_pago, cuenta_destino) VALUES (%s, %s, %s, %s, %s, %s)", (id_factura, monto_val, ruta_destino, cliente, fecha_val, cuenta_val))
                 conn.commit(); cache_sistema.invalidar()
                 registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Cobrar", f"Cobró {formatear_moneda(monto_val)} a Fac. {nro_doc} ({cliente})")

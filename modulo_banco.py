@@ -1558,6 +1558,72 @@ class ModuloBancoApp:
         ctk.CTkLabel(f_total, text=formatear_monto(total_general), font=("Arial", 16, "bold"),
                      text_color="white").pack(side="right", padx=15, pady=12)
 
+        # ⚠️ Movimientos SIN cuenta bancaria asignada: no se suman a ninguna
+        # cuenta, por eso el saldo puede verse "sin ingresos ni egresos".
+        try:
+            sin_cuenta = self._contar_movimientos_sin_cuenta(datos)
+        except Exception:
+            sin_cuenta = 0
+        if sin_cuenta:
+            f_sc = ctk.CTkFrame(self.scroll_saldos, corner_radius=10, fg_color="#fff3cd",
+                                border_width=1, border_color="#ffeeba")
+            f_sc.pack(fill="x", pady=(10, 5), padx=5)
+            ctk.CTkLabel(
+                f_sc,
+                text=(f"⚠️ Hay {sin_cuenta} movimiento(s) SIN cuenta bancaria asignada"
+                      + (f" en {mes_txt}" if mes_txt else "") +
+                      ".\nNo se suman al saldo de ninguna cuenta (por eso puede ver 0.00 en "
+                      "ingresos/egresos).\nAsígneles su cuenta con el botón de abajo "
+                      "o desde la pestaña Conciliación Bancaria."),
+                font=("Arial", 12, "bold"), text_color="#856404", justify="left",
+                wraplength=900).pack(anchor="w", padx=15, pady=(12, 4))
+            ctk.CTkButton(f_sc, text="🛠️ Asignar cuentas a estos movimientos",
+                          font=("Arial", 12, "bold"), fg_color="#e67e22", hover_color="#b9651a",
+                          command=self._ir_a_conciliacion_sin_cuenta,
+                          width=320).pack(anchor="w", padx=15, pady=(0, 12))
+
+    def _contar_movimientos_sin_cuenta(self, datos):
+        """Cuenta los cobros/pagos del periodo visible que no tienen cuenta asignada."""
+        mes = getattr(self, "mes_saldos", None)
+        total = 0
+        for clave, idx_cuenta in (("cobros", 4), ("pagos", 4)):
+            for fila in (datos.get(clave) or []):
+                try:
+                    cuenta = str(fila[idx_cuenta] or "").strip()
+                    if cuenta:
+                        continue
+                    fecha = str(fila[1] or "")
+                    if mes and not clave_fecha(fecha).startswith(mes):
+                        continue
+                    total += 1
+                except Exception:
+                    continue
+        return total
+
+    def _ir_a_conciliacion_sin_cuenta(self):
+        """Lleva a Conciliación, carga los movimientos y asigna la cuenta que falta."""
+        try:
+            self.tabview.set(" 🧾 Conciliación Bancaria ")
+        except Exception:
+            pass
+
+        def _asignar(_estado=None):
+            try:
+                self.asignar_cuenta_a_movimientos()
+            except Exception as e:
+                messagebox.showinfo("Conciliación",
+                                    "Use el botón «Asignar cuenta» de la pestaña "
+                                    "Conciliación Bancaria para dar cuenta a los movimientos "
+                                    f"sin asignar.\n\nDetalle: {e}")
+
+        # Primero se cargan los movimientos del sistema (el botón de asignar
+        # trabaja sobre esa lista).
+        try:
+            self.generar_reporte()
+            self.parent_frame.after(2500, _asignar)
+        except Exception:
+            _asignar()
+
     def _crear_tarjeta_banco(self, banco, resumen, idx):
         etiqueta = construir_etiqueta_banco(banco) or f"Banco {idx + 1}"
         card = ctk.CTkFrame(self.scroll_saldos, corner_radius=10, fg_color="#f8f9fa",

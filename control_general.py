@@ -333,6 +333,11 @@ def cargar_configuracion_general():
         "color_menu_hover": "#163b65", "color_menu_texto": "white",
         "terminos_cotizacion": "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos.",
         "fecha_comienzo_sistema": "",
+        # 🖨️ Escáner de facturas de compras (WIA + OCR)
+        "escaner_dispositivo": "", "escaner_dpi": "300", "escaner_color": "Escala de grises",
+        "escaner_origen": "Cristal (una página a la vez)", "escaner_paginas": "1",
+        "escaner_ocr": "Sí", "escaner_idioma_ocr": "Automático", "escaner_optimizar": "Sí",
+        "escaner_modo": "Automático (sin ventanas)", "escaner_carpeta": "",
         "cuentas_bancarias": [],
         "orden_operativos": ["clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"],
         "orden_finanzas": ["ventas", "compras", "bancos", "libro_diario", "libro_mayor", "impuestos", "dashboard"],
@@ -358,6 +363,8 @@ def cargar_configuracion_general():
                 ruta_drive_local = config.get("ruta_drive", "")
                 rclone_remote_local = config.get("rclone_remote", "gdrive:")
                 ruta_logo_local = config.get("ruta_logo_cotizacion", "")
+                escaner_local = config.get("escaner_dispositivo", "")
+                carpeta_escaner_local = config.get("escaner_carpeta", "")
                 
                 config.update(config_nube)
                 
@@ -365,6 +372,9 @@ def cargar_configuracion_general():
                 if ruta_drive_local: config["ruta_drive"] = ruta_drive_local
                 if rclone_remote_local != "gdrive:": config["rclone_remote"] = rclone_remote_local
                 if ruta_logo_local: config["ruta_logo_cotizacion"] = ruta_logo_local
+                # 🖨️ El escáner depende de cada equipo: se respeta el de esta PC
+                if escaner_local: config["escaner_dispositivo"] = escaner_local
+                if carpeta_escaner_local: config["escaner_carpeta"] = carpeta_escaner_local
                 
                 with open(str(CONFIG_FILE), "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=4)
@@ -2088,6 +2098,210 @@ class ControlGeneralEventos:
         ent_client_secret.insert(0, config_actual.get("client_secret_sire", ""))
         
         # ---------- 3. FACTURACIÓN ELECTRÓNICA ----------
+        # ==================================================
+        # 🖨️ ESCÁNER DE FACTURAS (OCR) — lo usa el módulo de Compras
+        # ==================================================
+        try:
+            import escaner as mod_escaner
+        except Exception:
+            mod_escaner = None
+
+        f_escaner = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#ecfeff",
+                                 border_width=1, border_color="#a5f3fc")
+        f_escaner.pack(fill="x", padx=10, pady=10, ipady=10)
+        ctk.CTkLabel(f_escaner, text="🖨️ Escáner de Facturas de Compras (OCR)",
+                     font=("Arial", 14, "bold"), text_color="#0e7490").pack(anchor="w", padx=15, pady=(4, 2))
+        ctk.CTkLabel(f_escaner,
+                     text="Lo usa el botón '🖨️ Escanear factura (OCR)' del módulo de Compras. "
+                          "El equipo elegido se guarda solo para esta computadora.",
+                     font=("Arial", 10, "italic"), text_color="gray").pack(anchor="w", padx=15)
+
+        opciones_escaner = {
+            "dpi": ["200", "300", "400", "600"],
+            "color": ["Escala de grises", "Color", "Blanco y negro"],
+            "origen": ["Cristal (una página a la vez)", "Alimentador (varias páginas)", "Automático"],
+            "paginas": ["1", "2", "3", "5", "10", "20"],
+            "ocr": ["Sí", "No"],
+            "idioma": ["Automático", "Español", "Inglés", "Español + Inglés"],
+            "optimizar": ["Sí", "No"],
+            "modo": ["Automático (sin ventanas)", "Con la ventana de Windows"],
+        }
+        if mod_escaner is not None:
+            opciones_escaner = {
+                "dpi": mod_escaner.OPCIONES_DPI, "color": mod_escaner.OPCIONES_COLOR,
+                "origen": mod_escaner.OPCIONES_ORIGEN, "paginas": mod_escaner.OPCIONES_PAGINAS,
+                "ocr": mod_escaner.OPCIONES_OCR, "idioma": mod_escaner.OPCIONES_IDIOMA_OCR,
+                "optimizar": mod_escaner.OPCIONES_OPTIMIZAR, "modo": mod_escaner.OPCIONES_MODO,
+            }
+        cfg_escaner = (mod_escaner.config_escaner(config_actual) if mod_escaner is not None
+                       else {"escaner_dispositivo": config_actual.get("escaner_dispositivo", ""),
+                             "escaner_dpi": config_actual.get("escaner_dpi", "300"),
+                             "escaner_color": config_actual.get("escaner_color", "Escala de grises"),
+                             "escaner_origen": config_actual.get("escaner_origen", "Cristal (una página a la vez)"),
+                             "escaner_paginas": config_actual.get("escaner_paginas", "1"),
+                             "escaner_ocr": config_actual.get("escaner_ocr", "Sí"),
+                             "escaner_idioma_ocr": config_actual.get("escaner_idioma_ocr", "Automático"),
+                             "escaner_optimizar": config_actual.get("escaner_optimizar", "Sí"),
+                             "escaner_modo": config_actual.get("escaner_modo", "Automático (sin ventanas)"),
+                             "escaner_carpeta": config_actual.get("escaner_carpeta", "")})
+        mapa_escaneres = {}          # nombre visible -> id de WIA
+
+        f_esc_r0 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r0.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r0, text="Escáner:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        cmb_escaner = ctk.CTkComboBox(f_esc_r0, values=["(pulse Detectar)"], width=330)
+        cmb_escaner.pack(side="left", padx=(0, 8))
+        lbl_esc_estado = ctk.CTkLabel(f_esc_r0, text="", font=("Arial", 10, "italic"), text_color="gray")
+        lbl_esc_estado.pack(side="left")
+
+        def detectar_escaneres():
+            if mod_escaner is None:
+                return lbl_esc_estado.configure(text="⚠️ No se pudo cargar escaner.py", text_color="#c0392b")
+            lbl_esc_estado.configure(text="⏳ Buscando escáneres...", text_color="gray")
+
+            def tarea():
+                lista = mod_escaner.listar_escaneres()
+
+                def pintar():
+                    mapa_escaneres.clear()
+                    for equipo in lista:
+                        mapa_escaneres[equipo["nombre"]] = equipo["id"]
+                    nombres = list(mapa_escaneres) or ["(no se detectó ningún escáner)"]
+                    try:
+                        cmb_escaner.configure(values=nombres)
+                        actual = ""
+                        for nombre, ident in mapa_escaneres.items():
+                            if ident and ident == cfg_escaner.get("escaner_dispositivo"):
+                                actual = nombre
+                        if not actual and nombres and nombres[0].startswith("("):
+                            actual = nombres[0]
+                        cmb_escaner.set(actual or nombres[0])
+                        lbl_esc_estado.configure(
+                            text=(f"✅ {len(lista)} equipo(s)" if lista else
+                                  "⚠️ Ninguno: revise que la impresora esté encendida y conectada"),
+                            text_color=("#1e8449" if lista else "#c0392b"))
+                    except Exception:
+                        pass
+                try:
+                    self.root.after(0, pintar)
+                except Exception:
+                    pass
+            threading.Thread(target=tarea, daemon=True).start()
+
+        ctk.CTkButton(f_esc_r0, text="🔄 Detectar", width=110, font=("Arial", 11, "bold"),
+                      fg_color="#0e7490", hover_color="#155e75", command=detectar_escaneres).pack(side="left", padx=6)
+
+        # Valores guardados: si el equipo ya no aparece, se muestra igual
+        if cfg_escaner.get("escaner_dispositivo"):
+            cmb_escaner.set("(el guardado: se usará al escanear)")
+            mapa_escaneres["(el guardado: se usará al escanear)"] = cfg_escaner["escaner_dispositivo"]
+
+        f_esc_r1 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r1.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r1, text="Resolución (ppp):", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        cmb_esc_dpi = ctk.CTkOptionMenu(f_esc_r1, values=opciones_escaner["dpi"], width=100)
+        cmb_esc_dpi.set(cfg_escaner.get("escaner_dpi", "300")); cmb_esc_dpi.pack(side="left")
+        ctk.CTkLabel(f_esc_r1, text="Color:", font=("Arial", 11, "bold"), width=60, anchor="e").pack(side="left", padx=(15, 5))
+        cmb_esc_color = ctk.CTkOptionMenu(f_esc_r1, values=opciones_escaner["color"], width=170)
+        cmb_esc_color.set(cfg_escaner.get("escaner_color", "Escala de grises")); cmb_esc_color.pack(side="left")
+
+        f_esc_r2 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r2.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r2, text="Origen del papel:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        cmb_esc_origen = ctk.CTkOptionMenu(f_esc_r2, values=opciones_escaner["origen"], width=250)
+        cmb_esc_origen.set(cfg_escaner.get("escaner_origen", "Cristal (una página a la vez)")); cmb_esc_origen.pack(side="left")
+        ctk.CTkLabel(f_esc_r2, text="Páginas:", font=("Arial", 11, "bold"), width=60, anchor="e").pack(side="left", padx=(15, 5))
+        cmb_esc_paginas = ctk.CTkOptionMenu(f_esc_r2, values=opciones_escaner["paginas"], width=80)
+        cmb_esc_paginas.set(cfg_escaner.get("escaner_paginas", "1")); cmb_esc_paginas.pack(side="left")
+
+        f_esc_r3 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r3.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r3, text="Leer con OCR:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        cmb_esc_ocr = ctk.CTkOptionMenu(f_esc_r3, values=opciones_escaner["ocr"], width=90)
+        cmb_esc_ocr.set(cfg_escaner.get("escaner_ocr", "Sí")); cmb_esc_ocr.pack(side="left")
+        ctk.CTkLabel(f_esc_r3, text="Idioma OCR:", font=("Arial", 11, "bold"), width=90, anchor="e").pack(side="left", padx=(15, 5))
+        cmb_esc_idioma = ctk.CTkOptionMenu(f_esc_r3, values=opciones_escaner["idioma"], width=160)
+        cmb_esc_idioma.set(cfg_escaner.get("escaner_idioma_ocr", "Automático")); cmb_esc_idioma.pack(side="left")
+        ctk.CTkLabel(f_esc_r3, text="Reducir peso:", font=("Arial", 11, "bold"), width=100, anchor="e").pack(side="left", padx=(15, 5))
+        cmb_esc_optimizar = ctk.CTkOptionMenu(f_esc_r3, values=opciones_escaner["optimizar"], width=80)
+        cmb_esc_optimizar.set(cfg_escaner.get("escaner_optimizar", "Sí")); cmb_esc_optimizar.pack(side="left")
+
+        f_esc_r4 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r4.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r4, text="Modo de escaneo:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        cmb_esc_modo = ctk.CTkOptionMenu(f_esc_r4, values=opciones_escaner["modo"], width=250)
+        cmb_esc_modo.set(cfg_escaner.get("escaner_modo", "Automático (sin ventanas)")); cmb_esc_modo.pack(side="left")
+        ctk.CTkLabel(f_esc_r4, text="(el 2° abre el cuadro de Windows para elegir el equipo)",
+                     font=("Arial", 9, "italic"), text_color="gray").pack(side="left", padx=8)
+
+        f_esc_r5 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r5.pack(fill="x", padx=15, pady=4)
+        ctk.CTkLabel(f_esc_r5, text="Carpeta de escaneos:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
+        ent_esc_carpeta = ctk.CTkEntry(f_esc_r5, placeholder_text="(vacío = carpeta de Google Drive del sistema)")
+        ent_esc_carpeta.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ent_esc_carpeta.insert(0, cfg_escaner.get("escaner_carpeta", ""))
+
+        def _config_escaner_formulario():
+            nombre = cmb_escaner.get().strip()
+            ident = mapa_escaneres.get(nombre, "")
+            if not ident and nombre and not nombre.startswith("("):
+                ident = cfg_escaner.get("escaner_dispositivo", "")
+            return {"escaner_dispositivo": ident,
+                    "escaner_dpi": cmb_esc_dpi.get(), "escaner_color": cmb_esc_color.get(),
+                    "escaner_origen": cmb_esc_origen.get(), "escaner_paginas": cmb_esc_paginas.get(),
+                    "escaner_ocr": cmb_esc_ocr.get(), "escaner_idioma_ocr": cmb_esc_idioma.get(),
+                    "escaner_optimizar": cmb_esc_optimizar.get(), "escaner_modo": cmb_esc_modo.get(),
+                    "escaner_carpeta": ent_esc_carpeta.get().strip(),
+                    "ruta_drive": ent_drive.get().strip() or config_actual.get("ruta_drive", "")}
+
+        def probar_escaneo():
+            if mod_escaner is None:
+                return messagebox.showerror("Escáner", "No se pudo cargar el módulo escaner.py.", parent=v_conf)
+            if not mod_escaner.es_windows():
+                return messagebox.showinfo("Escáner", "El escaneo solo está disponible en Windows.", parent=v_conf)
+            p = ctk.CTkToplevel(v_conf)
+            p.title("Prueba de escaneo")
+            p.geometry("420x150"); p.transient(v_conf); p.grab_set()
+            ctk.CTkLabel(p, text="🖨️ Escaneando una página de prueba...", font=("Arial", 12, "bold"),
+                         text_color="#1f538d").pack(pady=(22, 6))
+            ctk.CTkLabel(p, text="Coloque una hoja en el escáner.", font=("Arial", 10),
+                         text_color="gray").pack()
+            b = ctk.CTkProgressBar(p, width=330, mode="indeterminate"); b.pack(pady=10); b.start()
+
+            def tarea():
+                cfg = _config_escaner_formulario()
+                cfg["escaner_paginas"] = "1"
+                resultado = mod_escaner.procesar_factura(cfg)
+
+                def mostrar():
+                    try:
+                        p.grab_release(); p.destroy()
+                    except Exception:
+                        pass
+                    if not resultado.get("ok"):
+                        return messagebox.showerror("Prueba de escaneo",
+                                                    str(resultado.get("error") or "No se pudo escanear."), parent=v_conf)
+                    texto = (resultado.get("texto") or "").strip()
+                    resumen = (f"✅ Escaneo correcto.\n\nPáginas: {len(resultado.get('paginas') or [])}\n"
+                               f"PDF: {resultado.get('pdf')}\n\n"
+                               f"OCR ({resultado.get('ocr', {}).get('motor', 'Windows OCR')}):\n"
+                               f"{(texto[:400] + '...') if len(texto) > 400 else (texto or '(no reconoció texto)')}")
+                    if resultado.get("aviso"):
+                        resumen += f"\n\nAviso: {resultado['aviso']}"
+                    messagebox.showinfo("Prueba de escaneo", resumen, parent=v_conf)
+                try:
+                    self.root.after(0, mostrar)
+                except Exception:
+                    pass
+            threading.Thread(target=tarea, daemon=True).start()
+
+        f_esc_r6 = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        f_esc_r6.pack(fill="x", padx=15, pady=(6, 2))
+        ctk.CTkButton(f_esc_r6, text="🧪 Probar escaneo (1 página)", width=200, font=("Arial", 11, "bold"),
+                      fg_color="#27ae60", hover_color="#1e8449", command=probar_escaneo).pack(side="left")
+        ctk.CTkLabel(f_esc_r6, text="Guarde la configuración para que Compras use estos ajustes.",
+                     font=("Arial", 9, "italic"), text_color="gray").pack(side="left", padx=10)
+
         f_fe = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#f0f4f8", border_width=1, border_color="#d0d7de")
         f_fe.pack(fill="x", padx=10, pady=10, ipady=10)
         ctk.CTkLabel(f_fe, text="⚡ Facturación Electrónica Directa (Emisión de Ventas)", font=("Arial", 14, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(10, 5))
@@ -2539,6 +2753,17 @@ class ControlGeneralEventos:
                 "color_menu_btn": ent_m_btn.get().strip(),
                 "color_menu_hover": ent_m_hov.get().strip(),
                 "color_menu_texto": ent_m_txt.get().strip(),
+                "escaner_dispositivo": (mapa_escaneres.get(cmb_escaner.get().strip(), "")
+                                        or config_actual.get("escaner_dispositivo", "")),
+                "escaner_dpi": cmb_esc_dpi.get(),
+                "escaner_color": cmb_esc_color.get(),
+                "escaner_origen": cmb_esc_origen.get(),
+                "escaner_paginas": cmb_esc_paginas.get(),
+                "escaner_ocr": cmb_esc_ocr.get(),
+                "escaner_idioma_ocr": cmb_esc_idioma.get(),
+                "escaner_optimizar": cmb_esc_optimizar.get(),
+                "escaner_modo": cmb_esc_modo.get(),
+                "escaner_carpeta": ent_esc_carpeta.get().strip(),
                 "terminos_cotizacion": txt_terminos.get("1.0", "end-1c").strip(),
                 "orden_operativos": ext_ord(lb_ops, "orden_operativos"),
                 "orden_finanzas": ext_ord(lb_fin, "orden_finanzas"),
@@ -2569,7 +2794,8 @@ class ControlGeneralEventos:
                     json.dump(nueva_config, f, indent=4)
                 
                 config_para_nube = nueva_config.copy()
-                for clave_local in ["ruta_drive", "impresora", "ruta_logo_cotizacion", "rclone_remote"]:
+                for clave_local in ["ruta_drive", "impresora", "ruta_logo_cotizacion", "rclone_remote",
+                                    "escaner_dispositivo", "escaner_carpeta"]:
                     config_para_nube.pop(clave_local, None)
 
                 conn = conectar_db(silencioso=True)

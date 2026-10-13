@@ -20,7 +20,8 @@ import shutil
 import calendar
 import re
 import json
-import subprocess 
+import subprocess
+import tempfile
 import ctypes
 import threading
 import urllib.request
@@ -117,6 +118,75 @@ def cargar_configuracion_regional():
     return config
 
 CONFIG_REGIONAL = cargar_configuracion_regional()
+
+def traer_modulo_al_frente(ventana, retrasos=(60, 260, 700, 1150)):
+    """🖥️ Deja la ventana del módulo DELANTE después de un mensaje o un guardado.
+
+    CustomTkinter oculta y vuelve a mostrar la ventana para pintarle la barra de
+    título (y a los 1000 ms reajusta el tamaño mínimo): esos ciclos terminan
+    dejando la ventana DETRÁS de la principal. Por eso se trae al frente varias
+    veces, con un 'topmost' momentáneo que se suelta enseguida.
+    """
+    if ventana is None:
+        return
+    try:
+        ventana._windows_set_titlebar_color = lambda *a, **k: None
+    except Exception:
+        pass
+
+    def _soltar():
+        try:
+            if ventana.winfo_exists():
+                ventana.attributes("-topmost", False)
+        except Exception:
+            pass
+
+    def _traer():
+        try:
+            if not ventana.winfo_exists():
+                return
+            ventana.deiconify()
+            ventana.lift()
+            try:
+                ventana.attributes("-topmost", True)
+                ventana.after(450, _soltar)
+            except Exception:
+                pass
+            ventana.focus_force()
+        except Exception:
+            pass
+
+    _traer()
+    for retraso in retrasos or ():
+        try:
+            ventana.after(retraso, _traer)
+        except Exception:
+            break
+
+
+def ventana_para_mensaje(principal=None):
+    """🖥️ Ventana que se usa como padre de un mensaje para que salga DELANTE.
+
+    Devuelve el diálogo que esté abierto (el último creado y visible) y, si no hay
+    ninguno, la ventana del módulo. Así los comunicados y las consultas nunca quedan
+    detrás de la ventana de Compras.
+    """
+    try:
+        raiz = getattr(tk, "_default_root", None)
+        if raiz is not None:
+            candidatas = []
+            for w in raiz.winfo_children():
+                try:
+                    if isinstance(w, (tk.Toplevel, ctk.CTkToplevel)) and w.winfo_viewable():
+                        candidatas.append(w)
+                except Exception:
+                    continue
+            if candidatas:
+                return candidatas[-1]
+    except Exception:
+        pass
+    return principal
+
 
 def formatear_moneda(valor):
     simbolo = CONFIG_REGIONAL.get("simbolo_moneda", "S/.")
@@ -402,6 +472,105 @@ def abrir_datos_bancarios_de_fila(tabla, event, parent, nombre_proveedor, factur
 # =========================================================
 # 🧾 LECTURA DE FACTURAS (PDF o ESCANEADAS CON OCR)
 # =========================================================
+# =========================================================
+# 🗓️ DESPLEGABLE DE MES PARA FILTRAR LAS FACTURAS RECIBIDAS
+# =========================================================
+NOMBRES_MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                 "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+def _fecha_a_iso(fecha):
+    """Convierte la fecha leída (DD/MM/AAAA o MM/DD/AAAA) a AAAA-MM-DD.
+
+    El campo "Fecha del Pago" de Compras trabaja en AAAA-MM-DD, así que la fecha
+    del comprobante se adapta a ese formato antes de colocarla.
+    """
+    texto = str(fecha or "").strip()
+    if not texto:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", texto):
+        return texto
+    partes = re.split(r"[/\-.]", texto)
+    if len(partes) != 3:
+        return texto
+    a, b, c = partes
+    try:
+        if len(a) == 4:
+            return "%04d-%02d-%02d" % (int(a), int(b), int(c))
+    except Exception:
+        return texto
+    try:
+        fmt = str((CONFIG_REGIONAL or {}).get("formato_fecha", "DD/MM/AAAA")).upper()
+    except Exception:
+        fmt = "DD/MM/AAAA"
+    dia, mes = (b, a) if fmt.startswith("MM") else (a, b)
+    try:
+        return "%04d-%02d-%02d" % (int(c), int(mes), int(dia))
+    except Exception:
+        return texto
+
+
+def etiqueta_mes_de_fecha(fecha):
+    """'09/10/2026' -> 'Octubre 2026' ('' si no se puede interpretar)."""
+    texto = str(fecha or "").strip()
+    if not texto:
+        return ""
+    partes = re.split(r"[/\-.]", texto)
+    if len(partes) != 3:
+        return ""
+    a, b, c = partes
+    try:
+        if len(a) == 4:
+            anio, mes = int(a), int(b)
+        else:
+            try:
+                fmt = str((CONFIG_REGIONAL or {}).get("formato_fecha", "DD/MM/AAAA")).upper()
+            except Exception:
+                fmt = "DD/MM/AAAA"
+            mes = int(b if not fmt.startswith("MM") else a)
+            anio = int(c)
+        if not (2000 <= anio <= 2100 and 1 <= mes <= 12):
+            return ""
+        return "%s %d" % (NOMBRES_MESES[mes - 1], anio)
+    except Exception:
+        return ""
+
+
+def construir_valores_mes():
+    """Opciones del desplegable: 'Todos los meses' + meses de años cercanos."""
+    hoy = datetime.now()
+    valores = ["Todos los meses"]
+    for anio in (hoy.year - 1, hoy.year, hoy.year + 1):
+        for nombre in NOMBRES_MESES:
+            valores.append(f"{nombre} {anio}")
+    return valores
+
+
+def mes_en_curso():
+    """Etiqueta del mes actual, usada como valor por defecto del desplegable."""
+    hoy = datetime.now()
+    return f"{NOMBRES_MESES[hoy.month - 1]} {hoy.year}"
+
+
+def patron_fecha_mes(etiqueta):
+    """Patrón SQL LIKE para filtrar la columna 'fecha' por el mes indicado.
+
+    Devuelve None para 'Todos los meses' o etiquetas inválidas.
+    """
+    if not etiqueta or etiqueta == "Todos los meses":
+        return None
+    partes = str(etiqueta).strip().split()
+    if len(partes) < 2 or partes[0] not in NOMBRES_MESES:
+        return None
+    mes = NOMBRES_MESES.index(partes[0]) + 1
+    anio = partes[-1]
+    mes_str = f"{mes:02d}"
+    fmt = CONFIG_REGIONAL.get("formato_fecha", "DD/MM/AAAA")
+    if fmt == "MM/DD/AAAA":
+        return f"{mes_str}/%/{anio}"
+    return f"%/{mes_str}/{anio}"
+
+
 def _a_numero(texto):
     """Convierte '1,234.56' / '1.234,56' / 'S/ 118.00' en número."""
     limpio = re.sub(r"[^\d.,]", "", str(texto or ""))
@@ -639,6 +808,369 @@ def buscar_comprobante_duplicado(numero_documento):
         liberar_conexion(conn)
 
 
+# Script de PowerShell que usa el motor OCR que ya incluye Windows.
+# Devuelve una línea por palabra:  X <TAB> Y <TAB> ancho <TAB> alto <TAB> texto
+_SCRIPT_OCR_WINDOWS = r'''
+param([string]$Ruta, [string]$Idiomas = "es-PE,es-MX,es-ES,en-US")
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await($op, $tipo) {
+    $m = $asTaskGeneric.MakeGenericMethod($tipo)
+    $t = $m.Invoke($null, @($op))
+    $t.Wait(-1) | Out-Null
+    $t.Result
+}
+[Windows.Storage.StorageFile,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+[Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
+
+$engine = $null
+foreach ($tag in $Idiomas.Split(",")) {
+    $tag = $tag.Trim()
+    if (-not $tag) { continue }
+    try {
+        $idioma = [Windows.Globalization.Language]::new($tag)
+        $posible = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($idioma)
+        if ($null -ne $posible) { $engine = $posible; break }
+    } catch { }
+}
+if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+if ($null -eq $engine) { return }
+
+$archivo = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Ruta)) ([Windows.Storage.StorageFile])
+$stream  = Await ($archivo.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmap  = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$resultado = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+foreach ($linea in $resultado.Lines) {
+  foreach ($p in $linea.Words) {
+    $r = $p.BoundingRect
+    Write-Output ([string][int]$r.X + [char]9 + [string][int]$r.Y + [char]9 + [string][int]$r.Width + [char]9 + [string][int]$r.Height + [char]9 + $p.Text)
+  }
+}
+'''
+
+
+def _normalizar_etiqueta(texto):
+    """Deja solo letras en mayúscula: sirve para reconocer rótulos aunque el OCR falle."""
+    return re.sub(r"[^A-ZÑ]", "", str(texto or "").upper())
+
+
+def _parecido(texto, candidato):
+    return difflib.SequenceMatcher(None, texto, candidato).ratio()
+
+
+def _etiqueta_reconocida(etiqueta, grupo, umbral=0.78):
+    """¿La etiqueta de la fila corresponde a base / IGV / recargo / total?"""
+    return any(_parecido(etiqueta, candidato) >= umbral
+               for candidato in _ETIQUETAS_MONTOS.get(grupo, []))
+
+
+def _agrupar_palabras_en_lineas(palabras, tolerancia_rel=0.6):
+    """Reconstruye las filas del documento a partir de palabras con posición.
+
+    'palabras' es una lista de (x, y, alto, texto). El OCR suele devolver el
+    rótulo y el importe en líneas distintas, pero conservando su Y: agrupando
+    por Y se recupera la fila real ("OP. GRAVADAS  S/  187.04").
+    """
+    if not palabras:
+        return ""
+    palabras = sorted(palabras, key=lambda p: (p[1], p[0]))
+    alturas = [p[2] for p in palabras if p[2]]
+    tolerancia = max(8.0, (sum(alturas) / len(alturas)) * tolerancia_rel) if alturas else 12.0
+    filas, actual, y_fila = [], [], None
+    for x, y, _alto, texto in palabras:
+        if y_fila is None or abs(y - y_fila) <= tolerancia:
+            actual.append((x, texto))
+            if y_fila is None:
+                y_fila = y
+        else:
+            filas.append(actual)
+            actual, y_fila = [(x, texto)], y
+    if actual:
+        filas.append(actual)
+    return "\n".join(" ".join(t for _x, t in sorted(fila, key=lambda p: p[0])) for fila in filas)
+
+
+def leer_ocr_mac(ruta, dpi=250):
+    """OCR en macOS con el motor nativo (Apple Vision, vía PyObjC).
+
+    Se convierte el PDF (o la foto) en imágenes y se leen con el OCR del sistema;
+    el texto vuelve reconstruido por filas, igual que en Windows. Si el módulo
+    escaner o PyMuPDF no están disponibles devuelve "" (se completa a mano).
+    """
+    try:
+        import escaner
+    except Exception:
+        return ""
+    if not getattr(escaner, "es_mac", lambda: False)():
+        return ""
+    try:
+        import fitz   # PyMuPDF: convierte el PDF (o la foto) en imágenes
+    except Exception:
+        return ""
+    try:
+        carpeta = tempfile.mkdtemp(prefix="ocr_mac_")
+        imagenes = []
+        documento = fitz.open(ruta)
+        for numero, pagina in enumerate(documento):
+            destino = os.path.join(carpeta, "pagina_%d.png" % (numero + 1))
+            pagina.get_pixmap(dpi=dpi).save(destino)
+            imagenes.append(destino)
+        documento.close()
+    except Exception:
+        return ""
+    if not imagenes:
+        return ""
+    try:
+        return escaner.texto_de_resultados(escaner.ocr_paginas(imagenes))
+    except Exception:
+        return ""
+
+
+def leer_ocr_windows(ruta, idiomas="es-PE,es-MX,es-ES,en-US", dpi=250):
+    """OCR del sistema: motor de Windows (WinRT) o de macOS (Vision).
+
+    Devuelve el texto reconstruido por filas (o "" si no se pudo leer).
+
+    No requiere instalar nada ni conexión a internet. En otros sistemas
+    operativos devuelve "" (el usuario puede digitar los montos a mano).
+    """
+    if sys.platform == "darwin":
+        return leer_ocr_mac(ruta, dpi=dpi)
+    if sys.platform != "win32":
+        return ""
+    try:
+        import fitz   # PyMuPDF: convierte el PDF (o la foto) en imágenes
+    except Exception:
+        return ""
+    try:
+        carpeta = tempfile.mkdtemp(prefix="ocr_compras_")
+        imagenes = []
+        documento = fitz.open(ruta)
+        for numero, pagina in enumerate(documento):
+            destino = os.path.join(carpeta, "pagina_%d.png" % (numero + 1))
+            pagina.get_pixmap(dpi=dpi).save(destino)
+            imagenes.append(destino)
+        documento.close()
+    except Exception:
+        return ""
+    if not imagenes:
+        return ""
+
+    script = os.path.join(carpeta, "ocr_windows.ps1")
+    try:
+        with open(script, "w", encoding="utf-8-sig") as archivo_ps:
+            archivo_ps.write(_SCRIPT_OCR_WINDOWS)
+    except Exception:
+        return ""
+
+    paginas = []
+    for imagen in imagenes[:5]:
+        try:
+            orden = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
+                     "-Ruta", imagen, "-Idiomas", idiomas]
+            resultado = subprocess.run(orden, capture_output=True, text=True, encoding="utf-8",
+                                       errors="ignore", timeout=180,
+                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            palabras = []
+            for linea in (resultado.stdout or "").splitlines():
+                partes = linea.split("\t")
+                if len(partes) != 5:
+                    continue
+                try:
+                    x, y, alto = int(partes[0]), int(partes[1]), int(partes[3])
+                except ValueError:
+                    continue
+                palabras.append((x, y, alto, partes[4]))
+            texto = _agrupar_palabras_en_lineas(palabras)
+            if texto.strip():
+                paginas.append(texto)
+        except Exception:
+            continue
+    try:
+        shutil.rmtree(carpeta, ignore_errors=True)
+    except Exception:
+        pass
+    return "\n".join(paginas)
+
+
+def _importes_del_texto(texto):
+    """Todos los importes con decimales del texto (corrige los 'oo' del OCR)."""
+    limpio = str(texto or "").replace("oo", "00").replace("OO", "00")
+    valores = []
+    for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}", limpio):
+        valor = _a_numero(encontrado)
+        if valor and valor not in valores:
+            valores.append(round(float(valor), 2))
+    return valores
+
+
+def deducir_montos_por_suma(texto, tipo=""):
+    """Deduce (base, IGV, total) buscando 'base + IGV = total' entre los importes.
+
+    Sirve cuando el OCR separa los rótulos de los números o confunde las
+    etiquetas: se recogen todos los importes y se busca el par que cumple la
+    relación del IGV (18% o 10.5%). Devuelve (0, 0, 0) si no hay combinación válida.
+    """
+    valores = _importes_del_texto(texto)
+    if len(valores) < 3:
+        return 0.0, 0.0, 0.0
+    tasas = [0.105] if "10.5" in str(tipo) else [0.18]
+    mejor = None
+    for base in valores:
+        for igv in valores:
+            if base <= 0 or igv <= 0 or igv == base:
+                continue
+            if not any(abs(igv / base - tasa) < 0.02 for tasa in tasas):
+                continue
+            total = round(base + igv, 2)
+            if any(abs(v - total) <= 0.05 for v in valores):
+                if mejor is None or total > mejor[2]:
+                    mejor = (base, igv, total)
+    return mejor or (0.0, 0.0, 0.0)
+
+
+def _limpiar_numero_operacion(token):
+    """Deja el N° de operación legible (corrige O->0, I->1... si es numérico)."""
+    token = str(token or "").strip(" .,:;#-")
+    digitos = re.sub(r"\D", "", token)
+    if token and len(digitos) >= max(4, len(token) - 2):
+        tabla = str.maketrans({"O": "0", "o": "0", "Q": "0", "D": "0", "I": "1", "l": "1", "|": "1",
+                               "S": "5", "s": "5", "Z": "2", "B": "8", "G": "6", "A": "4", "T": "7"})
+        token = token.translate(tabla)
+    return token.upper()
+
+
+def _fecha_valida(dia, mes, anio):
+    """Devuelve (dd, mm, aaaa) si es una fecha real del calendario, o None."""
+    try:
+        dia, mes, anio = int(dia), int(mes), int(anio)
+    except Exception:
+        return None
+    if anio < 100:
+        anio += 2000
+    if not (2000 <= anio <= 2100):
+        return None
+    for d, m in ((dia, mes), (mes, dia)):      # se acepta DD/MM y, si no, MM/DD
+        try:
+            datetime(anio, m, d)
+            return d, m, anio
+        except Exception:
+            continue
+    return None
+
+
+def _formatear_fecha(dia, mes, anio, formato="DD/MM/AAAA"):
+    """Arma la fecha en el formato configurado en el sistema."""
+    try:
+        formato = str((CONFIG_REGIONAL or {}).get("formato_fecha", formato) or formato)
+    except Exception:
+        pass
+    if str(formato).upper().startswith("MM"):
+        return f"{mes:02d}/{dia:02d}/{anio}"
+    return f"{dia:02d}/{mes:02d}/{anio}"
+
+
+def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
+    """Fecha del comprobante de pago leída por OCR ('' si no aparece).
+
+    Se buscan primero las fechas con rótulo ("Fecha de pago", "Fecha de
+    operación", "Fecha de transferencia", "Fecha"... ) y, si no hay, la primera
+    fecha válida del documento. Acepta 12/10/2026, 12-10-26 y "12 de octubre
+    del 2026". Devuelve la fecha en el formato configurado en el sistema.
+    """
+    if not str(texto or "").strip():
+        return ""
+    plano = " ".join(str(texto).upper().split())
+    meses = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
+             "JULIO": 7, "AGOSTO": 8, "SETIEMBRE": 9, "SEPTIEMBRE": 9, "OCTUBRE": 10,
+             "NOVIEMBRE": 11, "DICIEMBRE": 12,
+             # Abreviaturas que usan los vouchers del banco ("12 OCT 2026")
+             "ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6, "JUL": 7,
+             "AGO": 8, "SET": 9, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12}
+    numeros = re.compile(r"\b(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2,4})\b")
+    # 📅 "12 de Octubre del 2026", "12 Octubre 2026" (vouchers del banco)
+    #    y "Lunes, 12 OCT 2026": el "de" es opcional y se aceptan abreviaturas.
+    escrito = re.compile(r"\b(\d{1,2})\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
+
+    def leer(trozo):
+        encontrado = numeros.search(trozo)
+        if encontrado:
+            fecha = _fecha_valida(*encontrado.groups())
+            if fecha:
+                return _formatear_fecha(*fecha, formato=formato)
+        encontrado = escrito.search(trozo)
+        if encontrado and encontrado.group(2) in meses:
+            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
+            if fecha:
+                return _formatear_fecha(*fecha, formato=formato)
+        return ""
+
+    # 1) Con rótulo de fecha: es lo más confiable
+    etiquetas = (r"FECHA\s+DE\s+PAGO", r"FECHA\s+DE\s+LA\s+OPERACI[OÓ]N",
+                 r"FECHA\s+DE\s+OPERACI[OÓ]N", r"FECHA\s+DE\s+TRANSACCI[OÓ]N",
+                 r"FECHA\s+DE\s+TRANSFERENCIA", r"FECHA\s+DE\s+DEP[OÓ]SITO",
+                 r"FECHA\s*[/\-]\s*HORA", r"FECHA\s+DE\s+EMISI[OÓ]N", r"FECHA\s+OPE",
+                 r"FECHA")
+    for etiqueta in etiquetas:
+        encontrado = re.search(etiqueta + r"[^0-9]{0,18}", plano)
+        if not encontrado:
+            continue
+        fecha = leer(plano[encontrado.end(): encontrado.end() + 45])
+        if fecha:
+            return fecha
+    # 2) La primera fecha válida del documento
+    for encontrado in numeros.finditer(plano):
+        fecha = _fecha_valida(*encontrado.groups())
+        if fecha:
+            return _formatear_fecha(*fecha, formato=formato)
+    for encontrado in escrito.finditer(plano):
+        if encontrado.group(2) in meses:
+            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
+            if fecha:
+                return _formatear_fecha(*fecha, formato=formato)
+    return ""
+
+
+def extraer_numero_operacion(texto):
+    """N° de operación / transacción leído del comprobante de pago (o '').
+
+    Reconoce los rótulos habituales de un voucher ("N° de operación",
+    "Nro. de transacción", "Código de operación", "N° de referencia"...)
+    y también las capturas de la banca por internet. Es tolerante a los
+    errores del OCR (operacin, Nro, N°, etc.).
+    """
+    if not str(texto or "").strip():
+        return ""
+    plano = " ".join(str(texto).upper().split())
+    patrones = (
+        r"(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*:?\s*(?:DE\s+|DEL\s+)?)?"
+        r"(?:OPERACI[O\u00d3]N|TRANSACCI[O\u00d3]N|TRANSFERENCIA|REFERENCIA|CONSTANCIA|"
+        r"DEP[O\u00d3]SITO|C[O\u00d3]DIGO)\s*(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*)?"
+        r"[:#\-]?\s*([A-Z0-9][A-Z0-9\-\.]{3,24})",
+        r"OPERACI[O\u00d3]N\s*N(?:RO|R|\u00ba|\u00b0)?\.?\s*[:#\-]?\s*([A-Z0-9\-\.]{4,24})",
+    )
+    for patron in patrones:
+        for encontrado in re.finditer(patron, plano):
+            candidato = _limpiar_numero_operacion(encontrado.group(1))
+            if re.fullmatch(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}", candidato):
+                continue                      # es una fecha
+            if len(re.sub(r"\D", "", candidato)) < 4:
+                continue                      # demasiado corto para ser una operación
+            return candidato
+    # Último recurso: la secuencia más larga de 6 a 20 dígitos, siempre que el
+    # comprobante parezca una transferencia/pago (no un RUC de 11).
+    if re.search(r"TRANSFERENCIA|INTERBANCARI|OPERACI|CONSTANCIA|DEPOSITO|DEP\u00d3SITO|VOUCHER", plano):
+        numeros = [n for n in re.findall(r"\b\d{6,20}\b", plano) if len(n) != 11]
+        if numeros:
+            return max(numeros, key=len)
+    return ""
+
+
 def extraer_datos_de_texto(texto):
     """Saca los datos de una factura del texto (de un PDF o del OCR del escaneo).
 
@@ -666,10 +1198,21 @@ def extraer_datos_de_texto(texto):
             else "Recibo por Honorarios (Sin Retención)"
 
     # --- Número (F001-123, E001 123, B001-45...) ---
-    m = (re.search(r"\b([EFB])\s*0*(\d{2,3})\s*[-–—:.]?\s*(\d{1,8})\b", plano) or
-         re.search(r"\b([EFB])\s*0*(\d{2,3})[-–—](\d{1,8})\b", plano))
+    #     El OCR suele confundir 0/O, 1/I, 5/S... (EOOI-519 es E001-519).
+    def _serie_ocr(serie):
+        tabla = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1",
+                               "S": "5", "Z": "2", "G": "6", "A": "4", "T": "7", "B": "8"})
+        # Solo se corrigen los DÍGITOS de la serie: la letra inicial se respeta.
+        serie = str(serie or "").upper()
+        return serie[:1] + serie[1:].translate(tabla) if len(serie) > 1 else serie
+
+    m = (re.search(r"\b([EFB][0-9A-Z]{3})\s*[-–—:.]?\s*(\d{1,8})\b", plano) or
+         re.search(r"\b([EFB])\s*0*(\d{2,3})\s*[-–—:.]?\s*(\d{1,8})\b", plano))
     if m:
-        datos["numero"] = f"{m.group(1)}{int(m.group(2)):03d}-{int(m.group(3))}"
+        if m.lastindex == 2:
+            datos["numero"] = f"{_serie_ocr(m.group(1))}-{int(m.group(2))}"
+        else:
+            datos["numero"] = f"{m.group(1)}{int(m.group(2)):03d}-{int(m.group(3))}"
 
     # --- RUC (el primero suele ser el del proveedor/emisor) ---
     rucs = re.findall(r"R\.?\s*U\.?\s*C\.?\s*[:\-]?\s*(\d{11})", plano)
@@ -692,6 +1235,19 @@ def extraer_datos_de_texto(texto):
                 fecha = f"{int(dia):02d}/{int(mes):02d}/{anio}"
         except Exception:
             fecha = None
+    if not fecha:
+        # Fechas escritas: "09 de Octubre del 2026"
+        MESES_ES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+                    "julio": 7, "agosto": 8, "setiembre": 9, "septiembre": 9, "octubre": 10,
+                    "noviembre": 11, "diciembre": 12}
+        m_esc = re.search(r"(\d{1,2})\s*(?:DE\s+)?([A-ZÁÉÍÓÚ]+)\s*(?:DE(?:L)?\s+)?(\d{4})", plano)
+        if m_esc and m_esc.group(2).lower() in MESES_ES:
+            try:
+                dia = int(m_esc.group(1))
+                if 1 <= dia <= 31:
+                    fecha = f"{dia:02d}/{MESES_ES[m_esc.group(2).lower()]:02d}/{m_esc.group(3)}"
+            except Exception:
+                fecha = None
     datos["fecha"] = fecha or ""
 
     # --- Montos ---
@@ -714,27 +1270,46 @@ def extraer_datos_de_texto(texto):
     if not igv and subtotal and datos["tipo_documento"].startswith("Factura"):
         divisor = 1.105 if "10.5" in datos["tipo_documento"] else 1.18
         igv = round(subtotal * (divisor - 1), 2)
+    # 🔎 Si los montos no cuadran (base + IGV = total) o falta alguno, se deducen
+    #    buscando esa relación entre TODOS los importes del documento (OCR despistado).
+    if not subtotal or not total or abs((subtotal + igv) - total) > 0.05:
+        b2, i2, t2 = deducir_montos_por_suma(texto, datos.get("tipo_documento", ""))
+        if t2:
+            subtotal, igv, total = b2, i2, t2
+    if not total:
+        total = round(subtotal + igv, 2)
     datos["subtotal"] = round(subtotal, 2)
     datos["igv"] = round(igv, 2)
-    datos["total"] = round(total, 2) if total else round(subtotal + igv, 2)
+    datos["total"] = round(total, 2)
 
     # --- Destinatario (la empresa que recibe la factura) ---
     cliente_ruc, cliente_nombre = "", ""
-    m_cli = re.search(r"(?:SE[NÑ]OR(?:ES)?|ADQUIRIENTE|CLIENTE|RAZ[OÓ]N\s+SOCIAL(?:\s+DEL?\s+CLIENTE)?)\s*[:\-]?\s*", plano)
+    m_cli = re.search(r"(?:SE[NÑ]OR(?:ES)?|ADQUIRIENTE|CLIENTE|RAZ[OÓ]N\s+SOCIAL(?:\s+DEL?\s+CLIENTE)?|"
+                      r"RECIB\w*\s+DE|RECIBIDO\s+DE|A\s+NOMBRE\s+DE|PAGADO\s+POR)\s*[:\-]?\s*", plano)
     if m_cli:
         ventana = plano[m_cli.end(): m_cli.end() + 320]
-        m_ruc_cli = re.search(r"\b(\d{11})\b", ventana)
-        if m_ruc_cli:
-            cliente_ruc = m_ruc_cli.group(1)
-            texto_nombre = ventana[:m_ruc_cli.start()]
+        numeros_ventana = re.findall(r"\b(\d{11})\b", ventana)
+        elegido = next((c for c in numeros_ventana if c != datos["ruc"]),
+                       numeros_ventana[0] if numeros_ventana else "")
+        if elegido:
+            cliente_ruc = elegido
+            texto_nombre = ventana[:ventana.index(elegido)]
         else:
             texto_nombre = ventana[:90]
-        texto_nombre = re.split(r"\b(?:RUC|DNI|DIRECCI[OÓ]N|DIRECCION|FECHA|TEL[EÉ]FONO|TELEFONO|MONEDA|CONDICI[OÓ]N)\b",
+        texto_nombre = re.split(r"\b(?:RUC|R\.U\.C|DNI|N[UÚ]MERO|NUMERO|IDENTIFICADO|DIRECCI[OÓ]N|"
+                                r"DIRECCION|FECHA|TEL[EÉ]FONO|TELEFONO|MONEDA|CONDICI[OÓ]N)\b",
                                 texto_nombre, maxsplit=1)[0]
         texto_nombre = re.sub(r"[^0-9A-Za-zÁÉÍÓÚÑÜáéíóúñü .,&\-]", " ", texto_nombre)
         cliente_nombre = " ".join(texto_nombre.split()).strip(" .-,:").strip()[:80]
+    if not cliente_ruc:
+        # Sin etiqueta reconocible: el primer RUC que NO sea el del emisor
+        # (en los recibos por honorarios el del emisor va primero).
+        for candidato in re.findall(r"\b(\d{11})\b", plano):
+            if candidato != datos["ruc"]:
+                cliente_ruc = candidato
+                break
     if not cliente_ruc and len(rucs) >= 2:
-        cliente_ruc = rucs[-1]        # sin etiqueta: el 2° RUC suele ser el del cliente
+        cliente_ruc = rucs[-1]
     datos["cliente_ruc"] = cliente_ruc
     datos["cliente_nombre"] = cliente_nombre
 
@@ -883,6 +1458,9 @@ class FacturasRecibidasTab:
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
         self.registros_por_pagina = 50
+
+        # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
+        self.mes_filtro = mes_en_curso()
         
         self.inicializar_bd()
         self.crear_interfaz()
@@ -962,14 +1540,14 @@ class FacturasRecibidasTab:
         try:
             import escaner
         except Exception as e:
-            return messagebox.showerror("Escáner", f"No se pudo cargar el módulo de escaneo:\n{e}")
-        if not escaner.es_windows():
-            return messagebox.showinfo("Escáner", "El escaneo con la multifuncional solo está disponible en Windows.")
+            return messagebox.showerror("Escáner", f"No se pudo cargar el módulo de escaneo:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+        if not escaner.sistema_soportado():
+            return messagebox.showinfo("Escáner", "El escaneo con la multifuncional está disponible en Windows y en macOS (M1/M2).", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         config = cargar_configuracion_regional()
         datos_escaner = escaner.config_escaner(config)
         modo = datos_escaner.get("escaner_modo", "Automático (sin ventanas)")
-        instruccion = ("Se abrirá la ventana de escaneo de Windows." if str(modo).lower().startswith("con la ventana")
+        instruccion = ("Se abrirá el cuadro de escaneo del sistema." if str(modo).lower().startswith("con la ventana")
                        else f"Coloque la factura en el escáner (cristal) — {datos_escaner.get('escaner_dpi', '300')} ppp, "
                             f"{datos_escaner.get('escaner_color', 'Escala de grises')}.")
         if not datos_escaner.get("escaner_dispositivo") and not str(modo).lower().startswith("con la ventana"):
@@ -996,6 +1574,16 @@ class FacturasRecibidasTab:
         try:
             import escaner
             resultado = escaner.procesar_factura(config, paginas_previas=paginas_previas)
+            # 🧠 Mejor lectura: se rehace el OCR por POSICIONES (el del módulo escaner
+            #    aplasta todo en una sola línea y pierde los rótulos del comprobante).
+            if resultado.get("ok") and resultado.get("pdf"):
+                try:
+                    texto_mejor = leer_ocr_windows(resultado["pdf"])
+                    if texto_mejor and texto_mejor.strip():
+                        resultado["texto"] = texto_mejor
+                        resultado["ocr"] = {"motor": "Windows OCR (por posiciones)"}
+                except Exception as e_ocr_mejor:
+                    print("Aviso - OCR por posiciones:", e_ocr_mejor)
         except Exception as e:
             resultado = {"ok": False, "error": str(e), "paginas": [], "pdf": "", "texto": "", "ocr": {}}
 
@@ -1048,7 +1636,7 @@ class FacturasRecibidasTab:
                 "No se pudo escanear la factura.\n\n" + str(resultado.get("error") or "") +
                 "\n\nRevise que la impresora esté encendida y conectada; si su modelo tiene "
                 "alimentador, coloque el papel en la bandeja. También puede probar el modo "
-                "\"Con la ventana de Windows\" en Ajustes → Configuración General → Escáner.")
+                "el modo \"con ventana\" en Ajustes → Configuración General → Escáner.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         self._escaneo_actual = resultado
         config = cargar_configuracion_regional()
@@ -1348,7 +1936,7 @@ class FacturasRecibidasTab:
         self._destino_escaneo = estado_destino
         if estado_destino == "ajeno":
             return messagebox.showerror("Factura de otra empresa", mensaje_destino +
-                                        "\n\nNo se cargó nada en el formulario.")
+                                        "\n\nNo se cargó nada en el formulario.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         try:
             self.bloquear_autocompletado_ruc = True
             if datos.get("tipo_documento"):
@@ -1372,9 +1960,24 @@ class FacturasRecibidasTab:
             if datos.get("ruc"):
                 self.ent_desc.delete(0, tk.END)
                 self.ent_desc.insert(0, str(datos["ruc"]))
-            if datos.get("subtotal"):
+            # 💰 Se carga el TOTAL del documento (con IGV) y el modo queda en "con IGV",
+            #    igual que en el Programa de Flota: la base y el IGV se calculan solos.
+            monto_total = 0.0
+            try:
+                if datos.get("total"):
+                    monto_total = float(datos["total"])
+                elif datos.get("subtotal"):
+                    base_leida = float(datos["subtotal"])
+                    if "Factura" in self.combo_tipo.get():
+                        monto_total = base_leida * (1.105 if "10.5%" in self.combo_tipo.get() else 1.18)
+                    else:
+                        monto_total = base_leida
+            except Exception as e_monto:
+                print("Aviso - monto del comprobante:", e_monto)
+            if monto_total > 0:
                 self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, f"{float(datos['subtotal']):.2f}")
+                self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                self._poner_modo_monto("CON_IGV")
 
             resultado = getattr(self, "_escaneo_actual", {}) or {}
             if resultado.get("pdf") and os.path.exists(resultado["pdf"]):
@@ -1398,17 +2001,17 @@ class FacturasRecibidasTab:
                     estado_prov = "error"
             self._estado_proveedor_escaneo = estado_prov
             if estado_destino == "sin-datos":
-                messagebox.showwarning("Destinatario", mensaje_destino)
+                messagebox.showwarning("Destinatario", mensaje_destino, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             elif estado_destino == "sin-configurar":
-                messagebox.showwarning("Destinatario", mensaje_destino)
+                messagebox.showwarning("Destinatario", mensaje_destino, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron aplicar los datos:\n{e}")
+            messagebox.showerror("Error", f"No se pudieron aplicar los datos:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         finally:
             self.bloquear_autocompletado_ruc = False
 
     def autocompletar_desde_pdf(self):
         if pdfplumber is None:
-            messagebox.showerror("Librería faltante", "No se encontró 'pdfplumber'. Ejecuta: pip install pdfplumber")
+            messagebox.showerror("Librería faltante", "No se encontró 'pdfplumber'. Ejecuta: pip install pdfplumber", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             return
             
         ruta = filedialog.askopenfilename(title="Seleccionar Factura PDF de SUNAT", filetypes=[("Archivos PDF", "*.pdf")])
@@ -1425,7 +2028,7 @@ class FacturasRecibidasTab:
                     
             if not texto.strip(): 
                 self.bloquear_autocompletado_ruc = False
-                return messagebox.showwarning("Aviso", "El PDF no contiene texto seleccionable.")
+                return messagebox.showwarning("Aviso", "El PDF no contiene texto seleccionable.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
             # 🏢 Solo se aceptan facturas a nombre de la empresa configurada
             datos_txt = extraer_datos_de_texto(texto)
@@ -1433,7 +2036,7 @@ class FacturasRecibidasTab:
             if estado_destino == "ajeno":
                 self.bloquear_autocompletado_ruc = False
                 return messagebox.showerror("Factura de otra empresa",
-                                            mensaje_destino + "\n\nNo se cargó al formulario.")
+                                            mensaje_destino + "\n\nNo se cargó al formulario.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
             if re.search(r"FACTURA\s+ELECTR[OÓ]NICA", texto, re.IGNORECASE): 
                 if "10.5%" not in self.combo_tipo.get():
@@ -1481,19 +2084,21 @@ class FacturasRecibidasTab:
             sub_m = re.search(r"(?:OP\.\s*GRAVADAS|SUB\s*TOTAL|Subtotal|Total por honorarios)[\s:S/\|]+([\d\,\.]+)", texto, re.IGNORECASE)
             tot_m = re.search(r"(?:IMPORTE\s*TOTAL|TOTAL\s*A\s*PAGAR|Total Neto Recibido)[\s:S/\|]+([\d\,\.]+)", texto, re.IGNORECASE)
             
-            monto_base = 0.0
-            if sub_m: 
+            # 💰 Se carga el TOTAL con IGV (como Flota): la base y el IGV salen solos.
+            monto_total = 0.0
+            if tot_m:
+                monto_total = float(tot_m.group(1).replace(",", ""))
+            elif sub_m:
                 monto_base = float(sub_m.group(1).replace(",", ""))
-            elif tot_m:
-                t = float(tot_m.group(1).replace(",", ""))
                 if "Factura" in self.combo_tipo.get():
-                    monto_base = t / 1.105 if "10.5%" in self.combo_tipo.get() else t / 1.18
+                    monto_total = monto_base * (1.105 if "10.5%" in self.combo_tipo.get() else 1.18)
                 else:
-                    monto_base = t
-                    
-            if monto_base > 0:
+                    monto_total = monto_base
+
+            if monto_total > 0:
                 self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, f"{monto_base:.2f}")
+                self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                self._poner_modo_monto("CON_IGV")
 
             self.ruta_archivo_temp = ruta
             self.btn_archivo.configure(text="✅ PDF Autocargado Exitosamente", fg_color="#28a745")
@@ -1506,14 +2111,14 @@ class FacturasRecibidasTab:
                                                        datos_txt.get("ruc") or self.ent_desc.get())
             if estado_prov == "creado":
                 messagebox.showinfo("Proveedor agregado",
-                                    "El proveedor de la factura no estaba registrado y se agregó a 📦 Proveedores.")
+                                    "El proveedor de la factura no estaba registrado y se agregó a 📦 Proveedores.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
-            messagebox.showinfo("Extracción Inteligente", "Se extrajeron los datos del PDF.")
+            messagebox.showinfo("Extracción Inteligente", "Se extrajeron los datos del PDF.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             self.bloquear_autocompletado_ruc = False
             
         except Exception as e: 
             self.bloquear_autocompletado_ruc = False
-            messagebox.showerror("Error", f"Ocurrió un error:\n{e}")
+            messagebox.showerror("Error", f"Ocurrió un error:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
     # 🚀 MOTOR DE LECTURA XML (UBL)
     def autocompletar_desde_xml(self):
@@ -1541,7 +2146,7 @@ class FacturasRecibidasTab:
             if estado_destino == "ajeno":
                 self.bloquear_autocompletado_ruc = False
                 return messagebox.showerror("Factura de otra empresa",
-                                            mensaje_destino + "\n\nNo se cargó al formulario.")
+                                            mensaje_destino + "\n\nNo se cargó al formulario.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
             tipo_cod = root.find('.//InvoiceTypeCode')
             nro_doc = root.find('.//ID')
@@ -1593,17 +2198,29 @@ class FacturasRecibidasTab:
                     
             monetary = root.find('.//LegalMonetaryTotal')
             if monetary is not None:
-                sub_node = monetary.find('TaxExclusiveAmount')
-                if sub_node is not None and sub_node.text:
+                # 💰 El XML trae el total con IGV: se carga tal cual y el modo queda "con IGV"
+                monto_total = 0.0
+                for etiqueta in ('PayableAmount', 'TaxInclusiveAmount'):
+                    nodo = monetary.find(etiqueta)
+                    if nodo is not None and nodo.text:
+                        try:
+                            monto_total = float(nodo.text.strip())
+                            break
+                        except Exception:
+                            monto_total = 0.0
+                if monto_total <= 0:
+                    sub_node = monetary.find('TaxExclusiveAmount')
+                    if sub_node is not None and sub_node.text:
+                        try:
+                            base_xml = float(sub_node.text.strip())
+                            monto_total = (base_xml * (1.105 if "10.5%" in self.combo_tipo.get() else 1.18)
+                                           if "Factura" in self.combo_tipo.get() else base_xml)
+                        except Exception:
+                            monto_total = 0.0
+                if monto_total > 0:
                     self.ent_subtotal.delete(0, tk.END)
-                    self.ent_subtotal.insert(0, sub_node.text.strip())
-                else:
-                    tot_node = monetary.find('PayableAmount')
-                    if tot_node is not None and tot_node.text:
-                        val_tot = float(tot_node.text.strip())
-                        val_sub = val_tot / 1.18 if "Factura" in self.combo_tipo.get() else val_tot
-                        self.ent_subtotal.delete(0, tk.END)
-                        self.ent_subtotal.insert(0, f"{val_sub:.2f}")
+                    self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                    self._poner_modo_monto("CON_IGV")
 
             self.ruta_archivo_temp = ruta
             self.btn_archivo.configure(text="✅ XML Autocargado Exitosamente", fg_color="#d35400")
@@ -1615,14 +2232,14 @@ class FacturasRecibidasTab:
             estado_prov = crear_proveedor_si_no_existe(self.combo_proveedor.get(), self.ent_desc.get())
             if estado_prov == "creado":
                 messagebox.showinfo("Proveedor agregado",
-                                    "El proveedor del XML no estaba registrado y se agregó a 📦 Proveedores.")
+                                    "El proveedor del XML no estaba registrado y se agregó a 📦 Proveedores.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
-            messagebox.showinfo("Extracción XML Exitosa", "Los datos del XML se extrajeron correctamente.")
+            messagebox.showinfo("Extracción XML Exitosa", "Los datos del XML se extrajeron correctamente.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             self.bloquear_autocompletado_ruc = False
             
         except Exception as e:
             self.bloquear_autocompletado_ruc = False
-            messagebox.showerror("Error", f"Ocurrió un error al leer el XML:\n{e}")
+            messagebox.showerror("Error", f"Ocurrió un error al leer el XML:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
     # 🚀 MOTOR DE DESCARGA DIRECTA DESDE SUNAT SIRE (CONEXIÓN OAUTH2)
     def importar_compras_sire(self):
@@ -1639,7 +2256,7 @@ class FacturasRecibidasTab:
                 "⚠️ No ha configurado las credenciales de SUNAT SIRE.\n\n"
                 "Por favor, vaya a Configuración General del Sistema e ingrese:\n"
                 "• RUC Empresa\n• Usuario SOL y Clave SOL\n• Client ID y Client Secret"
-            )
+            , parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             return
 
         # 🚀 CORTE DEL SISTEMA: nunca antes de la Fecha de Comienzo configurada
@@ -1652,12 +2269,12 @@ class FacturasRecibidasTab:
 
         periodo = simpledialog.askstring("Periodo SIRE SUNAT", texto_pregunta, initialvalue=periodo_inicial)
         if not periodo or len(periodo) != 6 or not periodo.isdigit():
-            return messagebox.showerror("Error", "Debe ingresar un periodo válido de 6 dígitos (ej: 202607).")
+            return messagebox.showerror("Error", "Debe ingresar un periodo válido de 6 dígitos (ej: 202607).", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         if validar_periodo_sire:
             permitido, msg_bloqueo = validar_periodo_sire(periodo)
             if not permitido:
-                return messagebox.showwarning("Periodo bloqueado por el Corte del Sistema", msg_bloqueo)
+                return messagebox.showwarning("Periodo bloqueado por el Corte del Sistema", msg_bloqueo, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         v_sire = ctk.CTkToplevel(self.main_root)
         v_sire.title("Conexión Oficial SUNAT SIRE")
@@ -1815,9 +2432,21 @@ class FacturasRecibidasTab:
         self.ent_desc = ctk.CTkEntry(self.f_form)
         self.ent_desc.pack(fill="x", padx=10, pady=(0, 8))
 
+        # 📝 Concepto / Descripción del gasto (igual que en el programa de Flota)
+        ctk.CTkLabel(self.f_form, text="Concepto / Descripción:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
+        self.ent_concepto = ctk.CTkEntry(self.f_form,
+                                         placeholder_text="Ej. Alquiler de local, catering, sonido...")
+        self.ent_concepto.pack(fill="x", padx=10, pady=(0, 8))
+
         ctk.CTkLabel(self.f_form, text="Categoría de Gasto:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
-        self.combo_categoria = ctk.CTkComboBox(self.f_form, state="normal")
-        self.combo_categoria.pack(fill="x", padx=10, pady=(0, 8))
+        f_cat = ctk.CTkFrame(self.f_form, fg_color="transparent")
+        f_cat.pack(fill="x", padx=10, pady=(0, 8))
+        self.combo_categoria = ctk.CTkComboBox(f_cat, state="normal")
+        self.combo_categoria.pack(side="left", fill="x", expand=True)
+        # ⚙️ Abre la MISMA ventana de categorías de gastos del módulo de Banco
+        ctk.CTkButton(f_cat, text="⚙️", width=34, font=("Arial", 12, "bold"),
+                      fg_color="#8e44ad", hover_color="#703688",
+                      command=self.administrar_categorias_gasto).pack(side="right", padx=(6, 0))
         self.cargar_categorias()
 
         ctk.CTkLabel(self.f_form, text="Evento Asociado:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
@@ -1886,10 +2515,26 @@ class FacturasRecibidasTab:
         self.btn_soporte_tercero.pack(fill="x", padx=8, pady=(0, 8))
         self.ruta_soporte_tercero = ""
 
-        ctk.CTkLabel(self.f_form, text="Monto Base (Subtotal):", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
-        self.ent_subtotal = ctk.CTkEntry(self.f_form)
-        self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 8))
+        # 💰 El monto se puede digitar SIN IGV (monto base) o CON IGV (total del documento)
+        ctk.CTkLabel(self.f_form, text="Tipo de Monto a Ingresar:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
+        self.modo_monto = "BASE"
+        self.seg_modo_monto = ctk.CTkSegmentedButton(
+            self.f_form,
+            values=["Monto Base (sin IGV)", "Monto con IGV (Total)"],
+            font=("Arial", 10, "bold"),
+            command=self.on_cambiar_modo_monto)
+        self.seg_modo_monto.pack(fill="x", padx=10, pady=(0, 6))
+        self.seg_modo_monto.set("Monto Base (sin IGV)")
+
+        self.lbl_monto_entrada = ctk.CTkLabel(self.f_form, text="Monto Base (Subtotal):", font=("Arial", 11, "bold"))
+        self.lbl_monto_entrada.pack(anchor="w", padx=10)
+        self.ent_subtotal = ctk.CTkEntry(self.f_form, placeholder_text="Ej. 100.00")
+        self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 4))
+        self.lbl_nota_modo = ctk.CTkLabel(self.f_form, text="", font=("Arial", 10, "italic"),
+                                          text_color="#555555", wraplength=330, justify="left")
+        self.lbl_nota_modo.pack(anchor="w", padx=10, pady=(0, 8))
         self.ent_subtotal.bind("<KeyRelease>", self.actualizar_totales)
+        self._refrescar_etiqueta_modo()
 
         self.lbl_titulo_det = ctk.CTkLabel(self.f_form, text="Detracción (%):", font=("Arial", 11, "bold"))
         self.lbl_titulo_det.pack(anchor="w", padx=10)
@@ -1901,8 +2546,14 @@ class FacturasRecibidasTab:
         f_tot = ctk.CTkFrame(self.f_form, fg_color="#ffffff", border_width=1, border_color="#e0e0e0")
         f_tot.pack(fill="x", padx=10, pady=(5, 10))
         
+        self.lbl_base = ctk.CTkLabel(f_tot, text=f"Monto Base (Subtotal): {formatear_moneda(0)}",
+                                     font=("Arial", 11), text_color="#555")
+        self.lbl_base.pack(anchor="w", padx=10, pady=(5, 0))
         self.lbl_impuesto = ctk.CTkLabel(f_tot, text=f"IGV (18%): {formatear_moneda(0)}", font=("Arial", 11), text_color="#555")
-        self.lbl_impuesto.pack(anchor="w", padx=10, pady=(5, 0))
+        self.lbl_impuesto.pack(anchor="w", padx=10, pady=(0, 0))
+        self.lbl_bruto = ctk.CTkLabel(f_tot, text=f"Total con IGV: {formatear_moneda(0)}",
+                                      font=("Arial", 11, "bold"), text_color="#1f538d")
+        self.lbl_bruto.pack(anchor="w", padx=10, pady=(0, 0))
         self.lbl_detraccion = ctk.CTkLabel(f_tot, text=f"Detracción (0%): -{formatear_moneda(0)}", font=("Arial", 11), text_color="#e74c3c")
         self.lbl_detraccion.pack(anchor="w", padx=10, pady=(0, 0))
         self.lbl_total = ctk.CTkLabel(f_tot, text=f"Neto a Pagar: {formatear_moneda(0)}", font=("Arial", 13, "bold"), text_color="#1f538d")
@@ -1924,6 +2575,12 @@ class FacturasRecibidasTab:
         self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por N° Doc, proveedor, evento, fecha...")
         self.ent_buscar_facturas.pack(side="left", fill="x", expand=True)
         
+        ctk.CTkLabel(f_busqueda, text="🗓️ Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
+        self.combo_mes = ctk.CTkComboBox(f_busqueda, values=construir_valores_mes(), width=150,
+                                         state="readonly", command=self.on_cambiar_mes)
+        self.combo_mes.pack(side="left", padx=(0, 5))
+        self.combo_mes.set(self.mes_filtro)
+
         self.ent_buscar_facturas.bind("<KeyRelease>", lambda e: self.buscar_con_retraso_facturas())
         self.ent_buscar_facturas.bind("<Return>", lambda e: self.cargar_datos_tabla(reset_pagina=True))
 
@@ -1950,7 +2607,9 @@ class FacturasRecibidasTab:
         self.tabla.column("neto", width=85, anchor="e")
         
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "proveedor", "evento", "neto"))
-        self.tabla.bind("<Double-1>", self.abrir_archivo)
+        # 🖱️ Un clic SELECCIONA la fila; el DOBLE clic abre la factura adjunta
+        #    (el mismo comportamiento que el programa de Flota).
+        self.tabla.bind("<Double-1>", self.abrir_archivo, add="+")
         # 🖱️ CLIC DERECHO en una factura: ventana con los datos bancarios del proveedor.
         # (El clic izquierdo / doble clic se deja para ver el comprobante adjunto.)
         # Se atienden los dos botones derechos posibles: el 3 (Windows/Linux) y el 2 (macOS).
@@ -1978,13 +2637,18 @@ class FacturasRecibidasTab:
         self.btn_sig = ctk.CTkButton(f_paginacion, text="Sig ▶", width=60, command=self.pagina_siguiente)
         self.btn_sig.pack(side="left", padx=2)
 
-        ctk.CTkLabel(f_btn_tabla, text="💡 Clic DERECHO sobre una factura: datos bancarios del proveedor",
+        ctk.CTkLabel(f_btn_tabla, text="💡 Un clic: seleccionar   ·   Doble clic: ver la factura   ·   Clic DERECHO: datos bancarios",
                      font=("Arial", 10, "italic"), text_color="#1f538d").pack(side="left", padx=(12, 0))
 
         btn_gestionar = ctk.CTkButton(f_btn_tabla, text="⚙️ Modificar o Eliminar Registro Seleccionado", font=("Arial", 12, "bold"), command=self.abrir_ventana_edicion, fg_color="#34495e", hover_color="#2c3e50")
         btn_gestionar.pack(side="right")
 
         self.main_root.after(100, lambda: self.cargar_datos_tabla(reset_pagina=True))
+
+    def on_cambiar_mes(self, choice=None):
+        """Cambia el mes del listado de facturas recibidas."""
+        self.mes_filtro = choice or mes_en_curso()
+        self.cargar_datos_tabla(reset_pagina=True)
 
     def pagina_anterior(self):
         if self.pagina_actual > 1: 
@@ -2002,19 +2666,6 @@ class FacturasRecibidasTab:
             except Exception: 
                 pass
         self._busqueda_fac_job = self.main_root.after(350, lambda: self.cargar_datos_tabla(reset_pagina=True))
-
-    def cargar_categorias(self):
-        cats = getattr(cache_sistema, 'categorias_generales', [])
-        base_cats = ["GENERAL / NO ASIGNADO", "Catering y Alimentos", "Equipos Audiovisuales", "Personal / Honorarios", "Mobiliario y Estructuras", "Logística y Transporte", "Marketing y Publicidad"]
-        
-        if not cats: 
-            todas = base_cats
-        else: 
-            todas = list(dict.fromkeys(base_cats + cats))
-            
-        self.combo_categoria.configure(values=todas)
-        if self.combo_categoria.get() not in todas: 
-            self.combo_categoria.set(todas[0])
 
     def on_tipo_change(self, choice):
         self.ent_detraccion.configure(state="normal")
@@ -2093,16 +2744,9 @@ class FacturasRecibidasTab:
     def _aplicar_proveedores(self, provs):
         if not hasattr(self, 'combo_proveedor'): return
         if provs:
-            actual = self.combo_proveedor.get().strip()
-            if actual and actual not in provs:
-                # 🛡️ No se pisa lo que ya estaba puesto (por ejemplo el proveedor
-                # leído por OCR): se agrega a la lista para no perder la elección.
-                self.combo_proveedor.configure(values=[actual] + list(provs))
-                self.combo_proveedor.set(actual)
-            else:
-                self.combo_proveedor.configure(values=provs)
-                if actual not in provs:
-                    self.combo_proveedor.set(provs[0])
+            self.combo_proveedor.configure(values=provs)
+            if self.combo_proveedor.get() not in provs: 
+                self.combo_proveedor.set(provs[0])
             self.al_seleccionar_proveedor()
         else: 
             self.combo_proveedor.configure(values=["Sin proveedores registrados"])
@@ -2141,24 +2785,6 @@ class FacturasRecibidasTab:
         if self.combo_evento.get() not in lista_evs: 
             self.combo_evento.set("GENERAL / NO ASIGNADO")
 
-    # =====================================================================
-    # 🔁 FACTURA CRUZADA (pagada por un tercero) + comisión interbancaria
-    # =====================================================================
-    def _lista_cuentas_pago(self):
-        """Cuentas/metodos de pago disponibles (bancos registrados + efectivo)."""
-        cuentas = []
-        try:
-            for banco in (cargar_bancos() or []):
-                etiqueta = etiqueta_banco(banco) if etiqueta_banco else str(banco)
-                if etiqueta and etiqueta not in cuentas:
-                    cuentas.append(etiqueta)
-        except Exception:
-            pass
-        for extra in ("Efectivo / Caja Chica", "Tarjeta de Crédito", "Tarjeta de Débito", "Cheque", "Otro"):
-            if extra not in cuentas:
-                cuentas.append(extra)
-        return cuentas
-
     def _datos_cruzada(self):
         """Datos del pago a tercero tal como están en el formulario."""
         return {
@@ -2167,55 +2793,37 @@ class FacturasRecibidasTab:
             "cuenta": self.cmb_cuenta_cruzada.get().strip() if hasattr(self, "cmb_cuenta_cruzada") else "",
             "operacion": self.ent_oper_cruzada.get().strip() if hasattr(self, "ent_oper_cruzada") else "",
             "interbancario": bool(getattr(self, "var_interbancario", None) and self.var_interbancario.get()),
-            "comision": (self._comision_escrita()
+            "comision": (desformatear_numero(self.ent_comision.get())
                          if hasattr(self, "ent_comision") and self.var_interbancario.get() else 0.0),
             "soporte": getattr(self, "ruta_soporte_tercero", ""),
         }
-
-    def _comision_escrita(self):
-        """Comision interbancaria escrita en el formulario (0.0 si no es valida)."""
-        try:
-            return max(0.0, float(desformatear_numero(self.ent_comision.get())))
-        except Exception:
-            return 0.0
 
     def _actualizar_bloque_cruzada(self):
         """Muestra u oculta los datos del tercero al marcar la casilla."""
         try:
             if self.var_cruzada.get():
                 if not self.f_cruzada.winfo_ismapped():
-                    self.f_cruzada.pack(fill="x", padx=10, pady=(0, 8), before=self.lbl_titulo_det)
+                    self.f_cruzada.pack(fill="x", padx=10, pady=(0, 8), after=self.chk_cruzada)
                 self._actualizar_total_cruzada()
             elif self.f_cruzada.winfo_ismapped():
                 self.f_cruzada.pack_forget()
         except Exception as e:
             print("Aviso - bloque de factura cruzada:", e)
 
-    def _total_factura_para_cruzada(self):
-        """Total del documento (con IGV) y neto a pagar, según lo escrito."""
+    def _actualizar_total_cruzada(self, evento=None):
+        """Muestra el total de la factura más la comisión interbancaria (al instante)."""
         try:
-            subtotal = float(self.ent_subtotal.get() or 0)
-        except ValueError:
-            subtotal = 0.0
-        tipo = self.combo_tipo.get()
-        if "Factura" in tipo:
-            tasa = 0.105 if "10.5%" in tipo else 0.18
-            total = subtotal * (1 + tasa)
-        elif "Recibo" in tipo:
-            total = subtotal
-        else:
-            total = subtotal
+            subtotal, impuesto, total = self._montos_ingresados()
+        except Exception:
+            subtotal, impuesto, total = 0.0, 0.0, 0.0
+        # Neto a pagar = total del documento menos la detracción escrita
         try:
             detraccion = total * (float(self.ent_detraccion.get() or 0) / 100.0)
-        except ValueError:
+        except Exception:
             detraccion = 0.0
-        return total, max(0.0, total - detraccion)
-
-    def _actualizar_total_cruzada(self, evento=None):
-        """Muestra el neto de la factura más la comisión interbancaria (al instante)."""
+        neto_factura = max(0.0, total - detraccion)
+        comision = self._datos_cruzada()["comision"]
         try:
-            _total, neto_factura = self._total_factura_para_cruzada()
-            comision = self._datos_cruzada()["comision"]
             if comision > 0:
                 self.lbl_cruzada_total.configure(
                     text=(f"Factura: {formatear_moneda(neto_factura)}  +  Comisión: {formatear_moneda(comision)}"
@@ -2229,8 +2837,8 @@ class FacturasRecibidasTab:
     def seleccionar_soporte_tercero(self):
         """Adjunta el comprobante del pago realizado al tercero."""
         ruta = filedialog.askopenfilename(title="Seleccionar el soporte del pago al tercero",
-                                          filetypes=[("Archivos", "*.pdf *.png *.jpg *.jpeg"),
-                                                     ("Todos", "*.*")])
+                                                    filetypes=[("Archivos", "*.pdf *.png *.jpg *.jpeg"),
+                                                               ("Todos", "*.*")])
         if not ruta:
             return
         self.ruta_soporte_tercero = ruta
@@ -2241,7 +2849,10 @@ class FacturasRecibidasTab:
             pass
 
     def _guardar_soporte_tercero(self, ruta_base, tercero):
-        """Copia el soporte del pago al tercero a la carpeta autorizada."""
+        """Copia el soporte del pago al tercero a la carpeta autorizada.
+
+        Devuelve la ruta guardada (relativa) o "" si no había soporte.
+        """
         origen = getattr(self, "ruta_soporte_tercero", "")
         if not origen or not os.path.exists(origen):
             return ""
@@ -2256,41 +2867,183 @@ class FacturasRecibidasTab:
             shutil.copy2(origen, destino)
             return destino
         except Exception as e:
-            print("Aviso - soporte del pago al tercero:", e)
+            print("Aviso - copiando el soporte del pago al tercero:", e)
             return ""
 
-    def actualizar_totales(self, *args):
-        tipo = self.combo_tipo.get()
+    def _lista_cuentas_pago(self):
+        """Cuentas bancarias + medios de pago (las mismas opciones que el Banco)."""
         try:
-            sub = float(self.ent_subtotal.get() or 0)
-            ui_pct = float(self.ent_detraccion.get() or 0)
-            
-            if "Factura" in tipo:
-                if "10.5%" in tipo:
-                    igv = sub * 0.105
-                    txt_igv = "10.5%"
-                else:
-                    igv = sub * 0.18
-                    txt_igv = "18%"
-                    
-                tot = sub + igv
-                det = tot * (ui_pct / 100.0)
-                neto = tot - det
-                
-                self.lbl_impuesto.configure(text=f"IGV ({txt_igv}): {formatear_moneda(igv)}")
-                self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}")
-                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(neto)}")
-                
-            elif "Recibo" in tipo:
-                ret = sub * (ui_pct / 100.0)
-                neto = sub - ret
-                
-                self.lbl_impuesto.configure(text=f"Retención ({ui_pct:g}%): -{formatear_moneda(ret)}")
-                self.lbl_detraccion.configure(text=f"Detracción (0%): -{formatear_moneda(0)}")
-                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(neto)}")
-                
-        except ValueError: 
+            lista = []
+            for b in cargar_bancos():
+                banco_nom = str(b.get("banco", "")).strip()
+                cuenta_num = str(b.get("cuenta", "")).strip()
+                if banco_nom or cuenta_num:
+                    lista.append(f"{banco_nom} - {cuenta_num}".strip(" -"))
+            lista.extend(["Efectivo / Caja Chica", "Tarjeta de Crédito", "Tarjeta de Débito", "Cheque", "Otro"])
+            return lista
+        except Exception:
+            return ["Efectivo / Caja Chica", "Cheque", "Otro"]
+
+    # =====================================================================
+    # U0001F4B0 MONTO BASE (SIN IGV)  /  MONTO CON IGV (TOTAL)  (igual que Flota)
+    # =====================================================================
+    def _es_factura(self):
+        return "Factura" in self.combo_tipo.get()
+
+    def _tasa_igv(self):
+        """Tasa de IGV según el tipo de documento elegido."""
+        return 0.105 if "10.5%" in self.combo_tipo.get() else 0.18
+
+    def _monto_tecleado(self):
+        """Número escrito en la casilla del monto (0.0 si está vacía)."""
+        return _a_numero(self.ent_subtotal.get())
+
+    def _montos_ingresados(self):
+        """Devuelve (subtotal, igv, total) según el modo elegido por el usuario.
+
+        - Modo "BASE"    : lo escrito es el monto SIN IGV  -> se calcula el IGV y el total.
+        - Modo "CON_IGV" : lo escrito es el monto CON IGV  -> se calcula la base y el IGV.
+        """
+        valor = self._monto_tecleado()
+        if self._es_factura():
+            tasa = self._tasa_igv()
+            if getattr(self, "modo_monto", "BASE") == "CON_IGV":
+                subtotal = valor / (1.0 + tasa)
+                igv = valor - subtotal
+            else:
+                subtotal = valor
+                igv = subtotal * tasa
+        else:
+            # Boletas, recibos por honorarios y otros: no llevan IGV en el monto
+            subtotal = valor
+            igv = 0.0
+        return round(subtotal, 2), round(igv, 2), round(subtotal + igv, 2)
+
+    def _refrescar_etiqueta_modo(self):
+        """Ajusta el rótulo de la casilla y el aviso según el modo y el tipo."""
+        if not hasattr(self, "lbl_monto_entrada") or not hasattr(self, "lbl_nota_modo"):
+            return
+        con_igv = getattr(self, "modo_monto", "BASE") == "CON_IGV"
+        if self._es_factura():
+            self.lbl_monto_entrada.configure(text="Monto Total con IGV:" if con_igv else "Monto Base (Subtotal):")
+            self.lbl_nota_modo.configure(
+                text=("Digite el monto final del documento (con IGV): la base y el IGV se calculan solos."
+                      if con_igv else
+                      "Digite el monto sin IGV: el IGV y el total se calculan solos."))
+        else:
+            self.lbl_monto_entrada.configure(text="Monto Total:" if con_igv else "Monto Base (Subtotal):")
+            self.lbl_nota_modo.configure(text="Este tipo de documento no lleva IGV: el monto se registra tal cual.")
+
+    def _poner_modo_monto(self, modo):
+        """Fija el modo sin recalcular lo escrito (se usa al autocargar PDF/XML)."""
+        self.modo_monto = "CON_IGV" if modo == "CON_IGV" else "BASE"
+        try:
+            self.seg_modo_monto.set("Monto con IGV (Total)" if self.modo_monto == "CON_IGV"
+                                    else "Monto Base (sin IGV)")
+        except Exception:
             pass
+        self._refrescar_etiqueta_modo()
+
+    def on_cambiar_modo_monto(self, choice=None):
+        """Cambia entre digitar el monto sin IGV o el total con IGV."""
+        self.modo_monto = "CON_IGV" if str(choice or "").startswith("Monto con IGV") else "BASE"
+        self._refrescar_etiqueta_modo()
+        self.actualizar_totales()
+
+    def _modo_monto_autocargado(self):
+        """Los PDF/XML/escaneos traen la BASE (sin IGV): se deja el modo en 'sin IGV'."""
+        try:
+            if hasattr(self, "_poner_modo_monto"):
+                self._poner_modo_monto("BASE")
+        except Exception:
+            pass
+
+    def administrar_categorias_gasto(self):
+        """Abre la MISMA ventana de categorías de gastos del módulo de Banco."""
+        try:
+            from modulo_banco import abrir_gestion_categorias_gastos
+        except Exception as e:
+            return messagebox.showerror("Categorías de Gasto",
+                                        "No se pudo cargar el módulo de Banco: " + str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+        anterior = self.combo_categoria.get().strip()
+
+        def al_guardar():
+            self.cargar_categorias()
+            if anterior:
+                try:
+                    if anterior in list(self.combo_categoria.cget("values")):
+                        self.combo_categoria.set(anterior)
+                except Exception:
+                    pass
+
+        try:
+            padre = getattr(self, "main_root", None) or getattr(self, "tab_frame", None)
+            abrir_gestion_categorias_gastos(parent=padre, al_guardar=al_guardar)
+        except Exception as e:
+            messagebox.showerror("Categorías de Gasto",
+                                 "No se pudo abrir la ventana de categorías: " + str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+
+    def _lista_categorias_gasto(self):
+        """Categorías disponibles: las base + las del módulo de Banco (con subcategorías)."""
+        base_cats = ["GENERAL / NO ASIGNADO", "Catering y Alimentos", "Equipos Audiovisuales",
+                     "Personal / Honorarios", "Mobiliario y Equipos", "Logística y Transporte",
+                     "Servicios Básicos", "Publicidad y Marketing", "Otros Gastos"]
+        cats = []
+        # 🏦 Categorías del módulo de Banco: la misma lista que administra el botón ⚙️
+        try:
+            from modulo_banco import cargar_categorias_gastos
+            for principal, subs in (cargar_categorias_gastos() or {}).items():
+                principal = str(principal).strip()
+                subcategorias = [str(s).strip() for s in (subs or []) if str(s).strip()]
+                if subcategorias:
+                    cats.extend(f"{principal} / {sub}" for sub in subcategorias)
+                elif principal:
+                    cats.append(principal)
+        except Exception as e:
+            print("Aviso - categorías de gastos del Banco:", e)
+        sistema = [str(c).strip() for c in (getattr(cache_sistema, "categorias_generales", []) or [])
+                   if str(c).strip()]
+        return list(dict.fromkeys(base_cats + cats + sistema))
+
+    def cargar_categorias(self):
+        """Categorías de gasto del desplegable (incluye las del módulo de Banco)."""
+        todas = self._lista_categorias_gasto()
+        self.combo_categoria.configure(values=todas)
+        if self.combo_categoria.get() not in todas:
+            self.combo_categoria.set(todas[0])
+
+    def actualizar_totales(self, *args):
+        """Recalcula base, IGV, total, detracción/retención y neto según el modo."""
+        tipo = self.combo_tipo.get()
+        self._refrescar_etiqueta_modo()
+        try:
+            subtotal, igv, tot = self._montos_ingresados()
+            ui_pct = _a_numero(self.ent_detraccion.get())
+
+            if "Factura" in tipo:
+                txt_igv = "10.5%" if "10.5%" in tipo else "18%"
+                det = tot * (ui_pct / 100.0)
+                self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
+                self.lbl_impuesto.configure(text=f"IGV ({txt_igv}): {formatear_moneda(igv)}")
+                self.lbl_bruto.configure(text=f"Total con IGV: {formatear_moneda(tot)}")
+                self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}")
+                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(tot - det)}")
+            elif "Recibo" in tipo:
+                ret = subtotal * (ui_pct / 100.0)
+                self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
+                self.lbl_impuesto.configure(text=f"Retención ({ui_pct:g}%): -{formatear_moneda(ret)}")
+                self.lbl_bruto.configure(text=f"Total: {formatear_moneda(subtotal)}")
+                self.lbl_detraccion.configure(text=f"Detracción (0%): -{formatear_moneda(0)}")
+                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(subtotal - ret)}")
+            else:
+                det = tot * (ui_pct / 100.0)
+                self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
+                self.lbl_impuesto.configure(text=f"IGV (0%): {formatear_moneda(0)}")
+                self.lbl_bruto.configure(text=f"Total: {formatear_moneda(tot)}")
+                self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}")
+                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(tot - det)}")
+        except Exception as e_tot:
+            print("Aviso - totales del documento:", e_tot)
 
     def seleccionar_archivo(self):
         tipos_seguros = [("Archivos", "*.pdf *.png *.jpg *.jpeg *.xml"), ("Todos", "*.*")]
@@ -2302,13 +3055,18 @@ class FacturasRecibidasTab:
     def guardar_registro(self):
         ruta_base = obtener_ruta_base_drive()
         if not ruta_base: 
-            return messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.")
+            return messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         tipo = self.combo_tipo.get()
         nro_doc = self.ent_nro_doc.get().strip()
         fecha = self.ent_fecha.get().strip()
         prov = self.combo_proveedor.get().strip()
         desc = self.ent_desc.get().strip()
+        # 📝 Concepto / descripción del gasto (nuevo renglón)
+        try:
+            concepto = self.ent_concepto.get().strip()
+        except Exception:
+            concepto = ""
         evento = self.combo_evento.get()
         categoria = self.combo_categoria.get().strip() or "GENERAL / NO ASIGNADO"
         
@@ -2317,17 +3075,17 @@ class FacturasRecibidasTab:
             dias = int(self.ent_dias.get().strip() or 0)
             ui_pct = float(self.ent_detraccion.get() or 0)
         except ValueError: 
-            return messagebox.showerror("Error", "Los montos deben ser numéricos.")
+            return messagebox.showerror("Error", "Los montos deben ser numéricos.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         if not prov or not desc: 
-            return messagebox.showwarning("Atención", "Llene los campos obligatorios.")
+            return messagebox.showwarning("Atención", "Llene los campos obligatorios.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         # 🔁 ¿La factura la pagó un tercero? (factura cruzada)
         cruzada = self._datos_cruzada()
         if cruzada["activa"] and not cruzada["tercero"]:
             return messagebox.showwarning(
                 "Factura Cruzada",
                 "Escriba el nombre de la persona o empresa a quien se le pagó (tercero).\n\n"
-                "La factura quedará registrada como pagada por ese tercero.")
+                "La factura quedará registrada como pagada por ese tercero.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         # 🔁 ¿La factura la pagó un tercero? (factura cruzada)
         cruzada = self._datos_cruzada()
@@ -2335,13 +3093,13 @@ class FacturasRecibidasTab:
             return messagebox.showwarning(
                 "Factura Cruzada",
                 "Escriba el nombre de la persona o empresa a quien se le pagó (tercero).\n\n"
-                "La factura quedará registrada como pagada por ese tercero.")
+                "La factura quedará registrada como pagada por ese tercero.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         # 🚀 CORTE DEL SISTEMA: no registrar compras anteriores a la Fecha de Comienzo
         if validar_fecha_registro:
             fecha_ok, msg_fecha = validar_fecha_registro(fecha)
             if not fecha_ok:
-                return messagebox.showwarning("Fecha fuera del rango del sistema", msg_fecha)
+                return messagebox.showwarning("Fecha fuera del rango del sistema", msg_fecha, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         if nro_doc:
             conn_check = conectar_db(silencioso=True)
@@ -2350,23 +3108,21 @@ class FacturasRecibidasTab:
                     c_check = conn_check.cursor()
                     c_check.execute("SELECT COUNT(*) FROM facturas_recibidas WHERE numero_documento = %s AND proveedor = %s", (nro_doc, prov))
                     if c_check.fetchone()[0] > 0:
-                        return messagebox.showwarning("Duplicado", "Ese N° de Documento ya está registrado para este proveedor.")
+                        return messagebox.showwarning("Duplicado", "Ese N° de Documento ya está registrado para este proveedor.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
                 finally: 
                     liberar_conexion(conn_check)
 
-        if "Factura" in tipo: 
-            imp = subtotal * 0.105 if "10.5%" in tipo else subtotal * 0.18
-            tot_bruto = subtotal + imp
+        # 💰 Los montos salen del modo elegido: monto base (sin IGV) o total (con IGV)
+        subtotal, imp, tot_bruto = self._montos_ingresados()
+        if "Factura" in tipo:
             det_pct = ui_pct
             det_monto = tot_bruto * (det_pct / 100.0)
-        elif "Recibo" in tipo: 
-            imp = subtotal * (ui_pct / 100.0)
+        elif "Recibo" in tipo:
+            imp = round(subtotal * (ui_pct / 100.0), 2)     # retención sobre la base
             tot_bruto = subtotal
             det_pct = 0.0
             det_monto = 0.0
-        else: 
-            imp = 0.0
-            tot_bruto = subtotal
+        else:
             det_pct = ui_pct
             det_monto = tot_bruto * (det_pct / 100.0)
 
@@ -2379,7 +3135,7 @@ class FacturasRecibidasTab:
                 ruta_final = os.path.join(carpeta_destino, f"Recibida_{datetime.now().strftime('%Y%m%d%H%M%S')}_{prov.replace(' ', '_')}{nombre_ext}")
                 shutil.copy2(self.ruta_archivo_temp, ruta_final)
             except Exception as e: 
-                return messagebox.showerror("Error", f"Fallo al guardar archivo:\n{e}")
+                return messagebox.showerror("Error", f"Fallo al guardar archivo:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         # 📎 Soporte del pago hecho al tercero (se copia a la carpeta autorizada)
         ruta_soporte_tercero = ""
@@ -2388,7 +3144,7 @@ class FacturasRecibidasTab:
             if not ruta_soporte_tercero:
                 return messagebox.showwarning("Factura Cruzada",
                                               "No se pudo copiar el soporte del pago al tercero.\n"
-                                              "Verifique el archivo o vuelva a adjuntarlo.")
+                                              "Verifique el archivo o vuelva a adjuntarlo.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         # 📎 Soporte del pago hecho al tercero (se copia a la carpeta autorizada)
         ruta_soporte_tercero = ""
@@ -2397,11 +3153,11 @@ class FacturasRecibidasTab:
             if not ruta_soporte_tercero:
                 return messagebox.showwarning("Factura Cruzada",
                                               "No se pudo copiar el soporte del pago al tercero.\n"
-                                              "Verifique el archivo o vuelva a adjuntarlo.")
+                                              "Verifique el archivo o vuelva a adjuntarlo.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         conn = obtener_conexion_segura()
         if not conn: 
-            return messagebox.showwarning("Modo Lectura", "Estás sin conexión a internet.\nNo se pueden registrar facturas en Modo Lectura.")
+            return messagebox.showwarning("Modo Lectura", "Estás sin conexión a internet.\nNo se pueden registrar facturas en Modo Lectura.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         try:
             cursor = conn.cursor()
@@ -2410,7 +3166,7 @@ class FacturasRecibidasTab:
                                                 pagado_por_tercero, soporte_pago_tercero, es_compra_cruzada, comision_interbancaria, es_interbancario)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (tipo, nro_doc, fecha, prov, desc, evento, subtotal, imp, tot_bruto, ruta_final, dias, det_pct, det_monto, categoria,
+            """, (tipo, nro_doc, fecha, prov, concepto or desc, evento, subtotal, imp, tot_bruto, ruta_final, dias, det_pct, det_monto, categoria,
                   cruzada["tercero"] if cruzada["activa"] else "", ruta_soporte_tercero,
                   bool(cruzada["activa"]), cruzada["comision"], bool(cruzada["interbancario"])))
             try:
@@ -2452,11 +3208,16 @@ class FacturasRecibidasTab:
             
             cache_sistema.invalidar()
             registrar_auditoria(self.app_padre.usuario_activo, "Facturas Recibidas", f"Registró factura {nro_doc} del proveedor '{prov}'")
-            messagebox.showinfo("Éxito", "Documento recibido registrado correctamente." + aviso_cruzada)
+            messagebox.showinfo("Éxito", "Documento recibido registrado correctamente." + aviso_cruzada, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+            traer_modulo_al_frente(getattr(self, "main_root", None))
             
             self.cargar_categorias()
             self.ent_nro_doc.delete(0, tk.END)
             self.ent_desc.delete(0, tk.END)
+            try:
+                self.ent_concepto.delete(0, tk.END)
+            except Exception:
+                pass
             self.ent_subtotal.delete(0, tk.END)
             
             self.ruta_archivo_temp = ""
@@ -2475,7 +3236,7 @@ class FacturasRecibidasTab:
                     print("Aviso - oferta de cancelación:", e_can)
 
         except Exception as e: 
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         finally: 
             liberar_conexion(conn)
 
@@ -2490,14 +3251,14 @@ class FacturasRecibidasTab:
                 f"✅ Documento registrado: {numero_documento or 's/n'}\n"
                 f"Proveedor: {proveedor}\n\n"
                 "¿Desea registrar ahora la CANCELACIÓN (pago) de esta factura\n"
-                "y adjuntar el comprobante de pago?"):
+                "y adjuntar el comprobante de pago?", parent=ventana_para_mensaje(getattr(self, "main_root", None))):
             return
         pagos = getattr(self.app_padre, "app_pagos", None)
         if pagos is None or not hasattr(pagos, "abrir_pago_de_factura"):
             return messagebox.showinfo(
                 "Cancelación",
                 "El documento quedó registrado.\n\nRegistre el pago en la pestaña "
-                "«Cuentas por Pagar» de este módulo.")
+                "«Cuentas por Pagar» de este módulo.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         try:
             if hasattr(self.app_padre, "tabview"):
                 for nombre_tab in ("💳 2. Control de Pagos y Deudas", "💵 Cuentas por Pagar", "Cuentas por Pagar"):
@@ -2526,7 +3287,8 @@ class FacturasRecibidasTab:
         self._carga_facr_token = getattr(self, "_carga_facr_token", 0) + 1
         token = self._carga_facr_token
 
-        clave_cache = f"fac_recibidas_{filtro}_pag_{self.pagina_actual}"
+        clave_cache = (f"fac_recibidas_{filtro}_mes_{getattr(self, 'mes_filtro', '')}"
+                       f"_pag_{self.pagina_actual}")
         datos = cache_sistema.obtener(clave_cache)
 
         if datos is not None:
@@ -2551,25 +3313,25 @@ class FacturasRecibidasTab:
             
         try:
             cursor = conn.cursor()
-            if filtro == "":
-                cursor.execute("""
-                    SELECT id, fecha, numero_documento, dias_credito, tipo_documento, proveedor, 
-                           evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, categoria,
-                           COALESCE(pagado_por_tercero, ''), COALESCE(es_compra_cruzada, FALSE),
-                           COALESCE(comision_interbancaria, 0), COALESCE(soporte_pago_tercero, '') 
-                    FROM facturas_recibidas ORDER BY id DESC LIMIT %s OFFSET %s
-                """, (self.registros_por_pagina, offset))
-            else:
+            condiciones, params = [], []
+            # 🗓️ Solo las facturas del mes elegido (por defecto, el mes en curso)
+            patron_mes = patron_fecha_mes(getattr(self, "mes_filtro", mes_en_curso()))
+            if patron_mes:
+                condiciones.append("fecha LIKE %s")
+                params.append(patron_mes)
+            if filtro:
                 val = f"%{filtro}%"
-                cursor.execute("""
-                    SELECT id, fecha, numero_documento, dias_credito, tipo_documento, proveedor, 
-                           evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, categoria,
-                           COALESCE(pagado_por_tercero, ''), COALESCE(es_compra_cruzada, FALSE),
-                           COALESCE(comision_interbancaria, 0), COALESCE(soporte_pago_tercero, '') 
-                    FROM facturas_recibidas 
-                    WHERE numero_documento ILIKE %s OR proveedor ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s 
-                    ORDER BY id DESC LIMIT %s OFFSET %s
-                """, (val, val, val, val, self.registros_por_pagina, offset))
+                condiciones.append("(numero_documento ILIKE %s OR proveedor ILIKE %s "
+                                   "OR evento_asociado ILIKE %s OR descripcion ILIKE %s)")
+                params.extend([val, val, val, val])
+            where_sql = (" WHERE " + " AND ".join(condiciones)) if condiciones else ""
+            cursor.execute(f"""
+                SELECT id, fecha, numero_documento, dias_credito, tipo_documento, proveedor, 
+                       evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, categoria,
+                       COALESCE(pagado_por_tercero, ''), COALESCE(es_compra_cruzada, FALSE),
+                       COALESCE(comision_interbancaria, 0), COALESCE(soporte_pago_tercero, '') 
+                FROM facturas_recibidas{where_sql} ORDER BY id DESC LIMIT %s OFFSET %s
+            """, tuple(params) + (self.registros_por_pagina, offset))
                 
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
             
@@ -2674,6 +3436,38 @@ class FacturasRecibidasTab:
             self.tabla, event, self.main_root, proveedor, detalle, cache,
             al_seleccionar=self.tabla.selection_set)
 
+    def _clic_izquierdo_factura(self, event=None):
+        """Clic IZQUIERDO sobre una factura: abre su archivo adjunto (la factura).
+
+        Se resuelve la fila que está bajo el cursor (no la selección previa, que
+        todavía no se actualizó) y se evita abrir dos veces con un doble clic.
+        """
+        fila = ""
+        try:
+            if event is not None:
+                # Solo si el clic cayó sobre una fila (no en el encabezado que ordena)
+                fila = self.tabla.identify_row(event.y)
+                if not fila:
+                    return
+            else:
+                seleccion = self.tabla.selection()
+                fila = seleccion[0] if seleccion else ""
+            if not fila:
+                return
+            self.tabla.selection_set(fila)
+            try:
+                self.tabla.focus(fila)
+            except Exception:
+                pass
+        except Exception:
+            return
+        ahora = datetime.now().timestamp()
+        if (getattr(self, "_ultimo_clic_fac", None) == fila
+                and ahora - getattr(self, "_ultimo_clic_fac_t", 0) < 1.5):
+            return
+        self._ultimo_clic_fac, self._ultimo_clic_fac_t = fila, ahora
+        return self.abrir_archivo(event)
+
     def abrir_archivo(self, event):
         sel = self.tabla.selection()
         if not sel: return
@@ -2689,7 +3483,7 @@ class FacturasRecibidasTab:
             if res and res[0] and os.path.exists(res[0]): 
                 abrir_documento(res[0])
             else:
-                messagebox.showinfo("Aviso", "No se encontró el archivo adjunto.")
+                messagebox.showinfo("Aviso", "No se encontró el archivo adjunto.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception: 
             pass
         finally: 
@@ -2698,7 +3492,7 @@ class FacturasRecibidasTab:
     def abrir_ventana_edicion(self):
         sel = self.tabla.selection()
         if not sel: 
-            return messagebox.showwarning("Atención", "Seleccione un documento.")
+            return messagebox.showwarning("Atención", "Seleccione un documento.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         valores = self.tabla.item(sel[0], "values")
         id_doc = valores[1]
@@ -2708,16 +3502,20 @@ class FacturasRecibidasTab:
         
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT tipo_documento, numero_documento, fecha, dias_credito, subtotal, det_porcentaje FROM facturas_recibidas WHERE id = %s", (id_doc,))
+            cursor.execute("SELECT tipo_documento, numero_documento, fecha, dias_credito, subtotal, det_porcentaje, descripcion, categoria FROM facturas_recibidas WHERE id = %s", (id_doc,))
             datos = cursor.fetchone()
         except Exception as e: 
-            return messagebox.showerror("Error", str(e))
+            return messagebox.showerror("Error", str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         finally: 
             liberar_conexion(conn)
             
         if not datos: return
         
-        tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db = datos
+        try:
+            tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db, desc_db, cat_db = datos
+        except Exception:
+            tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db = datos
+            desc_db, cat_db = "", ""
 
         v_edit = ctk.CTkToplevel(self.main_root)
         v_edit.title("Gestión de Documento Recibido")
@@ -2744,6 +3542,44 @@ class FacturasRecibidasTab:
         ent_dias.pack(fill="x", pady=(0, 8))
         ent_dias.insert(0, str(dias_db if dias_db is not None else 0))
         
+        # 📝 Concepto / Descripción del gasto (igual que en el formulario de ingreso)
+        ctk.CTkLabel(f_scroll, text="Concepto / Descripción:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ent_concepto = ctk.CTkEntry(f_scroll, placeholder_text="Ej. Alquiler de local, catering, sonido...")
+        ent_concepto.pack(fill="x", pady=(0, 8))
+        ent_concepto.insert(0, str(desc_db or ""))
+
+        # 🏷️ Categoría de Gasto con el mismo botón de administrar del módulo de Banco
+        ctk.CTkLabel(f_scroll, text="Categoría de Gasto:", font=("Arial", 11, "bold")).pack(anchor="w")
+        f_cat_edit = ctk.CTkFrame(f_scroll, fg_color="transparent")
+        f_cat_edit.pack(fill="x", pady=(0, 8))
+        cmb_cat_edit = ctk.CTkComboBox(f_cat_edit, state="normal", values=self._lista_categorias_gasto())
+        cmb_cat_edit.pack(side="left", fill="x", expand=True)
+        cmb_cat_edit.set(str(cat_db or "GENERAL / NO ASIGNADO"))
+
+        def administrar_categorias_edit():
+            try:
+                from modulo_banco import abrir_gestion_categorias_gastos
+            except Exception as e:
+                return messagebox.showerror("Categorías de Gasto",
+                                            f"No se pudo cargar el módulo de Banco:\n{e}", parent=v_edit)
+            elegida = cmb_cat_edit.get().strip()
+
+            def al_guardar():
+                nuevas = self._lista_categorias_gasto()
+                cmb_cat_edit.configure(values=nuevas)
+                if elegida in nuevas:
+                    cmb_cat_edit.set(elegida)
+
+            try:
+                abrir_gestion_categorias_gastos(parent=v_edit, al_guardar=al_guardar)
+            except Exception as e:
+                messagebox.showerror("Categorías de Gasto",
+                                     f"No se pudo abrir la ventana de categorías:\n{e}", parent=v_edit)
+
+        ctk.CTkButton(f_cat_edit, text="⚙️", width=34, font=("Arial", 12, "bold"),
+                      fg_color="#8e44ad", hover_color="#703688",
+                      command=administrar_categorias_edit).pack(side="right", padx=(6, 0))
+
         ctk.CTkLabel(f_scroll, text="Monto Base (Subtotal):", font=("Arial", 11, "bold")).pack(anchor="w")
         ent_sub = ctk.CTkEntry(f_scroll)
         ent_sub.pack(fill="x", pady=(0, 8))
@@ -2761,6 +3597,8 @@ class FacturasRecibidasTab:
                 dias = int(ent_dias.get().strip() or 0)
                 sub = float(ent_sub.get().strip() or 0)
                 det_pct = float(ent_det.get().strip() or 0)
+                concepto_edit = ent_concepto.get().strip()
+                categoria_edit = cmb_cat_edit.get().strip() or "GENERAL / NO ASIGNADO"
             except ValueError: 
                 return messagebox.showerror("Error", "Montos y días deben ser numéricos.", parent=v_edit)
 
@@ -2790,9 +3628,11 @@ class FacturasRecibidasTab:
                 cur = conn_upd.cursor()
                 cur.execute("""
                     UPDATE facturas_recibidas 
-                    SET numero_documento=%s, fecha=%s, dias_credito=%s, subtotal=%s, impuesto=%s, total=%s, det_porcentaje=%s, det_monto=%s 
+                    SET numero_documento=%s, fecha=%s, dias_credito=%s, subtotal=%s, impuesto=%s, total=%s,
+                        det_porcentaje=%s, det_monto=%s, descripcion=%s, categoria=%s
                     WHERE id=%s
-                """, (nro, fec, dias, sub, imp, tot_bruto, det_pct, det_monto, id_doc))
+                """, (nro, fec, dias, sub, imp, tot_bruto, det_pct, det_monto,
+                      concepto_edit, categoria_edit, id_doc))
                 conn_upd.commit()
                 
                 cache_sistema.invalidar()
@@ -2852,6 +3692,9 @@ class CuentasPorPagarTab:
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
         self.registros_por_pagina = 50
+
+        # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
+        self.mes_filtro = mes_en_curso()
         
         self.crear_interfaz()
 
@@ -2866,6 +3709,12 @@ class CuentasPorPagarTab:
         btn_pago = ctk.CTkButton(frame_acciones, text="🧾 Registrar Pago", font=("Arial", 12, "bold"), command=self.cargar_comprobante_pago, fg_color="#34495e", hover_color="#2c3e50")
         btn_pago.pack(side="left", padx=5, pady=5)
         
+        # 📎 Ver TODOS los comprobantes de pago de la factura seleccionada
+        btn_soportes = ctk.CTkButton(frame_acciones, text="📎 Ver Comprobantes", font=("Arial", 12, "bold"),
+                                     command=lambda: self.abrir_todos_los_archivos(None),
+                                     fg_color="#0e7490", hover_color="#155e75")
+        btn_soportes.pack(side="left", padx=5, pady=5)
+
         btn_editar = ctk.CTkButton(frame_acciones, text="✏️ Editar Pagos", font=("Arial", 12, "bold"), command=self.abrir_ventana_edicion, fg_color="#34495e", hover_color="#2c3e50")
         btn_editar.pack(side="left", padx=5, pady=5)
 
@@ -2883,6 +3732,12 @@ class CuentasPorPagarTab:
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
         self.ent_buscar_pagos = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, proveedor, evento, concepto...")
         self.ent_buscar_pagos.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(f_busqueda, text="🗓️ Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
+        self.combo_mes = ctk.CTkComboBox(f_busqueda, values=construir_valores_mes(), width=150,
+                                         state="readonly", command=self.on_cambiar_mes_pagos)
+        self.combo_mes.pack(side="left", padx=(0, 5))
+        self.combo_mes.set(self.mes_filtro)
+
         self.ent_buscar_pagos.bind("<KeyRelease>", lambda e: self.buscar_con_retraso_pagos())
         self.ent_buscar_pagos.bind("<Return>", lambda e: self.cargar_datos_pagar(reset_pagina=True))
 
@@ -2920,7 +3775,8 @@ class CuentasPorPagarTab:
         self.tabla.column("archivos", width=100, anchor="center")
 
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "proveedor", "evento", "concepto", "neto_facturado", "pagado", "saldo", "archivos"))
-        self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos)
+        # 🖱️ Un clic SELECCIONA la fila; el DOBLE clic abre el comprobante de pago
+        self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos, add="+")
         # 🖱️ CLIC DERECHO en una factura: datos bancarios del proveedor
         # (botón 3 en Windows/Linux y botón 2 en macOS)
         self.tabla.bind("<Button-3>", self.abrir_datos_bancarios_pagar, add="+")
@@ -2942,7 +3798,7 @@ class CuentasPorPagarTab:
                                  border_width=1, border_color="#e0e0e0")
         f_leyenda.pack(fill="x", padx=15, pady=(8, 0))
         ctk.CTkLabel(f_leyenda, text="Leyenda:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 8), pady=5)
-        ctk.CTkLabel(f_leyenda, text="💡 Clic DERECHO sobre una factura: datos bancarios del proveedor",
+        ctk.CTkLabel(f_leyenda, text="💡 Un clic: seleccionar   ·   Doble clic: ver el comprobante de pago   ·   Clic DERECHO: datos bancarios",
                      font=("Arial", 10, "italic"), text_color="#1f538d").pack(side="right", padx=(0, 12), pady=5)
         for color_fondo, color_texto, texto_leyenda in (
             ("#f8d7da", "#c0392b", "🔴 Vence en 5 días o menos (o ya vencida)"),
@@ -3384,20 +4240,25 @@ class CuentasPorPagarTab:
         try: 
             import pandas as pd
         except ImportError: 
-            return messagebox.showerror("Error", "Falta librería pandas.")
+            return messagebox.showerror("Error", "Falta librería pandas.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         filas = [self.tabla.item(item)["values"][2:] for item in self.tabla.get_children()]
         if not filas: 
-            return messagebox.showwarning("Aviso", "No hay registros para exportar.")
+            return messagebox.showwarning("Aviso", "No hay registros para exportar.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
         columnas = ["Fecha Fac.", "N° Documento", "Proveedor", "Evento Asociado", "Concepto", "Subtotal", "IGV", "Detracción", "Neto Facturado", "Total Pagado", "Saldo Pendiente", "Archivos"]
         ruta = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile="Cuentas_por_Pagar.xlsx", filetypes=[("Excel", "*.xlsx")])
         if ruta:
             pd.DataFrame(filas, columns=columnas).to_excel(ruta, index=False)
-            messagebox.showinfo("Éxito", f"Reporte exportado a:\n{ruta}")
+            messagebox.showinfo("Éxito", f"Reporte exportado a:\n{ruta}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             abrir_documento(ruta)
 
     # 🚀 FIX: LAZY LOADING Y CACHÉ
+    def on_cambiar_mes_pagos(self, choice=None):
+        """Cambia el mes del listado de pagos y deudas."""
+        self.mes_filtro = choice or mes_en_curso()
+        self.cargar_datos_pagar(reset_pagina=True)
+
     def cargar_datos_pagar(self, reset_pagina=False):
         if reset_pagina:
             self.pagina_actual = 1
@@ -3414,7 +4275,8 @@ class CuentasPorPagarTab:
         self._carga_pagos_token = getattr(self, "_carga_pagos_token", 0) + 1
         token = self._carga_pagos_token
         
-        clave_cache = f"cuentas_pagar_{filtro}_pag_{self.pagina_actual}"
+        clave_cache = (f"cuentas_pagar_{filtro}_mes_{getattr(self, 'mes_filtro', '')}"
+                       f"_pag_{self.pagina_actual}")
         datos = cache_sistema.obtener(clave_cache)
 
         if datos is not None:
@@ -3445,25 +4307,25 @@ class CuentasPorPagarTab:
         try:
             cursor = conn.cursor()
             
-            if filtro == "":
-                cursor.execute("""
-                    SELECT id, fecha, numero_documento, proveedor, evento_asociado, descripcion, 
-                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento,
-                           COALESCE(dias_credito, 0), COALESCE(es_compra_cruzada, FALSE),
-                           COALESCE(comision_interbancaria, 0), COALESCE(pagado_por_tercero, '')
-                    FROM facturas_recibidas ORDER BY id DESC LIMIT %s OFFSET %s
-                """, (self.registros_por_pagina, offset))
-            else:
+            condiciones, params = [], []
+            # 🗓️ Solo las facturas del mes elegido (por defecto, el mes en curso)
+            patron_mes = patron_fecha_mes(getattr(self, "mes_filtro", mes_en_curso()))
+            if patron_mes:
+                condiciones.append("fecha LIKE %s")
+                params.append(patron_mes)
+            if filtro:
                 val = f"%{filtro}%"
-                cursor.execute("""
-                    SELECT id, fecha, numero_documento, proveedor, evento_asociado, descripcion, 
-                           subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento,
-                           COALESCE(dias_credito, 0), COALESCE(es_compra_cruzada, FALSE),
-                           COALESCE(comision_interbancaria, 0), COALESCE(pagado_por_tercero, '')
-                    FROM facturas_recibidas 
-                    WHERE numero_documento ILIKE %s OR proveedor ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s
-                    ORDER BY id DESC LIMIT %s OFFSET %s
-                """, (val, val, val, val, self.registros_por_pagina, offset))
+                condiciones.append("(numero_documento ILIKE %s OR proveedor ILIKE %s "
+                                   "OR evento_asociado ILIKE %s OR descripcion ILIKE %s)")
+                params.extend([val, val, val, val])
+            where_sql = (" WHERE " + " AND ".join(condiciones)) if condiciones else ""
+            cursor.execute(f"""
+                SELECT id, fecha, numero_documento, proveedor, evento_asociado, descripcion, 
+                       subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento,
+                       COALESCE(dias_credito, 0), COALESCE(es_compra_cruzada, FALSE),
+                       COALESCE(comision_interbancaria, 0), COALESCE(pagado_por_tercero, '')
+                FROM facturas_recibidas{where_sql} ORDER BY id DESC LIMIT %s OFFSET %s
+            """, tuple(params) + (self.registros_por_pagina, offset))
                 
             registros = cursor.fetchall()
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
@@ -3600,25 +4462,61 @@ class CuentasPorPagarTab:
 
         escanear=True: al abrirse el pago se ofrece escanear el comprobante de pago.
         """
+        # \U0001F504 Se limpia la caché de la pestaña: si la factura se acaba de registrar,
+        #    la lista puede tardar un instante en traerla (antes decía que "no estaba").
+        try:
+            cache_sistema.invalidar()
+        except Exception:
+            pass
+        # \U0001F4C5 Si la factura es de otro mes, se muestra ese mes para poder verla
+        try:
+            conn_mes = obtener_conexion_segura(mostrar_aviso=False)
+            if conn_mes:
+                try:
+                    cur_mes = conn_mes.cursor()
+                    cur_mes.execute("SELECT fecha FROM facturas_recibidas WHERE id = %s", (id_factura,))
+                    fila_mes = cur_mes.fetchone()
+                finally:
+                    liberar_conexion(conn_mes)
+                etiqueta_fac = etiqueta_mes_de_fecha(fila_mes[0] if fila_mes else "")
+                if etiqueta_fac and etiqueta_fac != getattr(self, "mes_filtro", ""):
+                    self.mes_filtro = etiqueta_fac
+                    try:
+                        self.combo_mes.set(etiqueta_fac)
+                    except Exception:
+                        pass
+        except Exception as e_mes:
+            print("Aviso - mes de la factura:", e_mes)
         try:
             self.cargar_datos_pagar(reset_pagina=True)
         except Exception:
             pass
-        encontrada = False
-        for item in self.tabla.get_children():
-            valores = self.tabla.item(item, "values")
-            if len(valores) > 1 and str(valores[1]) == str(id_factura):
-                self.tabla.selection_set(item)
-                self.tabla.see(item)
-                encontrada = True
-                break
-        if not encontrada:
-            return messagebox.showinfo(
+
+        def buscar_factura(intento=1):
+            """Busca la fila de la factura; reintenta porque la lista carga en segundo plano."""
+            for item in self.tabla.get_children():
+                valores = self.tabla.item(item, "values")
+                if len(valores) > 1 and str(valores[1]) == str(id_factura):
+                    self.tabla.selection_set(item)
+                    self.tabla.see(item)
+                    self._escanear_soporte_pendiente = bool(escanear)
+                    self.cargar_comprobante_pago()
+                    return
+            if intento < 4:
+                try:
+                    self.cargar_datos_pagar(reset_pagina=True)
+                except Exception:
+                    pass
+                try:
+                    self.main_root.after(400 * intento, lambda: buscar_factura(intento + 1))
+                except Exception:
+                    buscar_factura(intento + 1)
+                return
+            messagebox.showinfo(
                 "Registrar Pago",
                 "La factura todavía no aparece en la lista de Cuentas por Pagar.\n\n"
-                "Actualice la pestaña y selecciónela para registrar el pago.")
-        self._escanear_soporte_pendiente = bool(escanear)
-        self.cargar_comprobante_pago()
+                "Pulse \u00ab\U0001F504 Actualizar\u00bb en la pestaña y vuelva a intentarlo.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+        buscar_factura()
 
     def escanear_comprobante_pago(self, padre, al_terminar):
         """Escanea el comprobante de pago en la multifuncional y arma un PDF.
@@ -3631,8 +4529,8 @@ class CuentasPorPagarTab:
         except Exception as e:
             messagebox.showerror("Escáner", f"No se pudo cargar el módulo de escaneo:\n{e}", parent=padre)
             return al_terminar("")
-        if not escaner.es_windows():
-            messagebox.showinfo("Escáner", "El escaneo con la multifuncional solo está disponible en Windows.",
+        if not escaner.sistema_soportado():
+            messagebox.showinfo("Escáner", "El escaneo con la multifuncional está disponible en Windows y en macOS (M1/M2).",
                                 parent=padre)
             return al_terminar("")
 
@@ -3673,6 +4571,15 @@ class CuentasPorPagarTab:
                                        f"Comprobante_Pago_{marca}.pdf")
                     escaner.imagenes_a_pdf(esc["paginas"], pdf)
                     resultado.update({"ok": True, "pdf": pdf})
+                    # 🧠 OCR del comprobante: se busca el N° de operación/transacción
+                    try:
+                        texto_ocr = leer_ocr_windows(pdf)
+                        resultado["numero_operacion"] = extraer_numero_operacion(texto_ocr)
+                        # 📅 También se lee la fecha del comprobante
+                        resultado["fecha"] = extraer_fecha_comprobante(texto_ocr)
+                        resultado["texto_ocr"] = texto_ocr
+                    except Exception as e_ocr_op:
+                        print("Aviso - OCR del comprobante de pago:", e_ocr_op)
                 else:
                     resultado["error"] = esc.get("error") or "No se pudo escanear."
             except Exception as e:
@@ -3687,7 +4594,15 @@ class CuentasPorPagarTab:
                 if not resultado["ok"]:
                     messagebox.showerror("Escáner", resultado["error"] or "No se pudo escanear.",
                                          parent=padre)
-                al_terminar(resultado["pdf"])
+                try:
+                    al_terminar(resultado["pdf"], resultado.get("numero_operacion", ""),
+                                resultado.get("fecha", ""))
+                except TypeError:
+                    # Compatibilidad con llamadas que esperan menos datos
+                    try:
+                        al_terminar(resultado["pdf"], resultado.get("numero_operacion", ""))
+                    except TypeError:
+                        al_terminar(resultado["pdf"])
             try:
                 self.main_root.after(0, terminar)
             except Exception:
@@ -3697,17 +4612,17 @@ class CuentasPorPagarTab:
     def cargar_comprobante_pago(self):
         ruta_base = obtener_ruta_base_drive()
         if not ruta_base:
-            messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.\nEs obligatorio para guardar archivos.")
+            messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.\nEs obligatorio para guardar archivos.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             return
             
         seleccion = self.tabla.selection()
-        if not seleccion: return messagebox.showwarning("Selección", "Seleccione una factura.")
+        if not seleccion: return messagebox.showwarning("Selección", "Seleccione una factura.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         
         valores = self.tabla.item(seleccion[0], "values")
         id_factura, nro_doc, proveedor = valores[1], valores[3], valores[4] 
         saldo_actual = desformatear_numero(valores[12]) 
         
-        if saldo_actual <= 0: return messagebox.showinfo("Aviso", "Esta factura ya está pagada por completo.")
+        if saldo_actual <= 0: return messagebox.showinfo("Aviso", "Esta factura ya está pagada por completo.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
         v_pago = ctk.CTkToplevel(self.main_root)
         v_pago.title("Registrar Nuevo Pago")
@@ -3740,6 +4655,14 @@ class CuentasPorPagarTab:
                      font=("Arial", 9, "italic"), text_color="gray", wraplength=340,
                      justify="left").pack(anchor="w", pady=(0, 10))
 
+        # 🧾 N° de operación / transacción: se completa solo al escanear el comprobante
+        ctk.CTkLabel(f_form, text="N° de Operación / Transacción:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ent_operacion = ctk.CTkEntry(f_form, placeholder_text="Ej.: 00123456 (se lee del comprobante escaneado)")
+        ent_operacion.pack(fill="x", pady=(0, 2))
+        ctk.CTkLabel(f_form, text="Al escanear el comprobante se llena automáticamente (puede corregirlo).",
+                     font=("Arial", 9, "italic"), text_color="gray", wraplength=340,
+                     justify="left").pack(anchor="w", pady=(0, 10))
+
         def procesar_pago(event=None):
             try:
                 monto_val = float(ent_monto.get().strip())
@@ -3761,6 +4684,7 @@ class CuentasPorPagarTab:
             # saltaba el error: invalid command name ".!ctktoplevel.!ctkcombobox..."
             cuenta_val = cmb_cuenta_pago.get().strip()
             if cuenta_val == "(No especificada)": cuenta_val = ""
+            operacion_val = ent_operacion.get().strip()
 
             # 🖨️ Si el comprobante de pago ya se escaneó, se usa ese archivo
             ruta_soporte = getattr(self, "_soporte_escaneado", "")
@@ -3790,7 +4714,7 @@ class CuentasPorPagarTab:
                     ruta_destino = os.path.join(carpeta_comprobantes, f"Egreso_Fac_{id_factura}_{proveedor.replace(' ', '_')}_{idx}{os.path.splitext(ruta_origen)[1]}")
                     shutil.copy2(ruta_origen, ruta_destino)
                 except Exception as e:
-                    return messagebox.showerror("Error", f"Fallo al copiar archivo:\n{e}")
+                    return messagebox.showerror("Error", f"Fallo al copiar archivo:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
             conn = obtener_conexion_segura()
             if not conn: return
@@ -3800,16 +4724,17 @@ class CuentasPorPagarTab:
                 cat_res = cursor.fetchone()
                 categoria_db = cat_res[0] if cat_res and cat_res[0] else "GENERAL"
                 
-                cursor.execute("INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago, categoria_suministro, codigo_cotizacion, cuenta_origen) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", 
-                               (id_factura, monto_val, ruta_destino, proveedor, fecha_val, categoria_db, nro_doc, cuenta_val))
+                cursor.execute("INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago, categoria_suministro, codigo_cotizacion, cuenta_origen, numero_operacion) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)", 
+                               (id_factura, monto_val, ruta_destino, proveedor, fecha_val, categoria_db, nro_doc, cuenta_val, operacion_val))
                 conn.commit()
                 
                 cache_sistema.invalidar()
                 registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Pagar", f"Pagó {formatear_moneda(monto_val)} a Fac. {nro_doc} ({proveedor})")
-                messagebox.showinfo("Éxito", f"Pago de {formatear_moneda(monto_val)} registrado.")
+                messagebox.showinfo("Éxito", f"Pago de {formatear_moneda(monto_val)} registrado.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+                traer_modulo_al_frente(getattr(self, "main_root", None))
                 self.cargar_datos_pagar(reset_pagina=True)
             except Exception as e: 
-                messagebox.showerror("Error", str(e))
+                messagebox.showerror("Error", str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             finally: 
                 liberar_conexion(conn)
 
@@ -3826,14 +4751,55 @@ class CuentasPorPagarTab:
         lbl_soporte.pack(anchor="w")
 
         def escanear_soporte():
-            """Escanea el comprobante de pago y lo deja listo como soporte del pago."""
-            def al_terminar(ruta):
+            """Escanea el comprobante de pago y lo deja listo como soporte del pago.
+
+            Antes de escanear se pregunta si el pago CANCELA la factura: si la
+            respuesta es Sí, se coloca el saldo pendiente completo; si es No,
+            el monto queda como pago parcial para escribirlo a mano.
+            """
+            try:
+                cancela = messagebox.askyesno(
+                    "Cancelar la factura",
+                    "¿Este pago CANCELA la factura por completo?\n\n"
+                    "Sí: se registra el pago total (" + formatear_moneda(saldo_actual) +
+                    ") y la factura queda cancelada.\n"
+                    "No: se registra como pago PARCIAL (escriba el monto a pagar).",
+                    parent=v_pago)
+            except Exception:
+                cancela = False
+            if cancela:
+                try:
+                    ent_monto.delete(0, "end")
+                    ent_monto.insert(0, "%.2f" % float(saldo_actual))
+                except Exception as e_monto:
+                    print("Aviso - monto del pago total:", e_monto)
+            def al_terminar(ruta, numero_operacion="", fecha_leida=""):
                 if not ruta:
                     return
                 self._soporte_escaneado = ruta
+                texto_aviso = "🖨️ Comprobante escaneado: " + os.path.basename(ruta)
                 try:
-                    lbl_soporte.configure(text="🖨️ Comprobante escaneado: " + os.path.basename(ruta),
-                                          text_color="#1e8449")
+                    # 🧾 El N° de operación leído por OCR va al campo de la ventana
+                    if numero_operacion:
+                        ent_operacion.delete(0, "end")
+                        ent_operacion.insert(0, numero_operacion)
+                        texto_aviso += "   ·   N° de operación leído: " + numero_operacion
+                    elif not ent_operacion.get().strip():
+                        texto_aviso += "   ·   (no se pudo leer el N° de operación)"
+                except Exception as e_op:
+                    print("Aviso - N° de operación del comprobante:", e_op)
+                try:
+                    # 📅 La fecha del comprobante reemplaza la fecha de hoy
+                    if fecha_leida:
+                        # 📅 El campo de esta ventana usa AAAA-MM-DD
+                        fecha_campo = _fecha_a_iso(fecha_leida)
+                        ent_fecha.delete(0, "end")
+                        ent_fecha.insert(0, fecha_campo)
+                        texto_aviso += "   ·   Fecha del comprobante: " + fecha_campo
+                except Exception as e_fe:
+                    print("Aviso - fecha del comprobante:", e_fe)
+                try:
+                    lbl_soporte.configure(text=texto_aviso, text_color="#1e8449")
                 except Exception:
                     pass
             self.escanear_comprobante_pago(v_pago, al_terminar)
@@ -3893,6 +4859,76 @@ class CuentasPorPagarTab:
             self.tabla, event, self.main_root, proveedor, detalle, cache,
             al_seleccionar=self.tabla.selection_set)
 
+    def _clic_izquierdo_comprobante(self, event=None):
+        """Clic IZQUIERDO sobre una factura: abre el comprobante de pago escaneado.
+
+        Abre el comprobante más reciente de esa factura (si hubiera varios pagos).
+        """
+        fila = ""
+        try:
+            if event is not None:
+                # Solo si el clic cayó sobre una fila (no en el encabezado que ordena)
+                fila = self.tabla.identify_row(event.y)
+                if not fila:
+                    return
+            else:
+                seleccion = self.tabla.selection()
+                fila = seleccion[0] if seleccion else ""
+            if not fila:
+                return
+            self.tabla.selection_set(fila)
+            try:
+                self.tabla.focus(fila)
+            except Exception:
+                pass
+        except Exception:
+            return
+        ahora = datetime.now().timestamp()
+        if (getattr(self, "_ultimo_clic_pago", None) == fila
+                and ahora - getattr(self, "_ultimo_clic_pago_t", 0) < 1.5):
+            return
+        self._ultimo_clic_pago, self._ultimo_clic_pago_t = fila, ahora
+
+        try:
+            id_factura = self.tabla.item(fila, "values")[1]
+        except Exception:
+            return
+        try:
+            conn = obtener_conexion_segura(mostrar_aviso=False)
+            if not conn:
+                return
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT archivo_ruta FROM pagos_comprobantes
+                    WHERE id_factura = %s AND COALESCE(archivo_ruta, '') != ''
+                    ORDER BY id DESC LIMIT 1
+                """, (id_factura,))
+                encontrado = cursor.fetchone()
+            finally:
+                liberar_conexion(conn)
+        except Exception as e_comp:
+            print("Aviso - comprobante de pago:", e_comp)
+            return
+
+        ruta = str(encontrado[0]).strip() if encontrado and encontrado[0] else ""
+        if not ruta:
+            return messagebox.showinfo(
+                "Comprobante de pago",
+                "Esta factura todavía no tiene comprobante de pago escaneado.\n\n"
+                "Use «🧾 Registrar Pago» para registrar el pago y escanear el comprobante.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+        candidatas = [ruta]
+        try:
+            from app_paths import resolver_ruta_archivo
+            candidatas.append(resolver_ruta_archivo(ruta))
+        except Exception:
+            pass
+        for candidata in candidatas:
+            if candidata and os.path.exists(candidata):
+                return abrir_documento(candidata)
+        return messagebox.showinfo("Comprobante de pago",
+                                   "No se encontró el archivo del comprobante de pago:\n" + ruta, parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+
     def abrir_todos_los_archivos(self, event):
         seleccion = self.tabla.selection()
         if not seleccion: return
@@ -3908,12 +4944,12 @@ class CuentasPorPagarTab:
                 for r in rutas:
                     if os.path.exists(r[0]): 
                         abrir_documento(r[0])
-            else: messagebox.showinfo("Aviso", "No hay soportes cargados.")
+            else: messagebox.showinfo("Aviso", "No hay soportes cargados.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception: pass
 
     def abrir_ventana_edicion(self):
         sel = self.tabla.selection()
-        if not sel: return messagebox.showwarning("Selección", "Seleccione la factura para editar sus pagos.")
+        if not sel: return messagebox.showwarning("Selección", "Seleccione la factura para editar sus pagos.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         valores = self.tabla.item(sel[0], "values")
         id_factura, nro_doc, proveedor = valores[1], valores[3], valores[4] 
         saldo_actual_global = desformatear_numero(valores[12]) 
@@ -4043,7 +5079,7 @@ class CuentasPorPagarTab:
         def cambiar_soporte():
             ruta_base = obtener_ruta_base_drive()
             if not ruta_base:
-                messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.\nEs obligatorio para guardar archivos.")
+                messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.\nEs obligatorio para guardar archivos.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
                 return
             
             sub_sel = sub_tabla.selection()

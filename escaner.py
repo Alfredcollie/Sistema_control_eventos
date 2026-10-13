@@ -33,7 +33,20 @@ OPCIONES_PAGINAS = ["1", "2", "3", "5", "10", "20"]
 OPCIONES_OCR = ["Sí", "No"]
 OPCIONES_IDIOMA_OCR = ["Automático", "Español", "Inglés", "Español + Inglés"]
 OPCIONES_OPTIMIZAR = ["Sí", "No"]
-OPCIONES_MODO = ["Automático (sin ventanas)", "Con la ventana de Windows"]
+def _opciones_modo():
+    """Modos de escaneo disponibles segun el sistema operativo.
+
+    Se mira sys.platform directamente porque este valor se calcula al importar
+    el modulo, antes de que existan las funciones es_windows()/es_mac().
+    """
+    if sys.platform == "win32":
+        return ["Automático (sin ventanas)", "Con la ventana de Windows"]
+    if sys.platform == "darwin":
+        return ["Automático (sin ventanas)", "Con Image Capture"]
+    return ["Automático (sin ventanas)"]
+
+
+OPCIONES_MODO = _opciones_modo()
 
 CONFIG_DEFECTO = {
     "escaner_dispositivo": "",              # id WIA del escáner (propio de cada equipo)
@@ -46,6 +59,7 @@ CONFIG_DEFECTO = {
     "escaner_optimizar": "Sí",
     "escaner_modo": "Automático (sin ventanas)",   # o "Con la ventana de Windows"
     "escaner_carpeta": "",                  # vacío = carpeta de Drive del sistema
+    "escaner_url": "",                      # macOS: URL de AirScan (http://ip/eSCL)
 }
 
 _INTENT_WIA = {"Color": 1, "Escala de grises": 2, "Blanco y negro": 4}
@@ -54,6 +68,20 @@ _ORIGEN_WIA = {"Cristal (una página a la vez)": 1, "Alimentador (varias página
 
 def es_windows():
     return sys.platform == "win32"
+
+
+# Servicios Bonjour que anuncian los escaneres por red (AirScan/eSCL)
+_MAC_SERVICIOS = ("_uscan._tcp", "_uscans._tcp", "_scanner._tcp")
+
+
+def es_mac():
+    """¿Corre en macOS (Mac Intel o Apple Silicon M1/M2/M3)?"""
+    return sys.platform == "darwin"
+
+
+def sistema_soportado():
+    """El escaneo funciona en Windows (WIA) y en macOS (AirScan/eSCL)."""
+    return es_windows() or es_mac()
 
 
 def _powershell():
@@ -152,8 +180,9 @@ try {
     try { $nombre = $elegido.Properties.Item('Name').Value } catch { }
     $dev = $elegido.Connect()
     if ($origen -eq 1) {
-        try { $dev.Properties.Item('Document Handling Select').Value = 2 }
-        catch { $aviso = 'No se pudo fijar el cristal: ' + $_.Exception.Message }
+        # El cristal es el modo por defecto del equipo: si no se puede fijar por
+        # nombre no es un problema (el escaneo funciona igual), así que no se avisa.
+        try { $dev.Properties.Item('Document Handling Select').Value = 2 } catch { }
     } elseif ($origen -eq 2) {
         try { $dev.Properties.Item('Document Handling Select').Value = 1 }
         catch { $aviso = 'No se pudo fijar el alimentador: ' + $_.Exception.Message }
@@ -281,7 +310,18 @@ def _ejecutar_ps(script, argumentos, timeout=240):
 # ESCANEO
 # =========================================================
 def listar_escaneres():
-    """Lista de escáneres instalados: [{'nombre': ..., 'id': ...}, ...]"""
+    """Lista de escáneres disponibles: [{'nombre': ..., 'id': ...}, ...].
+
+    En Windows se usa WIA (id = identificador del dispositivo) y en macOS el
+    descubrimiento AirScan por Bonjour (id = URL del escáner).
+    """
+    if es_mac():
+        try:
+            return listar_escaneres_mac()
+        except Exception:
+            return []
+    if not es_windows():
+        return []
     res = _ejecutar_ps(_PS_LISTAR, [], timeout=90)
     if not res.get("ok"):
         return []
@@ -303,8 +343,18 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
       * "Con la ventana de Windows": abre el cuadro de escaneo de Windows para
         elegir el escáner y sus opciones (útil si el equipo no aparece en la lista).
     """
+    if es_mac():
+        # macOS (M1/M2): AirScan/eSCL, sin instalar nada
+        try:
+            return _escanear_mac(carpeta, dispositivo=dispositivo, dpi=dpi, color=color,
+                                 origen=origen, paginas=paginas, modo=modo)
+        except Exception as e:
+            return {"ok": False, "paginas": [], "escaner": "",
+                    "error": ("No se pudo escanear en este Mac: " + str(e) +
+                              "\n\nRevise que la multifuncional esté encendida y en la misma red.")}
     if not es_windows():
-        return {"ok": False, "paginas": [], "error": "El escaneo solo esta disponible en Windows."}
+        return {"ok": False, "paginas": [],
+                "error": "El escaneo automatico esta disponible en Windows y macOS."}
     intent = _INTENT_WIA.get(color, 2)
     origen_wia = _ORIGEN_WIA.get(origen, 1)
     try:
@@ -375,6 +425,322 @@ def _error_ocupado(error):
     return any(pista in texto for pista in ("ocupad", "busy", "0x80210006", "in use", "en uso"))
 
 
+def _ejecutar_con_tiempo(orden, segundos=4):
+    """Ejecuta un comando y devuelve su salida aunque siga vivo al vencer el tiempo.
+
+    dns-sd no termina solo: se le da un momento y luego se corta, conservando
+    lo que alcanzo a escribir.
+    """
+    try:
+        proceso = subprocess.Popen(orden, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except Exception:
+        return ""
+    salida = b""
+    try:
+        salida = proceso.communicate(timeout=segundos)[0] or b""
+    except Exception:
+        try:
+            proceso.kill()
+        except Exception:
+            pass
+        try:
+            salida = proceso.communicate()[0] or b""
+        except Exception:
+            salida = b""
+    if isinstance(salida, bytes):
+        return salida.decode("utf-8", "ignore")
+    return str(salida or "")
+
+
+def _parsear_busqueda_dns_sd(salida, servicio="_uscan._tcp"):
+    """Instancias anunciadas en la salida de 'dns-sd -B <servicio>'.
+
+    Ejemplo de linea:
+      13:05:12.456  Add  3  14 local.  _uscan._tcp.  HP Smart Tank 710 series
+    Devuelve la lista de nombres de instancia (sin repetir).
+    """
+    instancias = []
+    for linea in str(salida or "").splitlines():
+        if servicio not in linea:
+            continue
+        resto = linea.split(servicio, 1)[1].lstrip(". ").strip()
+        resto = " ".join(resto.split())
+        if not resto or resto.lower() in ("instance name",):
+            continue
+        if resto not in instancias:
+            instancias.append(resto)
+    return instancias
+
+
+def _parsear_resolucion_dns_sd(salida):
+    """Datos de 'dns-sd -L <instancia> <servicio>'.
+
+    Ejemplo:
+      13:05:13.7  HP Smart Tank 710._uscan._tcp.local. can be reached at HP7C91CA.local.:8080 (interface 14)
+       rs=/eSCL
+       ty=HP Smart Tank 710 series
+    Devuelve {'host','puerto','ruta','url'} o None.
+    """
+    import re as _re
+    texto = str(salida or "")
+    m = _re.search(r"can be reached at\s+([^\s:]+):(\d+)", texto)
+    if not m:
+        return None
+    host, puerto = m.group(1).rstrip("."), m.group(2)
+    m_ruta = _re.search(r"^\s*rs=(\S+)", texto, _re.MULTILINE)
+    ruta = (m_ruta.group(1) if m_ruta else "/eSCL").strip()
+    if not ruta.startswith("/"):
+        ruta = "/" + ruta
+    return {"host": host, "puerto": puerto, "ruta": ruta,
+            "url": f"http://{host}:{puerto}{ruta}"}
+
+
+def _resolver_instancia(instancia, servicio="_uscan._tcp"):
+    """Convierte una instancia Bonjour en su URL de AirScan (o '')."""
+    dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
+    salida = _ejecutar_con_tiempo([dns_sd, "-L", instancia, servicio, "local"], segundos=4)
+    datos = _parsear_resolucion_dns_sd(salida)
+    return datos or {}
+
+
+def listar_escaneres_mac():
+    """Escaneres disponibles en macOS: [{'nombre','id'}] (id = URL de AirScan)."""
+    equipos = []
+    for servicio in _MAC_SERVICIOS:
+        dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
+        salida = _ejecutar_con_tiempo([dns_sd, "-B", servicio, "local"], segundos=4)
+        for instancia in _parsear_busqueda_dns_sd(salida, servicio):
+            datos = _resolver_instancia(instancia, servicio)
+            url = str(datos.get("url") or "")
+            if not url:
+                continue
+            if any(e["id"] == url for e in equipos):
+                continue
+            equipos.append({"nombre": instancia, "id": url})
+    return equipos
+
+
+def _config_local_escaner():
+    """Datos del escaner leídos del archivo de configuración local (respaldo)."""
+    try:
+        import json
+        from app_paths import CONFIG_FILE
+        with open(str(CONFIG_FILE), "r", encoding="utf-8") as archivo:
+            return json.load(archivo) or {}
+    except Exception:
+        return {}
+
+
+def _escl_base_url(dispositivo="", config=None):
+    """URL base de AirScan del escaner a usar (la configurada o el primero que aparezca)."""
+    candidatos = []
+    dispositivo = str(dispositivo or "").strip()
+    if dispositivo.startswith("http"):
+        candidatos.append(dispositivo)
+    if config is None:
+        config = _config_local_escaner()
+    datos = config_escaner(config)
+    url_config = str(datos.get("escaner_url") or "").strip()
+    if url_config:
+        candidatos.append(url_config)
+    for url in candidatos:
+        if not url:
+            continue
+        if not url.startswith("http"):
+            url = "http://" + url
+        if not url.rstrip("/").endswith(("eSCL", "eSCL/ScanJobs")):
+            url = url.rstrip("/") + "/eSCL"
+        return url.rstrip("/")
+    equipos = listar_escaneres_mac()
+    for equipo in equipos:
+        if dispositivo and equipo["id"] == dispositivo:
+            return equipo["id"]
+    if equipos:
+        return equipos[0]["id"]
+    return ""
+
+
+def _xml_scan_settings(dpi=300, color="Escala de grises", origen="Cristal (una página a la vez)"):
+    """Peticion de escaneo (eSCL) en XML. Las medidas van en 1/300 de pulgada (A4)."""
+    try:
+        dpi = max(75, min(1200, int(str(dpi).strip() or 300)))
+    except Exception:
+        dpi = 300
+    modo = {"Color": "RGB24", "Escala de grises": "Grayscale8",
+            "Blanco y negro": "BlackAndWhite1"}.get(color, "Grayscale8")
+    fuente = "Feeder" if str(origen).lower().startswith("alimentador") else "Platen"
+    ancho = int(round(8.27 * 300))      # A4 = 210 x 297 mm = 8,27 x 11,69 pulgadas
+    alto = int(round(11.69 * 300))
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03"'
+        ' xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">'
+        '<pwg:Version>2.1</pwg:Version>'
+        '<pwg:ScanRegions><pwg:ScanRegion>'
+        '<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>'
+        '<pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset>'
+        f'<pwg:Width>{ancho}</pwg:Width><pwg:Height>{alto}</pwg:Height>'
+        '</pwg:ScanRegion></pwg:ScanRegions>'
+        f'<scan:InputSource>{fuente}</scan:InputSource>'
+        f'<scan:ColorMode>{modo}</scan:ColorMode>'
+        f'<scan:Resolution>{dpi}</scan:Resolution>'
+        '<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>'
+        '</scan:ScanSettings>'
+    )
+
+
+def _escanear_mac(carpeta, dispositivo="", dpi=300, color="Escala de grises",
+                  origen="Cristal (una página a la vez)", paginas=1, modo=""):
+    """Escaneo en macOS con AirScan/eSCL. Mismo formato de salida que en Windows."""
+    import urllib.request
+    import urllib.error
+    import re as _re
+
+    if "image capture" in str(modo).lower() or "con la ventana" in str(modo).lower():
+        # Modo alternativo: se escanea con Image Capture y luego se lee el archivo
+        try:
+            subprocess.Popen(["open", "-a", "Image Capture"])
+        except Exception:
+            pass
+        return {"ok": False, "paginas": [], "escaner": "Image Capture", "aviso": "",
+                "error": "Se abrio Image Capture. Escanee alli, guarde el archivo y despues use "
+                         "\u00ab\U0001F4C4 Desde PDF\u00bb para leerlo con el OCR del sistema."}
+
+    base = _escl_base_url(dispositivo, config=None)
+    if not base:
+        return {"ok": False, "paginas": [], "escaner": "",
+                "aviso": "",
+                "error": "No se encontro ninguna multifuncional por red (AirScan).\n"
+                         "Revise que la impresora este encendida y en la misma red, o escriba su "
+                         "direccion en Ajustes > Configuracion General > Escaner (campo URL)."}
+
+    try:
+        paginas = max(1, int(str(paginas).strip() or 1))
+    except Exception:
+        paginas = 1
+
+    marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destino = os.path.join(carpeta, "escaneo_" + marca)
+    os.makedirs(destino, exist_ok=True)
+    xml = _xml_scan_settings(dpi=dpi, color=color, origen=origen).encode("utf-8")
+
+    peticion = urllib.request.Request(base + "/ScanJobs", data=xml,
+                                      headers={"Content-Type": "text/xml"})
+    try:
+        with urllib.request.urlopen(peticion, timeout=60) as respuesta:
+            ubicacion = respuesta.headers.get("Location") or ""
+    except urllib.error.HTTPError as e:
+        detalle = ""
+        try:
+            detalle = e.read().decode("utf-8", "ignore")[:200]
+        except Exception:
+            pass
+        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
+                "error": f"El escaner respondio HTTP {e.code}. {detalle}".strip()}
+    except Exception as e:
+        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
+                "error": f"No se pudo hablar con el escaner ({base}): {e}"}
+
+    if not ubicacion:
+        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
+                "error": "El escaner no devolvio la ubicacion del trabajo de escaneo."}
+    if ubicacion.startswith("/"):
+        raiz = _re.match(r"https?://[^/]+", base)
+        ubicacion = (raiz.group(0) if raiz else base) + ubicacion
+
+    imagenes = []
+    for numero in range(1, paginas + 1):
+        try:
+            with urllib.request.urlopen(ubicacion + "/NextDocument", timeout=180) as respuesta:
+                contenido = respuesta.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                break                      # ya no hay mas hojas (fin del alimentador)
+            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": "",
+                    "error": f"No se pudo recibir la imagen (HTTP {e.code})."}
+        except Exception as e:
+            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": "",
+                    "error": f"No se pudo recibir la imagen: {e}"}
+        if not contenido:
+            break
+        ruta = os.path.join(destino, "pagina_%02d.jpg" % numero)
+        with open(ruta, "wb") as archivo:
+            archivo.write(contenido)
+        imagenes.append(ruta)
+
+    aviso = "" if imagenes else "El escaner no devolvio ninguna imagen."
+    return {"ok": bool(imagenes), "escaner": base, "paginas": imagenes, "aviso": aviso,
+            "error": "" if imagenes else (aviso or "No se pudo escanear.")}
+
+
+def _ocr_vision(rutas, idioma="Automático"):
+    """OCR en macOS con el motor nativo (Vision, por PyObjC). None si no esta."""
+    try:
+        from Foundation import NSURL
+        import Vision
+    except Exception:
+        return None
+    idiomas = {"Español": ["es-ES"], "Inglés": ["en-US"],
+               "Español + Inglés": ["es-ES", "en-US"]}.get(idioma, ["es-ES", "en-US"])
+    textos = []
+    try:
+        for ruta in rutas:
+            url = NSURL.fileURLWithPath_(str(ruta))
+            peticion = Vision.VNRecognizeTextRequest.alloc().init()
+            try:
+                peticion.setRecognitionLevel_(0)          # 0 = precisa
+            except Exception:
+                pass
+            try:
+                peticion.setRecognitionLanguages_(idiomas)
+            except Exception:
+                pass
+            try:
+                peticion.setUsesLanguageCorrection_(True)
+            except Exception:
+                pass
+            manejador = Vision.VNImageRequestHandler.alloc().initWithURL_options_(url, None)
+            manejador.performRequests_error_([peticion], None)
+            observaciones = peticion.results() or []
+            filas = []
+            for observacion in observaciones:
+                try:
+                    candidato = observacion.topCandidates_(1)[0]
+                    texto = str(candidato.string())
+                except Exception:
+                    continue
+                caja = None
+                try:
+                    caja = observacion.boundingBox()
+                except Exception:
+                    pass
+                y = 0.0
+                x = 0.0
+                try:
+                    if caja is not None:
+                        y = float(caja.origin.y)
+                        x = float(caja.origin.x)
+                except Exception:
+                    pass
+                filas.append((round(1 - y, 3), x, texto))   # Vision mide desde abajo
+            filas.sort(key=lambda f: (f[0], f[1]))
+            agrupadas = []
+            for y, x, texto in filas:
+                if agrupadas and abs(agrupadas[-1][0] - y) <= 0.012:
+                    agrupadas[-1][2].append((x, texto))
+                else:
+                    agrupadas.append([y, y, [(x, texto)]])
+            lineas = []
+            for _y0, _y1, palabras in agrupadas:
+                palabras.sort(key=lambda p: p[0])
+                lineas.append(" ".join(t for _x, t in palabras))
+            textos.append("\n".join(lineas))
+    except Exception:
+        return None
+    if not any(t.strip() for t in textos):
+        return None
+    return {"ok": True, "motor": "Apple Vision (macOS)", "idioma": ", ".join(idiomas),
+            "resultados": [{"ruta": r, "texto": t} for r, t in zip(rutas, textos)], "error": ""}
 def _optimizar_imagen(ruta, max_lado=2600, calidad=72):
     """Convierte la imagen escaneada en un JPG real y le baja el peso.
 
@@ -475,12 +841,23 @@ def ocr_paginas(rutas, idioma="Automático"):
     if not rutas:
         return {"ok": False, "motor": "", "idioma": "", "resultados": [], "error": "No hay imagenes para leer."}
 
+    if es_mac():
+        # macOS: motor nativo (Vision) por PyObjC; si no está, Tesseract; si no, se avisa
+        resultado = _ocr_vision(rutas, idioma)
+        if resultado:
+            return resultado
+        respaldo = _ocr_tesseract(rutas)
+        if respaldo:
+            return respaldo
+        return {"ok": False, "motor": "", "idioma": "", "resultados": [],
+                "error": "El OCR de macOS (Vision) no está disponible. Reinstale la aplicación "
+                         "o complete los datos a mano."}
     if not es_windows():
         resultado = _ocr_tesseract(rutas)
         if resultado:
             return resultado
         return {"ok": False, "motor": "", "idioma": "", "resultados": [],
-                "error": "El OCR solo esta disponible en Windows (o instale Tesseract)."}
+                "error": "El OCR solo esta disponible en Windows y macOS (o instale Tesseract)."}
 
     idioma_ps = {"Español": "Espanol", "Inglés": "Ingles"}.get(idioma, "Automatico")
     res = _ejecutar_ps(_PS_OCR_WINDOWS, [idioma_ps] + rutas, timeout=300)

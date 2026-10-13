@@ -71,6 +71,42 @@ try:
 except Exception:
     FECHA_SISTEMA_DISPONIBLE = False
 
+
+def decidir_limpieza_por_corte(ventana, config_actual, fecha_corte_nueva):
+    """¿Hay que ofrecer la limpieza de compras/ventas anteriores al corte?
+
+    🆕 Solo se PREGUNTA cuando la Fecha de Comienzo CAMBIA respecto de la que ya
+    estaba guardada. Si se vuelve a guardar la configuración con la misma fecha,
+    no se pregunta nada (la limpieza queda disponible en el botón rojo).
+
+    Devuelve:
+        "no-aplica"  : no hay fecha de corte (o el sistema no soporta el corte)
+        "sin-cambio" : la fecha es la misma que ya estaba -> no se pregunta
+        "purgar"     : la fecha cambió y el usuario pidió eliminar
+        "omitir"     : la fecha cambió y el usuario prefirió no eliminar ahora
+    """
+    if not fecha_corte_nueva or not FECHA_SISTEMA_DISPONIBLE:
+        return "no-aplica"
+    try:
+        fecha_previa = obtener_fecha_comienzo(config_actual)
+    except Exception:
+        fecha_previa = None
+    if fecha_previa == fecha_corte_nueva:
+        return "sin-cambio"                     # 🚫 No cambió: no se pregunta
+    aviso_cambio = ("La fecha de comienzo cambió de "
+                    f"{fecha_previa.strftime('%d/%m/%Y') if fecha_previa else 'Sin definir'} a "
+                    f"{fecha_corte_nueva.strftime('%d/%m/%Y')}.\n\n")
+    elimina = messagebox.askyesno(
+        "Aplicar corte de compras y ventas",
+        aviso_cambio +
+        f"¿Deseas eliminar ahora todas las COMPRAS y VENTAS anteriores al "
+        f"{fecha_corte_nueva.strftime('%d/%m/%Y')}?\n\n"
+        "La eliminación es definitiva (facturas recibidas, emitidas, pagos y notas de crédito).\n\n"
+        "Si eliges 'No', la fecha quedará guardada y podrás ejecutar la limpieza después con el botón rojo.",
+        parent=ventana)
+    return "purgar" if elimina else "omitir"
+
+
 try:
     from PIL import Image
     PIL_DISPONIBLE = True
@@ -290,6 +326,195 @@ def aplicar_icono_ventana(ventana):
                 ventana.iconbitmap(ruta_ico)
         except Exception:
             pass
+
+# =========================================================
+# 🔗 RCLONE: VINCULACION DE GOOGLE DRIVE (Windows y macOS)
+# =========================================================
+PUERTO_AUTH_RCLONE = 53682        # puerto que usa rclone para el inicio de sesion de Google
+
+
+def _rclone_puerto_ocupado(texto):
+    """¿El error de rclone es porque el puerto de vinculación estaba ocupado?"""
+    t = str(texto or "").lower()
+    pistas = ("bind", "socket address", "dirección de socket", "direccion de socket",
+              "only one usage", "solo se permite un uso", "already in use", "en uso",
+              str(PUERTO_AUTH_RCLONE))
+    return any(pista in t for pista in pistas)
+
+
+def _nombre_proceso(pid):
+    """Nombre del proceso con ese PID ('' si no se puede averiguar)."""
+    try:
+        if sys.platform == "win32":
+            salida = subprocess.run(["tasklist", "/FI", "PID eq %s" % pid, "/FO", "CSV", "/NH"],
+                                    capture_output=True, text=True, errors="replace",
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout or ""
+            primera = salida.strip().splitlines()[0] if salida.strip() else ""
+            return primera.split('","')[0].strip('"').strip().lower() if primera.startswith('"') else ""
+        salida = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True,
+                                text=True, errors="replace").stdout or ""
+        return os.path.basename(salida.strip()).lower()
+    except Exception:
+        return ""
+
+
+def _cerrar_proceso(pid):
+    """Cierra el proceso con ese PID probando todas las vías disponibles.
+
+    En Windows 'taskkill' no siempre puede (Acceso denegado con procesos
+    elevados); 'wmic ... delete' sí suele lograrlo. Devuelve True si se cerró.
+    """
+    oculto = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    ordenes = []
+    if sys.platform == "win32":
+        ordenes.append(["taskkill", "/F", "/PID", str(pid)])
+        ordenes.append(["wmic", "process", "where", "processid=%s" % pid, "delete"])
+    else:
+        ordenes.append(["kill", "-9", str(pid)])
+    for orden in ordenes:
+        try:
+            resultado = subprocess.run(orden, capture_output=True, creationflags=oculto)
+            if getattr(resultado, "returncode", 1) == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _matar_proceso(proceso):
+    """Termina el proceso lanzado (si sigue vivo)."""
+    try:
+        if proceso is None or proceso.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        proceso.terminate()
+        proceso.wait(timeout=8)
+        return
+    except Exception:
+        pass
+    try:
+        proceso.kill()
+    except Exception:
+        pass
+    try:
+        _cerrar_proceso(proceso.pid)
+    except Exception:
+        pass
+
+
+def liberar_puerto_rclone(puerto=PUERTO_AUTH_RCLONE, agresivo=False):
+    """Cierra el RCLONE que quedó usando el puerto de vinculación.
+
+    Cuando un intento anterior de vinculación deja un rclone vivo (o el navegador
+    no cierra el proceso), el puerto sigue ocupado y el siguiente intento falla con
+    "bind: Only one usage of each socket address". Aquí se cierra ese rclone.
+
+    Seguridad: si el puerto lo ocupa OTRO programa, no se toca; se informa para que
+    el usuario lo cierre. Devuelve el texto de lo que se hizo ('' si estaba libre).
+    """
+    cerrados, ajenos, sin_permiso = [], [], []
+    crear_oculto = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    pids = set()
+    try:
+        if sys.platform == "win32":
+            salida = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace",
+                                    creationflags=crear_oculto).stdout or ""
+            for linea in salida.splitlines():
+                partes = linea.split()
+                if len(partes) >= 5 and partes[0].upper() == "TCP" and partes[1].endswith(":" + str(puerto)):
+                    pids.add(partes[-1])
+        else:
+            salida = subprocess.run(["lsof", "-ti", "tcp:%d" % puerto], capture_output=True,
+                                    text=True, errors="replace").stdout or ""
+            pids.update(salida.split())
+    except Exception as e:
+        print("Aviso - buscando el proceso del puerto de rclone:", e)
+
+    for pid in pids:
+        if not (pid.isdigit() and pid != "0"):
+            continue
+        nombre = _nombre_proceso(pid)
+        if nombre and "rclone" not in nombre and not agresivo:
+            ajenos.append("%s (PID %s)" % (nombre, pid))
+            continue
+        if _cerrar_proceso(pid):
+            cerrados.append("%s (PID %s)" % (nombre or "rclone", pid))
+        else:
+            sin_permiso.append("%s (PID %s)" % (nombre or "proceso", pid))
+
+    if not cerrados and agresivo:
+        # Ultimo recurso: cerrar todos los rclone que hayan quedado abiertos
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/IM", "rclone.exe"], capture_output=True,
+                               creationflags=crear_oculto)
+            else:
+                subprocess.run(["pkill", "-f", "rclone"], capture_output=True)
+            cerrados.append("todos los procesos rclone")
+        except Exception as e:
+            print("Aviso - cerrando rclone:", e)
+
+    partes = []
+    if cerrados:
+        partes.append("se cerró " + ", ".join(cerrados))
+    if ajenos:
+        partes.append("el puerto %d lo usa otro programa: %s (ciérrelo e intente de nuevo)"
+                      % (puerto, ", ".join(ajenos)))
+    if sin_permiso:
+        partes.append("no se pudo cerrar %s (ejecute el sistema como administrador o reinicie el equipo)"
+                      % ", ".join(sin_permiso))
+    return " | ".join(partes)
+
+
+def vincular_rclone_drive(cmd_rclone, argumentos_config, remote, kwargs=None, segundos=300):
+    """Vincula Google Drive con rclone cuidando el puerto de autenticación.
+
+    1. Libera el puerto 53682 de cualquier rclone que haya quedado de un intento
+       anterior (si el puerto lo usa otro programa, no se toca y se informa).
+    2. Ejecuta 'rclone config create' con un tiempo máximo.
+    3. Si falla por el puerto, lo libera y reintenta una vez.
+    4. Pase lo que pase, NO deja el proceso de rclone vivo: es lo que dejaba el
+       puerto ocupado y rompía la siguiente vinculación.
+    """
+    # Las opciones se combinan una sola vez (antes "creationflags" se pasaba dos veces
+    # y Popen fallaba con "got multiple values for keyword argument").
+    opciones = {k: v for k, v in dict(kwargs or {}).items() if k != "creationflags"}
+    if sys.platform == "win32":
+        # Ventana de consola oculta; si el llamador ya la definio, se respeta
+        opciones["creationflags"] = dict(kwargs or {}).get(
+            "creationflags", getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def ejecutar():
+        orden = [cmd_rclone, *(argumentos_config or []), "config", "create", remote, "drive",
+                 "scope", "drive"]
+        try:
+            proceso = subprocess.Popen(orden, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                       encoding="utf-8", errors="replace", **opciones)
+        except Exception as e:
+            return subprocess.CompletedProcess(orden, 1, "", "No se pudo ejecutar rclone: %s" % e)
+        try:
+            salida, error = proceso.communicate(timeout=segundos)
+            return subprocess.CompletedProcess(orden, proceso.returncode, salida or "", error or "")
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(orden, 1, "", "El inicio de sesión tardó demasiado "
+                                                                  "(se cerró rclone; vuelva a intentarlo).")
+        finally:
+            _matar_proceso(proceso)
+
+    liberado = liberar_puerto_rclone()
+    if liberado:
+        print("Rclone: antes de vincular ->", liberado)
+    resultado = ejecutar()
+    if resultado.returncode != 0 and _rclone_puerto_ocupado(getattr(resultado, "stderr", "")):
+        liberado2 = liberar_puerto_rclone(agresivo=True)
+        print("Rclone: el puerto estaba ocupado; se reintenta ->", liberado2 or "sin procesos que cerrar")
+        resultado = ejecutar()
+    liberar_puerto_rclone()
+    return resultado
+
 
 def obtener_comando_rclone():
     nombre_ejecutable = "rclone.exe" if sys.platform == "win32" else "rclone"
@@ -2196,6 +2421,26 @@ class ControlGeneralEventos:
             cmb_escaner.set("(el guardado: se usará al escanear)")
             mapa_escaneres["(el guardado: se usará al escanear)"] = cfg_escaner["escaner_dispositivo"]
 
+        # 🖥️ En macOS el escaneo va por red (AirScan/eSCL): se puede indicar la URL
+        f_esc_url = ctk.CTkFrame(f_escaner, fg_color="transparent")
+        ent_esc_url = ctk.CTkEntry(f_esc_url,
+                                   placeholder_text="(opcional) URL del escáner, ej: http://192.168.1.50/eSCL")
+        ent_esc_url.insert(0, cfg_escaner.get("escaner_url", ""))
+        lbl_esc_mac = ctk.CTkLabel(f_escaner,
+                                   text="🖥️ En Mac (M1/M2) el escaneo va por red (AirScan): la impresora se "
+                                        "detecta sola si está en la misma red; si no aparece, escriba aquí su URL.",
+                                   font=("Arial", 9, "italic"), text_color="gray",
+                                   wraplength=820, justify="left")
+        try:
+            if mod_escaner is not None and mod_escaner.es_mac():
+                ctk.CTkLabel(f_esc_url, text="URL del escáner (Mac):", font=("Arial", 11, "bold"),
+                             width=140, anchor="w").pack(side="left")
+                ent_esc_url.pack(side="left", fill="x", expand=True, padx=(0, 8))
+                f_esc_url.pack(fill="x", padx=15, pady=4)
+                lbl_esc_mac.pack(anchor="w", padx=15)
+        except Exception:
+            pass
+
         f_esc_r1 = ctk.CTkFrame(f_escaner, fg_color="transparent")
         f_esc_r1.pack(fill="x", padx=15, pady=4)
         ctk.CTkLabel(f_esc_r1, text="Resolución (ppp):", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
@@ -2231,7 +2476,7 @@ class ControlGeneralEventos:
         ctk.CTkLabel(f_esc_r4, text="Modo de escaneo:", font=("Arial", 11, "bold"), width=140, anchor="w").pack(side="left")
         cmb_esc_modo = ctk.CTkOptionMenu(f_esc_r4, values=opciones_escaner["modo"], width=250)
         cmb_esc_modo.set(cfg_escaner.get("escaner_modo", "Automático (sin ventanas)")); cmb_esc_modo.pack(side="left")
-        ctk.CTkLabel(f_esc_r4, text="(el 2° abre el cuadro de Windows para elegir el equipo)",
+        ctk.CTkLabel(f_esc_r4, text="(el 2° abre el cuadro del sistema para elegir el equipo)",
                      font=("Arial", 9, "italic"), text_color="gray").pack(side="left", padx=8)
 
         f_esc_r5 = ctk.CTkFrame(f_escaner, fg_color="transparent")
@@ -2252,13 +2497,14 @@ class ControlGeneralEventos:
                     "escaner_ocr": cmb_esc_ocr.get(), "escaner_idioma_ocr": cmb_esc_idioma.get(),
                     "escaner_optimizar": cmb_esc_optimizar.get(), "escaner_modo": cmb_esc_modo.get(),
                     "escaner_carpeta": ent_esc_carpeta.get().strip(),
+                "escaner_url": ent_esc_url.get().strip(),
                     "ruta_drive": ent_drive.get().strip() or config_actual.get("ruta_drive", "")}
 
         def probar_escaneo():
             if mod_escaner is None:
                 return messagebox.showerror("Escáner", "No se pudo cargar el módulo escaner.py.", parent=v_conf)
-            if not mod_escaner.es_windows():
-                return messagebox.showinfo("Escáner", "El escaneo solo está disponible en Windows.", parent=v_conf)
+            if not mod_escaner.sistema_soportado():
+                return messagebox.showinfo("Escáner", "El escaneo está disponible en Windows y en macOS (M1/M2).", parent=v_conf)
             p = ctk.CTkToplevel(v_conf)
             p.title("Prueba de escaneo")
             p.geometry("420x150"); p.transient(v_conf); p.grab_set()
@@ -2531,11 +2777,16 @@ class ControlGeneralEventos:
                 kwargs = {}
                 if sys.platform == "win32":
                     kwargs["creationflags"] = 0x08000000
-                result = subprocess.run([cmd_rclone, "config", "create", remote, "drive", "scope", "drive"], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
+                result = vincular_rclone_drive(cmd_rclone, [], remote, kwargs)
                 if result.returncode == 0:
                     messagebox.showinfo("Éxito", "¡Google Drive vinculado correctamente!\nYa puedes realizar la prueba de conexión.", parent=v_conf)
                 else:
-                    messagebox.showerror("Error", f"Falló la vinculación:\n{result.stderr}", parent=v_conf)
+                    detalle = result.stderr or ""
+                    if _rclone_puerto_ocupado(detalle):
+                        detalle += ("\n\n\U0001F4A1 El puerto " + str(PUERTO_AUTH_RCLONE) +
+                                    " estaba ocupado por otro rclone. La aplicacion ya lo libero: "
+                                    "vuelva a pulsar \u00ab\U0001F517 Vincular Cuenta Auto\u00bb.")
+                    messagebox.showerror("Error", f"Falló la vinculación:\n{detalle}", parent=v_conf)
             except Exception as e:
                 messagebox.showerror("Error Crítico", f"No se pudo ejecutar Rclone:\n{e}", parent=v_conf)
 
@@ -2831,35 +3082,25 @@ class ControlGeneralEventos:
                     finally:
                         liberar_conexion(conn)
 
-                # 🚀 CORTE DE COMPRAS Y VENTAS: si hay fecha de comienzo, ofrecer la limpieza definitiva
-                if fecha_corte_nueva and FECHA_SISTEMA_DISPONIBLE:
-                    fecha_corte_previa = obtener_fecha_comienzo(config_actual)
-                    aviso_cambio = ""
-                    if fecha_corte_previa != fecha_corte_nueva:
-                        aviso_cambio = f"La fecha de comienzo cambió de {fecha_corte_previa.strftime('%d/%m/%Y') if fecha_corte_previa else 'Sin definir'} a {fecha_corte_nueva.strftime('%d/%m/%Y')}.\n\n"
-                    if messagebox.askyesno(
-                        "Aplicar corte de compras y ventas",
-                        aviso_cambio +
-                        f"¿Deseas eliminar ahora todas las COMPRAS y VENTAS anteriores al {fecha_corte_nueva.strftime('%d/%m/%Y')}?\n\n"
-                        "La eliminación es definitiva (facturas recibidas, emitidas, pagos y notas de crédito).\n\n"
-                        "Si eliges 'No', la fecha quedará guardada y podrás ejecutar la limpieza después con el botón rojo.",
-                        parent=v_conf
-                    ):
-                        def al_terminar_corte(resultado, error):
-                            if error:
-                                messagebox.showerror("Configuración guardada, limpieza fallida", f"La fecha se guardó correctamente, pero no se pudo eliminar la información:\n{error}", parent=v_conf)
-                            else:
-                                cache_sistema.invalidar()
-                                messagebox.showinfo("Limpieza completada", resumen_purga(resultado), parent=v_conf)
-                            lanzar_sync_background()
-                            try:
-                                v_conf.destroy()
-                            except Exception:
-                                pass
-                            self.construir_dashboard_spa()
+                # 🚀 CORTE DE COMPRAS Y VENTAS: solo se pregunta si la fecha CAMBIÓ
+                decision_corte = decidir_limpieza_por_corte(v_conf, config_actual, fecha_corte_nueva)
+                if decision_corte == "purgar":
+                    def al_terminar_corte(resultado, error):
+                        if error:
+                            messagebox.showerror("Configuración guardada, limpieza fallida", f"La fecha se guardó correctamente, pero no se pudo limpiar:\n{error}", parent=v_conf)
+                        else:
+                            cache_sistema.invalidar()
+                            messagebox.showinfo("Limpieza completada", resumen_purga(resultado), parent=v_conf)
+                        lanzar_sync_background()
+                        try:
+                            v_conf.destroy()
+                        except Exception:
+                            pass
+                        self.construir_dashboard_spa()
 
-                        _purgar_con_progreso(fecha_corte_nueva, al_terminar_corte)
-                        return
+                    _purgar_con_progreso(fecha_corte_nueva, al_terminar_corte)
+                    return
+                if decision_corte == "omitir":
                     messagebox.showinfo(
                         "Corte guardado sin limpiar",
                         "La Fecha de Comienzo quedó guardada.\n\nNo se eliminó ningún registro. Puedes ejecutar la limpieza cuando quieras con el botón rojo "

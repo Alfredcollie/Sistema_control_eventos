@@ -10,6 +10,7 @@ import json
 import sys
 import os
 import threading
+import queue
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
@@ -273,6 +274,10 @@ class SistemaProveedores:
     def __init__(self, root):
         self.root = root
         self.usuario_activo = "Desconocido"
+        # 🧵 Cola de interfaz: los hilos de trabajo piden los cambios de pantalla
+        #    y el hilo principal los aplica (igual que en el programa de Flota).
+        self._esta_destruido = False
+        self.ui_queue = queue.Queue()
         
         self.pagina_actual = 1
         self.registros_por_pagina = 50
@@ -301,9 +306,53 @@ class SistemaProveedores:
         self.crear_tab_buscar()
         self.crear_tab_incluir()
 
+        self._iniciar_procesador_cola_ui()
+        try:
+            self.root.bind("<Destroy>", self._al_destruir, add="+")
+        except Exception:
+            pass
+
+    def _al_destruir(self, event=None):
+        """Marca la ventana como cerrada para que el procesador no siga corriendo."""
+        self._esta_destruido = True
+
+    def _iniciar_procesador_cola_ui(self):
+        """Aplica en el hilo principal los cambios de interfaz pedidos desde los hilos."""
+        if getattr(self, "_esta_destruido", False):
+            return
+        try:
+            while not self.ui_queue.empty():
+                fn, args = self.ui_queue.get_nowait()
+                try:
+                    fn(*args)
+                except Exception as ex:
+                    print("[UI Queue Error] %s" % ex)
+        except Exception:
+            pass
+        finally:
+            try:
+                if not getattr(self, "_esta_destruido", False) and self.root.winfo_exists():
+                    self.root.after(40, self._iniciar_procesador_cola_ui)
+            except Exception:
+                pass
+
     def ejecutar_en_ui(self, fn, *args):
-        if hasattr(self, 'root') and self.root.winfo_exists():
-            self.root.after(0, lambda: fn(*args))
+        """🧵 Pide actualizar la interfaz desde CUALQUIER hilo (cola segura).
+
+        Antes se llamaba a self.root.after(...) directamente desde los hilos de
+        trabajo y Tkinter no lo admite (la ventana se congelaba o aparecía
+        "main thread is not in main loop"). Ahora se encola y el hilo principal
+        la ejecuta cada 40 ms, igual que en el programa de Flota.
+        """
+        try:
+            self.ui_queue.put((fn, args))
+        except Exception:
+            # Respaldo: si todavía no hay cola (uso muy temprano), como antes
+            try:
+                if hasattr(self, "root") and self.root.winfo_exists():
+                    self.root.after(0, lambda: fn(*args))
+            except Exception:
+                pass
 
     def buscar_catalogo_pdf(self, entry_widget):
         ruta = filedialog.askopenfilename(title="Seleccionar Catálogo PDF", filetypes=[("Archivos PDF", "*.pdf")])

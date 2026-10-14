@@ -774,9 +774,16 @@ def crear_proveedor_si_no_existe(nombre, ruc, usar_internet=True):
 
 
 def numero_comprobante_desde_texto(texto):
-    """N° de documento (F001-123, E001-45...) leído del comprobante."""
-    m = re.search(r"([EFB][0-9A-Z]{3}\s*-\s*\d+)", str(texto or ""))
-    return m.group(1).replace(" ", "") if m else ""
+    """N° de documento (F001-123, E001-45...) leído del comprobante.
+
+    El OCR suele leerlo SIN guion ("F581 08283480"), así que se acepta cualquier
+    separador (guion, dos puntos, espacio) o incluso ninguno.
+    """
+    texto = str(texto or "")
+    encontrado = re.search(r"\b([EFB][0-9A-Z]{3})\s*[-:\u2013\u2014]?\s*(\d{1,8})", texto)
+    if encontrado:
+        return "%s-%s" % (encontrado.group(1).upper(), encontrado.group(2))
+    return ""
 
 
 def buscar_comprobante_duplicado(numero_documento):
@@ -1002,11 +1009,103 @@ def _importes_del_texto(texto):
     """Todos los importes con decimales del texto (corrige los 'oo' del OCR)."""
     limpio = str(texto or "").replace("oo", "00").replace("OO", "00")
     valores = []
-    for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}", limpio):
+    for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", limpio):
         valor = _a_numero(encontrado)
         if valor and valor not in valores:
             valores.append(round(float(valor), 2))
     return valores
+
+
+_PALABRAS_NUMERO = {
+    "CERO": 0, "UN": 1, "UNO": 1, "UNA": 1, "DOS": 2, "TRES": 3, "CUATRO": 4, "CINCO": 5, "SEIS": 6,
+    "SIETE": 7, "OCHO": 8, "NUEVE": 9, "DIEZ": 10, "ONCE": 11, "DOCE": 12, "TRECE": 13, "CATORCE": 14,
+    "QUINCE": 15, "DIECISEIS": 16, "DIECISIETE": 17, "DIECIOCHO": 18, "DIECINUEVE": 19, "VEINTE": 20,
+    "VEINTIUNO": 21, "VEINTIDOS": 22, "VEINTITRES": 23, "VEINTICUATRO": 24, "VEINTICINCO": 25,
+    "VEINTISEIS": 26, "VEINTISIETE": 27, "VEINTIOCHO": 28, "VEINTINUEVE": 29, "TREINTA": 30,
+    "CUARENTA": 40, "CINCUENTA": 50, "SESENTA": 60, "SETENTA": 70, "OCHENTA": 80, "NOVENTA": 90,
+    "CIEN": 100, "CIENTO": 100, "DOSCIENTOS": 200, "TRESCIENTOS": 300, "CUATROCIENTOS": 400,
+    "QUINIENTOS": 500, "SEISCIENTOS": 600, "SETECIENTOS": 700, "OCHOCIENTOS": 800, "NOVECIENTOS": 900,
+}
+
+
+def _texto_sin_acentos(texto):
+    """Texto en mayúsculas y sin tildes (para comparar rótulos). Multiplataforma."""
+    import unicodedata
+    base = unicodedata.normalize("NFKD", str(texto or ""))
+    return "".join(c for c in base if not unicodedata.combining(c)).upper()
+
+
+def monto_en_palabras(texto):
+    """Lee el importe en letras ('SON: CIENTO SETENTA Y SIETE CON 0/100 SOLES')."""
+    limpio = _texto_sin_acentos(texto)
+    posicion = limpio.find("SON")
+    if posicion == -1:
+        return 0.0
+    resto = limpio[posicion + 3:].split(chr(10))[0]
+    centimos = 0
+    if " CON " in resto:
+        antes, despues = resto.split(" CON ", 1)
+        resto = antes
+        try:
+            centimos = int(re.findall(r"\d{1,2}", despues)[0])
+        except Exception:
+            centimos = 0
+    palabras = [p for p in re.split(r"[^A-Z]+", resto) if p]
+    total, parcial = 0, 0
+    for palabra in palabras:
+        if palabra in ("Y", "CON", "SOLES", "SOL", "DOLARES", "SON", "DE", "SEUO"):
+            continue
+        if palabra in ("MIL", "MILES"):
+            total += (parcial or 1) * 1000
+            parcial = 0
+            continue
+        if palabra in ("MILLON", "MILLONES"):
+            total += (parcial or 1) * 1000000
+            parcial = 0
+            continue
+        if palabra in _PALABRAS_NUMERO:
+            parcial += _PALABRAS_NUMERO[palabra]
+            continue
+        if parcial or total:
+            break
+    total += parcial
+    if total <= 0:
+        return 0.0
+    return round(total + centimos / 100.0, 2)
+
+
+def montos_en_columnas(texto):
+    """(base, igv, total) cuando los rótulos y los importes van en líneas distintas.
+
+    Es el caso de RIMAC, AFP y servicios: la línea de rótulos
+    ("OP- GRAVADA ... I.G.V. IMPORTE TOTAL") y la de valores ("S/ 150,00 S/ 27.00 S/ 177.0").
+    Se toma el último importe como total y el mayor de los demás como base.
+    """
+    lineas = str(texto or "").splitlines()
+    for indice in range(1, len(lineas)):
+        etiquetas = _texto_sin_acentos(lineas[indice - 1])
+        # Solo un encabezado inequívoco (IGV / IMPORTE TOTAL / TOTAL A PAGAR) y que esa
+        # línea NO traiga importes: así las facturas normales no entran por aquí.
+        if not re.search(r"(IMPORTE\s*TOTAL|TOTAL\s*A\s*PAGAR|I\.?\s*G\.?\s*V|\bIGV\b)", etiquetas):
+            continue
+        if re.search(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}", etiquetas):
+            continue
+        fila = lineas[indice].replace("S/.", " ").replace("S/", " ")
+        valores = []
+        for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", fila):
+            try:
+                valor = _a_numero(encontrado)
+            except Exception:
+                valor = 0
+            if valor and valor > 0:
+                valores.append(round(float(valor), 2))
+        if len(valores) >= 2:
+            total = valores[-1]
+            base = max(valores[:-1])
+            igv = round(total - base, 2)
+            if 0 < igv <= total * 0.5:
+                return base, igv, total
+    return 0.0, 0.0, 0.0
 
 
 def deducir_montos_por_suma(texto, tipo=""):
@@ -1016,7 +1115,25 @@ def deducir_montos_por_suma(texto, tipo=""):
     etiquetas: se recogen todos los importes y se busca el par que cumple la
     relación del IGV (18% o 10.5%). Devuelve (0, 0, 0) si no hay combinación válida.
     """
+    # 📊 Primero el caso de tablas en columnas (rótulos en una línea, importes en la otra)
+    por_columnas = montos_en_columnas(texto)
+    if por_columnas[2] > 0:
+        return por_columnas
+
     valores = _importes_del_texto(texto)
+
+    # 💬 El importe en letras manda: la base es el mayor importe menor que el total
+    letras = monto_en_palabras(texto)
+    if letras:
+        candidatos = [v for v in valores if 0 < v < letras]
+        if candidatos:
+            base = max(candidatos)
+            igv = round(letras - base, 2)
+            if 0 < igv <= letras * 0.5:
+                return base, igv, letras
+        # Si no hay con qué comparar, se asume el IGV general (18%)
+        return round(letras / 1.18, 2), round(letras - letras / 1.18, 2), letras
+
     if len(valores) < 3:
         return 0.0, 0.0, 0.0
     tasas = [0.105] if "10.5" in str(tipo) else [0.18]
@@ -2051,10 +2168,15 @@ class FacturasRecibidasTab:
                     
             self.on_tipo_change(self.combo_tipo.get())
 
-            nro_match = re.search(r"([EFB][0-9A-Z]{3}\s*-\s*\d+)", texto)
-            if nro_match:
+            # Se usa el lector tolerante: el OCR suele leer "F581 08283480" SIN guion
+            # (antes se exigía el guion y el N° no llegaba al formulario).
+            numero_leido = numero_comprobante_desde_texto(texto)
+            if not numero_leido:
+                nro_match = re.search(r"([EFB][0-9A-Z]{3}\s*-\s*\d+)", texto)
+                numero_leido = nro_match.group(1).replace(" ", "") if nro_match else ""
+            if numero_leido:
                 self.ent_nro_doc.delete(0, tk.END)
-                self.ent_nro_doc.insert(0, nro_match.group(1).replace(" ", ""))
+                self.ent_nro_doc.insert(0, numero_leido)
             
             fecha_match = re.search(r"Fecha de Emisi[oó]n\s*[:\-]?\s*(\d{2})[/\-.](\d{2})[/\-.](\d{4})", texto, re.IGNORECASE)
             if not fecha_match: 

@@ -71,7 +71,9 @@ def es_windows():
 
 
 # Servicios Bonjour que anuncian los escaneres por red (AirScan/eSCL)
-_MAC_SERVICIOS = ("_uscan._tcp", "_uscans._tcp", "_scanner._tcp")
+_MAC_SERVICIOS = ("_uscan._tcp", "_uscans._tcp")
+# Respaldo: impresoras AirPrint (casi todas sirven eSCL en /eSCL)
+_MAC_SERVICIOS_RESPALDO = ("_ipp._tcp", "_ipps._tcp")
 
 
 def es_mac():
@@ -496,27 +498,279 @@ def _parsear_resolucion_dns_sd(salida):
 
 
 def _resolver_instancia(instancia, servicio="_uscan._tcp"):
-    """Convierte una instancia Bonjour en su URL de AirScan (o '')."""
+    """Convierte una instancia Bonjour en su URL de AirScan (o {}).
+
+    Los servicios que terminan en "s" (_uscans / _ipps) van cifrados: se marca
+    'tls' y la URL se arma con https (las impresoras usan certificado propio).
+    """
     dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
     salida = _ejecutar_con_tiempo([dns_sd, "-L", instancia, servicio, "local"], segundos=4)
-    datos = _parsear_resolucion_dns_sd(salida)
-    return datos or {}
+    datos = _parsear_resolucion_dns_sd(salida) or {}
+    if datos:
+        seguro = servicio.rstrip(".").endswith("s._tcp") or "scans" in servicio or "ipps" in servicio
+        datos["tls"] = bool(seguro)
+        if seguro and str(datos.get("url", "")).startswith("http://"):
+            datos["url"] = "https://" + datos["url"][len("http://"):]
+    return datos
+
+
+# =========================================================
+# 🔎 DESCUBRIMIENTO DEL ESCANER EN macOS
+# =========================================================
+# Se hace en Python (consulta multicast de Bonjour) para no depender de 'dns-sd':
+# asi funciona dentro de la aplicacion y macOS pide el permiso de "Red local"
+# directamente al programa. Como respaldo se leen tambien las impresoras que ya
+# estan configuradas en el sistema (lpstat -v).
+
+def _mdns_consulta(servicio="_uscan._tcp.local"):
+    """Paquete DNS para preguntar por ese servicio (PTR)."""
+    import struct
+    partes = [p for p in str(servicio).rstrip(".").split(".") if p]
+    nombre = b""
+    for parte in partes:
+        datos = parte.encode("utf-8")[:63]
+        nombre += bytes([len(datos)]) + datos
+    nombre += b"\x00"
+    return (struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + nombre +
+            struct.pack(">HH", 12, 1))          # 12 = PTR, 1 = IN
+
+
+def _mdns_leer_nombre(datos, posicion):
+    """Lee un nombre del paquete (admite la compresion con punteros)."""
+    partes, saltos = [], 0
+    while posicion < len(datos):
+        largo = datos[posicion]
+        if largo == 0:
+            posicion += 1
+            break
+        if largo & 0xC0 == 0xC0:                 # puntero a otra parte
+            if posicion + 1 >= len(datos):
+                break
+            puntero = ((largo & 0x3F) << 8) | datos[posicion + 1]
+            if saltos == 0:
+                siguiente = posicion + 2
+            posicion = puntero
+            saltos += 1
+            if saltos > 8:
+                break
+            continue
+        partes.append(datos[posicion + 1: posicion + 1 + largo].decode("utf-8", "ignore"))
+        posicion += 1 + largo
+    if saltos:
+        posicion = siguiente
+    return ".".join([p for p in partes if p]), posicion
+
+
+def _mdns_leer_respuesta(datos):
+    """Saca de la respuesta de Bonjour los servicios (instancia, host, puerto)."""
+    import struct
+    encontrados = []
+    try:
+        if len(datos) < 12:
+            return encontrados
+        _, _, total_preguntas, total_resp, total_extras, _ = struct.unpack(">HHHHHH", datos[:12])
+        posicion = 12
+        for _ in range(total_preguntas):
+            _, posicion = _mdns_leer_nombre(datos, posicion)
+            posicion += 4
+        registros = []
+        for _ in range(total_resp + total_extras):
+            nombre, posicion = _mdns_leer_nombre(datos, posicion)
+            if posicion + 10 > len(datos):
+                break
+            tipo, clase, ttl, largo = struct.unpack(">HHIH", datos[posicion:posicion + 10])
+            posicion += 10
+            inicio = posicion
+            valor = datos[posicion:posicion + largo]
+            posicion += largo
+            if tipo == 12:                        # PTR: "servicio -> instancia"
+                destino, _ = _mdns_leer_nombre(datos, inicio)
+                registros.append(("ptr", nombre, destino))
+            elif tipo == 33 and largo >= 6:       # SRV: puerto y equipo
+                try:
+                    puerto = struct.unpack(">H", valor[4:6])[0]
+                    equipo, _ = _mdns_leer_nombre(datos, inicio + 6)
+                    registros.append(("srv", nombre, equipo, puerto))
+                except Exception:
+                    pass
+    except Exception as e:
+        print("Aviso - leyendo respuesta Bonjour:", e)
+        return encontrados
+    # Se cruzan PTR (instancia) con SRV (equipo y puerto)
+    for reg in registros:
+        if reg[0] != "ptr":
+            continue
+        instancia = reg[2].rstrip(".")
+        host, puerto = "", 0
+        for otro in registros:
+            if otro[0] == "srv" and otro[1].rstrip(".") == instancia:
+                host, puerto = otro[2].rstrip("."), otro[3]
+                break
+        encontrados.append((instancia, host, puerto))
+    return encontrados
+
+
+def _mdns_buscar(servicio="_uscan._tcp.local", segundos=3, maximo=45):
+    """Pregunta por multicast que equipos anuncian ese servicio (sin dns-sd)."""
+    import socket
+    import time as _time
+    encontrados = []
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        sock.settimeout(0.5)
+        sock.sendto(_mdns_consulta(servicio), ("224.0.0.251", 5353))
+        limite = _time.time() + segundos
+        while _time.time() < limite and len(encontrados) < maximo:
+            try:
+                datos, _ = sock.recvfrom(9000)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            for hallado in _mdns_leer_respuesta(datos):
+                if hallado not in encontrados:
+                    encontrados.append(hallado)
+    except Exception as e:
+        print("Aviso - consulta Bonjour (%s):" % servicio, e)
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+    return encontrados
+
+
+def _escaneres_por_lpstat():
+    """Equipos de las impresoras ya configuradas en macOS (lpstat -v)."""
+    import re as _re
+    hosts = []
+    salida = _ejecutar_con_tiempo(["lpstat", "-v"], segundos=6)
+    for linea in str(salida or "").splitlines():
+        if ":" not in linea:
+            continue
+        uri = linea.split(":", 1)[1].strip()
+        encontrado = _re.search(r"://([^/]+)", uri)
+        if not encontrado:
+            continue
+        host = encontrado.group(1).split("@")[-1]
+        if "]" in host:                          # IPv6 -> se corta el puerto
+            host = host.split("]")[0].lstrip("[")
+        elif ":" in host:
+            host = host.split(":")[0]
+        host = host.replace("%20", " ").strip()
+        # Se descartan los nombres de servicio de Bonjour (no son equipos)
+        if not host or "_tcp" in host or "_udp" in host or host.startswith("_"):
+            continue
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _probar_escl(base, timeout=2):
+    """¿El escaner responde en esa URL? (evita ofrecer equipos que no contestan)."""
+    import urllib.error
+    try:
+        with _abrir_url(str(base).rstrip("/") + "/ScannerCapabilities", timeout=timeout) as respuesta:
+            respuesta.read(90)
+        return True
+    except urllib.error.HTTPError:
+        return True                              # responde (aunque no de la ficha)
+    except Exception:
+        return False
+
+
+def _candidatos_escl(host):
+    """URLs de eSCL que se prueban para un equipo concreto."""
+    host = str(host or "").strip().rstrip(".")
+    if not host:
+        return []
+    candidatos = ["http://%s/eSCL" % host, "http://%s:8080/eSCL" % host, "https://%s/eSCL" % host]
+    return candidatos
+
+
+def diagnostico_escaner_mac():
+    """Texto que explica qué se encontró al buscar el escáner en macOS."""
+    lineas = []
+    for servicio in _MAC_SERVICIOS:
+        hallados = _mdns_buscar(servicio + ".local", segundos=2)
+        lineas.append("Bonjour %s: %s" % (servicio, hallados if hallados else "nada"))
+    lineas.append("Impresoras del sistema (lpstat): %s" % (_escaneres_por_lpstat() or "ninguna"))
+    return "\n".join(lineas)
 
 
 def listar_escaneres_mac():
-    """Escaneres disponibles en macOS: [{'nombre','id'}] (id = URL de AirScan)."""
-    equipos = []
-    for servicio in _MAC_SERVICIOS:
+    """Escanéres disponibles en macOS (AirScan/eSCL).
+
+    Orden: 1) Bonjour en Python (sin depender de dns-sd), 2) respaldo con dns-sd,
+    3) impresoras AirPrint y las ya configuradas en el sistema (lpstat), 4) la URL
+    escrita a mano en Ajustes. Al final se comprueba quién responde de verdad.
+    """
+    candidatos = []
+
+    # 1) 📡 Bonjour en Python
+    for servicio, seguro in (("_uscan._tcp.local", False), ("_uscans._tcp.local", True)):
+        for instancia, host, puerto in _mdns_buscar(servicio, segundos=3):
+            if not host:
+                continue
+            esquema = "https" if seguro else "http"
+            puerto_txt = (":%d" % puerto) if puerto and puerto not in (80, 443) else ""
+            candidatos.append((instancia, "%s://%s%s/eSCL" % (esquema, host, puerto_txt)))
+
+    # 2) 🔄 Respaldo: la herramienta dns-sd del sistema
+    if not candidatos:
         dns_sd = shutil.which("dns-sd") or "/usr/bin/dns-sd"
-        salida = _ejecutar_con_tiempo([dns_sd, "-B", servicio, "local"], segundos=4)
-        for instancia in _parsear_busqueda_dns_sd(salida, servicio):
-            datos = _resolver_instancia(instancia, servicio)
-            url = str(datos.get("url") or "")
-            if not url:
-                continue
-            if any(e["id"] == url for e in equipos):
-                continue
-            equipos.append({"nombre": instancia, "id": url})
+        for servicio in _MAC_SERVICIOS:
+            salida = _ejecutar_con_tiempo([dns_sd, "-B", servicio, "local"], segundos=4)
+            for instancia in _parsear_busqueda_dns_sd(salida, servicio):
+                datos = _resolver_instancia(instancia, servicio)
+                if datos.get("url"):
+                    candidatos.append((instancia, datos["url"]))
+
+    # 3) 🖨️ Impresoras AirPrint y las del sistema
+    hosts = []
+    for servicio in _MAC_SERVICIOS_RESPALDO:
+        for instancia, host, puerto in _mdns_buscar(servicio + ".local", segundos=2):
+            if host and host not in hosts:
+                hosts.append(host)
+    for host in _escaneres_por_lpstat():
+        if host not in hosts:
+            hosts.append(host)
+    for host in hosts:
+        for url in _candidatos_escl(host):
+            candidatos.append((host, url))
+
+    # 4) La URL escrita a mano en Ajustes (siempre primero)
+    try:
+        datos_cfg = config_escaner(_config_local_escaner())
+        url_cfg = str(datos_cfg.get("escaner_url") or "").strip()
+        if url_cfg:
+            if not url_cfg.startswith("http"):
+                url_cfg = "http://" + url_cfg
+            candidatos.insert(0, ("Escaner configurado", url_cfg))
+    except Exception as e_cfg:
+        print("Aviso - URL del escaner en la configuracion:", e_cfg)
+
+    # 5) ✅ Se comprueba quien responde de verdad
+    responden, vistos = [], set()
+    for nombre, url in candidatos:
+        url = str(url).rstrip("/")
+        if not url or url in vistos:
+            continue
+        vistos.add(url)
+        if _probar_escl(url, timeout=1.5):
+            responden.append({"nombre": nombre, "id": url})
+    if responden:
+        return responden
+
+    # Si nadie respondio se ofrecen igual (asi el usuario puede probar)
+    equipos = []
+    for nombre, url in candidatos:
+        url = str(url).rstrip("/")
+        if url and url not in [e["id"] for e in equipos]:
+            equipos.append({"nombre": nombre + " (sin respuesta)", "id": url})
     return equipos
 
 
@@ -560,90 +814,177 @@ def _escl_base_url(dispositivo="", config=None):
     return ""
 
 
-def _xml_scan_settings(dpi=300, color="Escala de grises", origen="Cristal (una página a la vez)"):
-    """Peticion de escaneo (eSCL) en XML. Las medidas van en 1/300 de pulgada (A4)."""
+def _xml_scan_settings(dpi=300, color="Escala de grises", origen="Cristal (una página a la vez)",
+                       version="2.1", formato_ext=True, intencion=True,
+                       modo_color=None, fuente=None):
+    """Petición de escaneo (eSCL) en XML. Las medidas van en 1/300 de pulgada (A4).
+
+    Se puede ajustar para probar variantes: hay impresoras que solo aceptan
+    <pwg:DocumentFormat>, otras exigen <scan:DocumentFormatExt>, y algunas solo
+    entienden la versión 2.0 o el modo de color "Grayscale".
+    """
     try:
         dpi = max(75, min(1200, int(str(dpi).strip() or 300)))
     except Exception:
         dpi = 300
-    modo = {"Color": "RGB24", "Escala de grises": "Grayscale8",
-            "Blanco y negro": "BlackAndWhite1"}.get(color, "Grayscale8")
-    fuente = "Feeder" if str(origen).lower().startswith("alimentador") else "Platen"
+    modo = modo_color or {"Color": "RGB24", "Escala de grises": "Grayscale8",
+                          "Blanco y negro": "BlackAndWhite1"}.get(color, "Grayscale8")
+    if fuente is None:
+        fuente = "Feeder" if str(origen).lower().startswith("alimentador") else "Platen"
     ancho = int(round(8.27 * 300))      # A4 = 210 x 297 mm = 8,27 x 11,69 pulgadas
     alto = int(round(11.69 * 300))
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03"'
-        ' xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">'
-        '<pwg:Version>2.1</pwg:Version>'
-        '<pwg:ScanRegions><pwg:ScanRegion>'
-        '<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>'
-        '<pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset>'
-        f'<pwg:Width>{ancho}</pwg:Width><pwg:Height>{alto}</pwg:Height>'
-        '</pwg:ScanRegion></pwg:ScanRegions>'
-        f'<scan:InputSource>{fuente}</scan:InputSource>'
-        f'<scan:ColorMode>{modo}</scan:ColorMode>'
-        f'<scan:Resolution>{dpi}</scan:Resolution>'
-        '<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>'
-        '</scan:ScanSettings>'
-    )
+    partes = ['<?xml version="1.0" encoding="UTF-8"?>',
+              '<scan:ScanSettings xmlns:scan="http://schemas.hp.com/imaging/escl/2011/05/03"',
+              ' xmlns:pwg="http://www.pwg.org/schemas/2010/12/sm">',
+              f'<pwg:Version>{version}</pwg:Version>',
+              '<pwg:ScanRegions><pwg:ScanRegion>',
+              '<pwg:ContentRegionUnits>escl:ThreeHundredthsOfInches</pwg:ContentRegionUnits>',
+              '<pwg:XOffset>0</pwg:XOffset><pwg:YOffset>0</pwg:YOffset>',
+              f'<pwg:Width>{ancho}</pwg:Width><pwg:Height>{alto}</pwg:Height>',
+              '</pwg:ScanRegion></pwg:ScanRegions>',
+              f'<scan:InputSource>{fuente}</scan:InputSource>']
+    if intencion:
+        partes.append('<scan:Intent>Document</scan:Intent>')
+    partes.append(f'<scan:ColorMode>{modo}</scan:ColorMode>')
+    partes.append(f'<scan:Resolution>{dpi}</scan:Resolution>')
+    partes.append('<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>')
+    if formato_ext:
+        partes.append('<scan:DocumentFormatExt>image/jpeg</scan:DocumentFormatExt>')
+    partes.append('</scan:ScanSettings>')
+    return "".join(partes)
+
+
+def _variantes_scan_settings(dpi=300, color="Escala de grises",
+                             origen="Cristal (una página a la vez)"):
+    """Peticiones eSCL que se prueban EN ORDEN: cada impresora acepta unas y otras."""
+    modos = [None]
+    texto_color = str(color).lower()
+    if "gris" in texto_color:
+        modos.append("Grayscale")                 # algunas HP solo aceptan "Grayscale"
+    if "negro" in texto_color:
+        modos.append("BlackAndWhite")
+    fuentes = [None]
+    if str(origen).lower().startswith("alimentador"):
+        fuentes.append("ADF")
+    variantes, vistas = [], set()
+    for version in ("2.1", "2.0"):
+        for ext in (True, False):
+            for modo in modos:
+                for fuente in fuentes:
+                    xml = _xml_scan_settings(dpi=dpi, color=color, origen=origen, version=version,
+                                             formato_ext=ext, modo_color=modo, fuente=fuente)
+                    if xml not in vistas:
+                        vistas.add(xml)
+                        variantes.append(xml)
+    return variantes
+
+
+def _abrir_url(url, datos=None, cabeceras=None, timeout=60):
+    """Abre una URL del escáner. En https acepta el certificado propio de la impresora."""
+    import urllib.request
+    import ssl
+    peticion = urllib.request.Request(url, data=datos, headers=cabeceras or {})
+    if str(url).lower().startswith("https"):
+        try:
+            contexto = ssl._create_unverified_context()   # las impresoras usan certificado propio
+            return urllib.request.urlopen(peticion, timeout=timeout, context=contexto)
+        except Exception:
+            pass
+    return urllib.request.urlopen(peticion, timeout=timeout)
 
 
 def _escanear_mac(carpeta, dispositivo="", dpi=300, color="Escala de grises",
                   origen="Cristal (una página a la vez)", paginas=1, modo=""):
-    """Escaneo en macOS con AirScan/eSCL. Mismo formato de salida que en Windows."""
+    """Escaneo en macOS con AirScan/eSCL. Mismo formato de salida que en Windows.
+
+    Se prueban varias formas de la petición porque no todas las impresoras
+    aceptan lo mismo (unas quieren <scan:DocumentFormatExt>, otras la versión 2.0,
+    otras el modo "Grayscale"...). Si todo falla, se explica exactamente qué pasó.
+    """
     import urllib.request
     import urllib.error
     import re as _re
 
     if "image capture" in str(modo).lower() or "con la ventana" in str(modo).lower():
-        # Modo alternativo: se escanea con Image Capture y luego se lee el archivo
+        # Modo alternativo (siempre funciona): escanear con Image Capture
         try:
             subprocess.Popen(["open", "-a", "Image Capture"])
         except Exception:
             pass
         return {"ok": False, "paginas": [], "escaner": "Image Capture", "aviso": "",
-                "error": "Se abrio Image Capture. Escanee alli, guarde el archivo y despues use "
-                         "\u00ab\U0001F4C4 Desde PDF\u00bb para leerlo con el OCR del sistema."}
+                "error": "Se abrio Image Capture para escanear.\n\n"
+                         "1) Escanee ahi y guarde el archivo (PDF o JPG).\n"
+                         "2) Vuelva al sistema y use \u00ab\U0001F4C4 Desde PDF\u00bb (o "
+                         "\u00ab\U0001F4CE Adjuntar Archivo Manual\u00bb) para leerlo con el OCR del Mac.\n\n"
+                         "Si prefiere el escaneo automático: revise que la impresora esté en la "
+                         "MISMA red wifi y escriba su dirección en Ajustes \u2192 Configuración "
+                         "General \u2192 Escáner (campo URL, ej. http://192.168.1.50/eSCL)."}
 
     base = _escl_base_url(dispositivo, config=None)
     if not base:
         return {"ok": False, "paginas": [], "escaner": "",
                 "aviso": "",
-                "error": "No se encontro ninguna multifuncional por red (AirScan).\n"
-                         "Revise que la impresora este encendida y en la misma red, o escriba su "
-                         "direccion en Ajustes > Configuracion General > Escaner (campo URL)."}
+                "error": "No se encontro ninguna multifuncional por red (AirScan).\n\n"
+                         "\u2022 Revise que la impresora este encendida y en la MISMA red wifi "
+                         "(no en la red de invitados).\n"
+                         "\u2022 Si esta conectada por USB, use el modo \u00abCon Image Capture\u00bb.\n"
+                         "\u2022 O escriba su direccion en Ajustes \u2192 Configuracion General \u2192 "
+                         "Escaner (campo URL, ej. http://192.168.1.50/eSCL)."}
 
     try:
         paginas = max(1, int(str(paginas).strip() or 1))
     except Exception:
         paginas = 1
 
+    # 🔎 Se comprueba que el escaner responda (aviso, no bloquea)
+    aviso_capacidades = ""
+    try:
+        with _abrir_url(base + "/ScannerCapabilities", timeout=8) as respuestas:
+            respuestas.read(200)
+    except Exception as e_cap:
+        aviso_capacidades = ("No se pudo leer la ficha del escaner (%s). " % str(e_cap)[:60])
+        print("Aviso - ScannerCapabilities del escaner:", e_cap)
+
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
     destino = os.path.join(carpeta, "escaneo_" + marca)
     os.makedirs(destino, exist_ok=True)
-    xml = _xml_scan_settings(dpi=dpi, color=color, origen=origen).encode("utf-8")
 
-    peticion = urllib.request.Request(base + "/ScanJobs", data=xml,
-                                      headers={"Content-Type": "text/xml"})
-    try:
-        with urllib.request.urlopen(peticion, timeout=60) as respuesta:
-            ubicacion = respuesta.headers.get("Location") or ""
-    except urllib.error.HTTPError as e:
-        detalle = ""
+    # 📄 Se prueban las variantes de peticion hasta que una sea aceptada
+    ubicacion = ""
+    ultimo_error = ""
+    variantes = _variantes_scan_settings(dpi=dpi, color=color, origen=origen)
+    for indice, xml_texto in enumerate(variantes):
         try:
-            detalle = e.read().decode("utf-8", "ignore")[:200]
-        except Exception:
-            pass
-        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
-                "error": f"El escaner respondio HTTP {e.code}. {detalle}".strip()}
-    except Exception as e:
-        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
-                "error": f"No se pudo hablar con el escaner ({base}): {e}"}
+            peticion = urllib.request.Request(base + "/ScanJobs", data=xml_texto.encode("utf-8"),
+                                              headers={"Content-Type": "text/xml"})
+            with _abrir_url(base + "/ScanJobs", datos=xml_texto.encode("utf-8"),
+                            cabeceras={"Content-Type": "text/xml"}, timeout=60) as respuesta:
+                ubicacion = respuesta.headers.get("Location") or ""
+            if ubicacion:
+                break
+            ultimo_error = "El escaner acepto la orden pero no devolvio donde recoger la imagen."
+        except urllib.error.HTTPError as e:
+            detalle = ""
+            try:
+                detalle = e.read().decode("utf-8", "ignore")[:160]
+            except Exception:
+                pass
+            ultimo_error = "HTTP %s. %s" % (e.code, detalle.strip())
+            print("Aviso - escaneo eSCL variante %d: %s" % (indice + 1, ultimo_error))
+            continue
+        except Exception as e:
+            return {"ok": False, "paginas": [], "escaner": base, "aviso": aviso_capacidades,
+                    "error": ("No se pudo hablar con el escaner (%s): %s\n\n"
+                              "Revise que la impresora este en la MISMA red wifi y que el "
+                              "escaneo por red (AirScan) este activado." % (base, e))}
 
     if not ubicacion:
-        return {"ok": False, "paginas": [], "escaner": base, "aviso": "",
-                "error": "El escaner no devolvio la ubicacion del trabajo de escaneo."}
+        return {"ok": False, "paginas": [], "escaner": base, "aviso": aviso_capacidades,
+                "error": ("El escaner no acepto la orden de escaneo.\n%s\n\n"
+                          "Pruebe: Ajustes \u2192 Configuracion General \u2192 Escaner \u2192 "
+                          "modo \u00abCon Image Capture\u00bb, o escriba la URL del escaner "
+                          "(ej. http://192.168.1.50/eSCL)." % ultimo_error)}
+
     if ubicacion.startswith("/"):
         raiz = _re.match(r"https?://[^/]+", base)
         ubicacion = (raiz.group(0) if raiz else base) + ubicacion
@@ -651,16 +992,16 @@ def _escanear_mac(carpeta, dispositivo="", dpi=300, color="Escala de grises",
     imagenes = []
     for numero in range(1, paginas + 1):
         try:
-            with urllib.request.urlopen(ubicacion + "/NextDocument", timeout=180) as respuesta:
+            with _abrir_url(ubicacion + "/NextDocument", timeout=180) as respuesta:
                 contenido = respuesta.read()
         except urllib.error.HTTPError as e:
             if e.code in (404, 410):
                 break                      # ya no hay mas hojas (fin del alimentador)
-            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": "",
-                    "error": f"No se pudo recibir la imagen (HTTP {e.code})."}
+            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": aviso_capacidades,
+                    "error": "No se pudo recibir la imagen (HTTP %s)." % e.code}
         except Exception as e:
-            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": "",
-                    "error": f"No se pudo recibir la imagen: {e}"}
+            return {"ok": False, "paginas": imagenes, "escaner": base, "aviso": aviso_capacidades,
+                    "error": "No se pudo recibir la imagen: %s" % e}
         if not contenido:
             break
         ruta = os.path.join(destino, "pagina_%02d.jpg" % numero)
@@ -668,7 +1009,7 @@ def _escanear_mac(carpeta, dispositivo="", dpi=300, color="Escala de grises",
             archivo.write(contenido)
         imagenes.append(ruta)
 
-    aviso = "" if imagenes else "El escaner no devolvio ninguna imagen."
+    aviso = aviso_capacidades if imagenes else "El escaner no devolvio ninguna imagen."
     return {"ok": bool(imagenes), "escaner": base, "paginas": imagenes, "aviso": aviso,
             "error": "" if imagenes else (aviso or "No se pudo escanear.")}
 

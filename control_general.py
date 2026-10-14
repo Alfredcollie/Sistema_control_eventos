@@ -2401,10 +2401,34 @@ class ControlGeneralEventos:
                         if not actual and nombres and nombres[0].startswith("("):
                             actual = nombres[0]
                         cmb_escaner.set(actual or nombres[0])
-                        lbl_esc_estado.configure(
-                            text=(f"✅ {len(lista)} equipo(s)" if lista else
-                                  "⚠️ Ninguno: revise que la impresora esté encendida y conectada"),
-                            text_color=("#1e8449" if lista else "#c0392b"))
+                        en_mac = bool(mod_escaner is not None and
+                                      getattr(mod_escaner, "es_mac", lambda: False)())
+                        if lista:
+                            texto_estado = "✅ %d equipo(s)" % len(lista)
+                        elif en_mac:
+                            texto_estado = ("⚠️ Ninguno por red: revise la wifi y el permiso de "
+                                            "«Red local», o escriba la URL del escáner. (Ver ayuda)")
+                        else:
+                            texto_estado = ("⚠️ Ninguno: revise que la impresora esté encendida "
+                                            "y conectada")
+                        lbl_esc_estado.configure(text=texto_estado,
+                                                 text_color=("#1e8449" if lista else "#c0392b"))
+                        if not lista and en_mac:
+                            try:
+                                messagebox.showinfo(
+                                    "No se encontro el escaner",
+                                    "Se buscó la multifuncional por la red (AirScan) y no respondió." + chr(10) + chr(10) +
+                                    "1) La impresora debe estar encendida y en la MISMA red wifi que la Mac "
+                                    "(no en la red de invitados)." + chr(10) + chr(10) +
+                                    "2) Autorice el acceso a la red local: Ajustes del Sistema → "
+                                    "Privacidad y seguridad → Red local → active este programa." + chr(10) + chr(10) +
+                                    "3) Si la impresora está por USB, use el modo «Con Image Capture» y luego "
+                                    "«📄 Desde PDF»." + chr(10) + chr(10) +
+                                    "4) O escriba su dirección en el campo «URL del escáner (Mac)», "
+                                    "por ejemplo: http://192.168.1.50/eSCL",
+                                    parent=getattr(self, "root", None))
+                            except Exception as e_aviso:
+                                print("Aviso - ayuda del escaner en Mac:", e_aviso)
                     except Exception:
                         pass
                 try:

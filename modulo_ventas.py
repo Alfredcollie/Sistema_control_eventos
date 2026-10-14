@@ -327,10 +327,149 @@ class FacturasEmitidasTab:
         else: elementos.sort(key=lambda el: el[0].lower(), reverse=not ascendente)
         for index, (_, item) in enumerate(elementos): self.tabla.move(item, "", index)
 
+    def _padre_mensaje(self):
+        """Ventana que debe quedar delante en los avisos (o la principal)."""
+        try:
+            if "ventana_para_mensaje" in globals():
+                return ventana_para_mensaje(getattr(self, "main_root", None))
+        except Exception:
+            pass
+        return getattr(self, "main_root", None)
+
+    def _cerrar_progreso_escaneo(self, v_prog):
+        try:
+            if v_prog is not None and v_prog.winfo_exists():
+                v_prog.destroy()
+        except Exception:
+            pass
+
+    def escanear_factura_multifuncional(self):
+        """Escanea el comprobante en la multifuncional y lo carga en el formulario.
+
+        Es el mismo flujo que usa el programa de Flota (y el módulo de Compras):
+        escanea, arma el PDF, lo completa con el texto del PDF y deja el formulario
+        listo. Funciona en Windows y en macOS (M1/M2).
+        """
+        try:
+            import escaner
+        except Exception as e:
+            return messagebox.showerror("Escáner", "No se pudo cargar el módulo de escaneo:\n%s" % e,
+                                        parent=self._padre_mensaje())
+        try:
+            if not escaner.sistema_soportado():
+                return messagebox.showinfo(
+                    "Escáner",
+                    "El escaneo con la multifuncional está disponible en Windows y en macOS (M1/M2).",
+                    parent=self._padre_mensaje())
+        except Exception:
+            pass
+        try:
+            config = cargar_configuracion_regional()
+            datos = escaner.config_escaner(config)
+        except Exception as e:
+            return messagebox.showerror("Escáner", "No se pudo leer la configuración del escáner:\n%s" % e,
+                                        parent=self._padre_mensaje())
+
+        modo = str(datos.get("escaner_modo", "Automático (sin ventanas)"))
+        if modo.lower().startswith("con la ventana"):
+            instruccion = "Se abrirá el cuadro de escaneo del sistema."
+        else:
+            instruccion = ("Coloque el comprobante en el escáner (cristal) — %s ppp, %s."
+                           % (datos.get("escaner_dpi", "300"), datos.get("escaner_color", "Escala de grises")))
+            if not datos.get("escaner_dispositivo"):
+                instruccion += ("\n(Si hay varios escáneres, elíjalo en Ajustes → "
+                                "Configuración General → Escáner.)")
+
+        v_prog = ctk.CTkToplevel(self.main_root)
+        v_prog.title("Escaneando comprobante")
+        v_prog.geometry("440x175")
+        v_prog.transient(self.main_root)
+        try:
+            v_prog.grab_set()
+        except Exception:
+            pass
+        ctk.CTkLabel(v_prog, text="🖨️ Escaneando y leyendo el comprobante...",
+                     font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(18, 4))
+        ctk.CTkLabel(v_prog, text=instruccion, font=("Arial", 10), text_color="gray",
+                     justify="center", wraplength=390).pack(pady=(0, 10))
+        barra = ctk.CTkProgressBar(v_prog, width=350, mode="indeterminate")
+        barra.pack(pady=4)
+        barra.start()
+        ctk.CTkLabel(v_prog, text="Esto puede tardar unos segundos.", font=("Arial", 9, "italic"),
+                     text_color="gray").pack(pady=(4, 0))
+        try:
+            traer_al_frente(v_prog)
+        except Exception:
+            pass
+        import threading
+        threading.Thread(target=self._worker_escanear_venta, args=(config, v_prog), daemon=True).start()
+        return v_prog
+
+    def _worker_escanear_venta(self, config, v_prog):
+        """Escanea en segundo plano, arma el PDF y lo aplica al formulario."""
+        try:
+            import escaner
+            datos = escaner.config_escaner(config)
+            carpeta = escaner.carpeta_escaneos(config)
+            try:
+                paginas_pedidas = int(str(datos.get("escaner_paginas") or 1))
+            except Exception:
+                paginas_pedidas = 1
+            escaneo = escaner.escanear(
+                carpeta,
+                dispositivo=datos.get("escaner_dispositivo", ""),
+                dpi=datos.get("escaner_dpi", "300"),
+                color=datos.get("escaner_color", "Escala de grises"),
+                origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+                paginas=paginas_pedidas,
+                optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
+                modo=datos.get("escaner_modo", "Automático (sin ventanas)"))
+            if not escaneo.get("ok"):
+                error = str(escaneo.get("error") or "No se pudo escanear.")
+                return self.main_root.after(0, lambda: (
+                    self._cerrar_progreso_escaneo(v_prog),
+                    messagebox.showerror("Escáner", "No se pudo escanear el comprobante.\n\n" + error,
+                                         parent=self._padre_mensaje())))
+
+            paginas = [str(p) for p in (escaneo.get("paginas") or []) if os.path.exists(str(p))]
+            if not paginas:
+                return self.main_root.after(0, lambda: (
+                    self._cerrar_progreso_escaneo(v_prog),
+                    messagebox.showinfo("Escáner", "El escáner no devolvió ninguna imagen.",
+                                        parent=self._padre_mensaje())))
+            marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf = os.path.join(os.path.dirname(paginas[0]), "Comprobante_Venta_" + marca + ".pdf")
+            try:
+                escaner.imagenes_a_pdf(paginas, pdf)
+            except Exception as e_pdf:
+                print("Aviso - PDF del escaneo:", e_pdf)
+
+            def aplicar():
+                self._cerrar_progreso_escaneo(v_prog)
+                ruta = pdf if os.path.exists(pdf) else paginas[0]
+                try:
+                    self.autocompletar_desde_archivo(ruta)
+                except Exception as e:
+                    messagebox.showerror("Escáner", "Se escaneó, pero no se pudo leer:\n%s" % e,
+                                         parent=self._padre_mensaje())
+
+            return self.main_root.after(0, aplicar)
+        except Exception as e:
+            return self.main_root.after(0, lambda: (
+                self._cerrar_progreso_escaneo(v_prog),
+                messagebox.showerror("Escáner", "No se pudo escanear el comprobante:\n%s" % e,
+                                     parent=self._padre_mensaje())))
+
+
     def autocompletar_desde_pdf(self):
         if pdfplumber is None: return messagebox.showerror("Librería faltante", "No se encontró 'pdfplumber'.")
         ruta = filedialog.askopenfilename(title="Seleccionar Factura PDF de SUNAT", filetypes=[("Archivos PDF", "*.pdf")])
         if not ruta: return
+        return self.autocompletar_desde_archivo(ruta)
+
+    def autocompletar_desde_archivo(self, ruta):
+        """Completa el formulario con el texto del PDF (se use el botón o el escáner)."""
+        if pdfplumber is None: return messagebox.showerror("Librería faltante", "No se encontró 'pdfplumber'.")
         try:
             self.bloquear_autocompletado_ruc = True
             texto_paginas = []
@@ -381,6 +520,10 @@ class FacturasEmitidasTab:
         frame_split = ctk.CTkFrame(self.tab_frame, fg_color="transparent"); frame_split.pack(fill="both", expand=True)
         self.f_form = ctk.CTkScrollableFrame(frame_split, corner_radius=10, width=330, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0")
         self.f_form.pack(side="left", fill="y", padx=(0, 15))
+        ctk.CTkButton(self.f_form, text="🖨️ Escanear con la Multifuncional", fg_color="#8e44ad",
+                      hover_color="#703688", font=("Arial", 12, "bold"),
+                      command=self.escanear_factura_multifuncional).pack(fill="x", padx=10, pady=(10, 5))
+
         ctk.CTkButton(self.f_form, text="📄 Autocompletar desde PDF SUNAT", fg_color="#1f538d", hover_color="#163b65", command=self.autocompletar_desde_pdf).pack(fill="x", padx=10, pady=(10, 15))
         ctk.CTkLabel(self.f_form, text="Tipo de Documento:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.combo_tipo = ctk.CTkComboBox(self.f_form, values=["Factura (18% IGV)", "Boleta (Sin IGV)", "Recibo por Honorarios (8% Retención)", "Recibo por Honorarios (Sin Retención)"], state="readonly", command=self.on_tipo_change)

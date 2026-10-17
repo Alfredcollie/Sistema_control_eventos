@@ -50,6 +50,55 @@ except Exception:
 # (reemplazan a los modulos externos dialogos_seguros, tareas_seguras,
 #  politica_almacenamiento y config_nube del programa original)
 # =========================================================
+def _numero_peru(txt):
+    """Convierte '1,340.78' / '1.340,78' / '1340.78' a float (0.0 si no se puede)."""
+    import re as _re
+    t = _re.sub(r"[^\d.,]", "", str(txt or ""))
+    if not t:
+        return 0.0
+    try:
+        if "," in t and "." in t:
+            if t.rfind(",") > t.rfind("."):
+                t = t.replace(".", "").replace(",", ".")
+            else:
+                t = t.replace(",", "")
+        elif "," in t:
+            partes = t.split(",")
+            t = t.replace(",", ".") if len(partes[-1]) <= 2 else t.replace(",", "")
+        elif t.count(".") > 1:
+            partes = t.split(".")
+            t = ("".join(partes[:-1]) + "." + partes[-1]) if len(partes[-1]) <= 2 else "".join(partes)
+        return float(t)
+    except Exception:
+        return 0.0
+
+
+def monto_del_comprobante(texto):
+    """💵 Importe total leído de un comprobante (0.0 si no se encuentra)."""
+    import re as _re
+    try:
+        lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
+        # 1) la línea que dice TOTAL / IMPORTE / MONTO
+        for l in lineas:
+            bajo = l.upper()
+            if "TOTAL" in bajo or "IMPORTE" in bajo or "MONTO" in bajo:
+                nums = _re.findall(r"\d[\d.,]*", l)
+                if nums:
+                    val = _numero_peru(nums[-1])
+                    if val > 0:
+                        return float(val)
+        # 2) el importe más alto del documento
+        candidatos = []
+        for l in lineas:
+            for n in _re.findall(r"\d[\d.,]{2,}", l):
+                v = _numero_peru(n)
+                if 0 < v < 10000000:
+                    candidatos.append(float(v))
+        return max(candidatos) if candidatos else 0.0
+    except Exception:
+        return 0.0
+
+
 def seleccionar_archivo_dialogo(titulo="Seleccionar archivo", tipos=None, **kwargs):
     """Selector de un solo archivo (usa los dialogos nativos del sistema)."""
     try:
@@ -1213,6 +1262,58 @@ class CalendarioNativo(ctk.CTkToplevel):
         except Exception:
             pass
         self.destroy()
+
+
+def _escanear_con_progreso(parent, etiqueta, mod_escaner, *args, **kwargs):
+    """Escanea mostrando el cuadrito "Escaneando…" y lo cierra al terminar.
+
+    El escaneo es sincrónico (así el resultado nunca se pierde); el cuadrito se
+    pinta antes de empezar para que el usuario vea que está trabajando.
+    """
+    try:
+        parent = parent or getattr(tk, "_default_root", None)
+    except Exception:
+        parent = None
+    prog = None
+    try:
+        prog = ctk.CTkToplevel(parent)
+        prog.title("Escaneando")
+        prog.geometry("450x165")
+        try:
+            prog.transient(parent)
+        except Exception:
+            pass
+        try:
+            prog.grab_set()
+        except Exception:
+            pass
+        ctk.CTkLabel(prog, text="🖨️ Escaneando %s..." % (etiqueta or "el documento"),
+                     font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(20, 4))
+        ctk.CTkLabel(prog, text="Coloque el documento en el escáner (cristal).\nEspere unos segundos…",
+                     font=("Arial", 10), text_color="gray", justify="center").pack()
+        barra = ctk.CTkProgressBar(prog, width=350, mode="indeterminate")
+        barra.pack(pady=12)
+        barra.start()
+        try:
+            prog.update_idletasks()
+            prog.update()
+        except Exception:
+            pass
+    except Exception as e_prog:
+        print("[Escáner] No se pudo mostrar el progreso:", e_prog)
+        prog = None
+    try:
+        return mod_escaner.escanear(*args, **kwargs)
+    finally:
+        if prog is not None:
+            try:
+                prog.grab_release()
+            except Exception:
+                pass
+            try:
+                prog.destroy()
+            except Exception:
+                pass
 
 
 class ModuloBancoApp:
@@ -2848,6 +2949,156 @@ class ModuloBancoApp:
         finally:
             liberar_conexion(conn)
 
+    def escanear_comprobante_pago(self, padre, al_terminar):
+        """🖨️ Escanea el comprobante de pago con la multifuncional y arma un PDF."""
+        try:
+            import escaner
+        except Exception as e:
+            messagebox.showerror("Escáner", "No se pudo cargar el módulo de escaneo:\n%s" % e, parent=padre)
+            return al_terminar("")
+        try:
+            if not escaner.sistema_soportado():
+                messagebox.showinfo("Escáner", "El escaneo con la multifuncional está disponible "
+                                    "en Windows y en macOS (M1/M2).", parent=padre)
+                return al_terminar("")
+            # La configuración se carga desde control_general (regional o general)
+            config = {}
+            try:
+                import control_general
+                cargador = (getattr(control_general, "cargar_configuracion_regional", None)
+                            or getattr(control_general, "cargar_configuracion_general", None))
+                if cargador:
+                    config = cargador() or {}
+            except Exception:
+                try:
+                    config = cargar_configuracion_regional()
+                except Exception:
+                    config = {}
+        except Exception as e:
+            messagebox.showerror("Escáner", "No se pudo leer la configuración del escáner:\n%s" % e, parent=padre)
+            return al_terminar("")
+
+        ventana = padre if padre is not None else getattr(self, "main_root", None)
+        prog = ctk.CTkToplevel(ventana)
+        prog.title("Escaneando comprobante de pago")
+        prog.geometry("430x150")
+        try:
+            prog.transient(ventana)
+            prog.grab_set()
+        except Exception:
+            pass
+        ctk.CTkLabel(prog, text="🖨️ Escaneando el comprobante de pago...",
+                     font=("Arial", 12, "bold"), text_color="#0e7490").pack(pady=(20, 4))
+        ctk.CTkLabel(prog, text="Coloque el comprobante en el escáner (cristal).",
+                     font=("Arial", 10), text_color="gray").pack()
+        barra = ctk.CTkProgressBar(prog, width=330, mode="indeterminate")
+        barra.pack(pady=10)
+        barra.start()
+
+        def tarea():
+            resultado = {"ok": False, "pdf": "", "error": ""}
+            try:
+                datos = escaner.config_escaner(config)
+                carpeta = escaner.carpeta_escaneos(config)
+                esc = _escanear_con_progreso(None, "el comprobante", escaner, 
+                    carpeta,
+                    dispositivo=datos.get("escaner_dispositivo", ""),
+                    dpi=datos.get("escaner_dpi", "300"),
+                    color=datos.get("escaner_color", "Escala de grises"),
+                    origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+                    paginas=1,
+                    optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
+                    modo=datos.get("escaner_modo", "Automático (sin ventanas)"))
+                if esc.get("ok") and esc.get("paginas"):
+                    marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    pdf = os.path.join(os.path.dirname(esc["paginas"][0]),
+                                       "Comprobante_Pago_%s.pdf" % marca)
+                    escaner.imagenes_a_pdf(esc["paginas"], pdf)
+                    resultado.update({"ok": True, "pdf": pdf})
+                    # 🧠 OCR: se leen N° de operación, fecha e importe del comprobante
+                    try:
+                        texto_ocr = escaner.texto_de_resultados(escaner.ocr_paginas(esc["paginas"]))
+                    except Exception as e_ocr:
+                        texto_ocr = ""
+                        print("Aviso - OCR del comprobante:", e_ocr)
+                    try:
+                        from modulo_compras import (extraer_numero_operacion,
+                                                    extraer_fecha_comprobante)
+                        resultado["numero"] = extraer_numero_operacion(texto_ocr)
+                        resultado["fecha"] = extraer_fecha_comprobante(texto_ocr)
+                    except Exception as e_op:
+                        print("Aviso - número/fecha del comprobante:", e_op)
+                    try:
+                        resultado["monto"] = monto_del_comprobante(texto_ocr)
+                    except Exception as e_mo:
+                        print("Aviso - monto del comprobante:", e_mo)
+                else:
+                    resultado["error"] = esc.get("error") or "No se pudo escanear."
+            except Exception as e:
+                resultado["error"] = str(e)
+            resultado["listo"] = True
+
+            def terminar():
+                try:
+                    prog.grab_release()
+                    prog.destroy()
+                except Exception:
+                    pass
+                if not resultado["ok"]:
+                    messagebox.showerror("Escáner", resultado["error"] or "No se pudo escanear.", parent=padre)
+                try:
+                    al_terminar(resultado["pdf"], resultado.get("numero", ""),
+                                resultado.get("fecha", ""), resultado.get("monto", 0.0))
+                except TypeError:
+                    try:
+                        al_terminar(resultado["pdf"], resultado.get("numero", ""),
+                                    resultado.get("fecha", ""))
+                    except TypeError:
+                        try:
+                            al_terminar(resultado["pdf"])
+                        except TypeError:
+                            al_terminar()
+            # Se escanea en el mismo hilo: así el resultado SIEMPRE llega
+            tarea()
+            terminar()
+
+    def _comprobante_de_movimiento(self, registro):
+        """📎 Comprobante de pago de un movimiento del banco ('' si no hay)."""
+        try:
+            ruta = str(registro.get("archivo_ruta") or "").strip()
+            if ruta:
+                return ruta
+            id_gasto = int(registro.get("id_gasto_compras") or 0)
+            conn = conectar_db(silencioso=True)
+            if not conn:
+                return ""
+            try:
+                with conn.cursor() as c:
+                    if not id_gasto:
+                        mov_id = registro.get("id")
+                        if mov_id:
+                            c.execute("SELECT COALESCE(id_gasto_compras, 0) "
+                                      "FROM conciliacion_bancaria WHERE id = %s", (mov_id,))
+                            fila = c.fetchone()
+                            id_gasto = int(fila[0] or 0) if fila else 0
+                    if not id_gasto:
+                        return ""
+                    c.execute("SELECT COALESCE(archivo_ruta, '') FROM facturas_recibidas WHERE id = %s",
+                              (id_gasto,))
+                    fila = c.fetchone()
+                    ruta = str(fila[0] or "").strip() if fila else ""
+                    if ruta:
+                        return ruta
+                    c.execute("SELECT COALESCE(archivo_ruta, '') FROM pagos_comprobantes "
+                              "WHERE id_factura = %s ORDER BY id DESC LIMIT 1", (id_gasto,))
+                    fila = c.fetchone()
+                    return str(fila[0] or "").strip() if fila else ""
+            finally:
+                liberar_conexion(conn)
+        except Exception as e:
+            print("[Banco] No se pudo leer el comprobante del movimiento:", e)
+            return ""
+
     def _datos_iniciales_pago(self, registro, cats, principales):
         """Datos de un pago ya registrado, para abrir la ventana en modo edición.
 
@@ -2865,6 +3116,7 @@ class ModuloBancoApp:
             "comision": float(registro.get("comision") or 0),
             "interbancario": bool(registro.get("interbancario")),
             "es_cruzada": bool(registro.get("es_cruzada")),
+            "comprobante": self._comprobante_de_movimiento(registro),
             "descripcion": "",
         }
         libres = []
@@ -3128,6 +3380,88 @@ class ModuloBancoApp:
         # UNIFICACIÓN CON COMPRAS CRUZADAS (pago a tercero)
         # Al marcar el check se habilitan los datos del tercero y el PDF del soporte
         # ------------------------------------------------------------------
+        # 📎 COMPROBANTE DE PAGO (opcional): cargar, escanear o ver el voucher
+        ruta_comprobante = {"ruta": str(datos_ini.get("comprobante") or "")}
+        ctk.CTkLabel(f, text="📎 Comprobante de pago (opcional):",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(6, 0))
+        f_comp = ctk.CTkFrame(f, fg_color="transparent")
+        f_comp.pack(fill="x", pady=(0, 4))
+        lbl_comprobante = ctk.CTkLabel(f, text="Sin comprobante cargado", font=("Arial", 10),
+                                       text_color="#999999", anchor="w", justify="left")
+
+        def actualizar_lbl_comprobante():
+            ruta = ruta_comprobante.get("ruta") or ""
+            if ruta:
+                lbl_comprobante.configure(text="📎 " + os.path.basename(ruta), text_color="#1e8449")
+            else:
+                lbl_comprobante.configure(text="Sin comprobante cargado", text_color="#999999")
+
+        def cargar_comprobante():
+            try:
+                from tkinter import filedialog
+                ruta = filedialog.askopenfilename(
+                    parent=v, title="Seleccionar el comprobante de pago",
+                    filetypes=[("PDF o imagen", "*.pdf *.jpg *.jpeg *.png"), ("Todos los archivos", "*.*")])
+            except Exception as e:
+                return messagebox.showerror("Comprobante", "No se pudo abrir el selector: " + str(e), parent=v)
+            if ruta:
+                ruta_comprobante["ruta"] = ruta
+                actualizar_lbl_comprobante()
+
+        def escanear_comprobante():
+            def al_terminar(ruta, numero="", fecha_leida="", monto_leido=0.0):
+                if not ruta:
+                    return
+                ruta_comprobante["ruta"] = ruta
+                actualizar_lbl_comprobante()
+                avisos = []
+                try:
+                    if numero and not ent_operacion.get().strip():
+                        ent_operacion.insert(0, numero)
+                        avisos.append("N° de operación: " + numero)
+                except Exception:
+                    pass
+                try:
+                    if fecha_leida:
+                        ent_fecha.delete(0, "end")
+                        ent_fecha.insert(0, fecha_leida)
+                        avisos.append("Fecha: " + fecha_leida)
+                except Exception:
+                    pass
+                try:
+                    if monto_leido and not ent_monto.get().strip():
+                        from modulo_compras import formatear_numero_entrada
+                        ent_monto.insert(0, formatear_numero_entrada("%.2f" % float(monto_leido)))
+                        avisos.append("Monto: %.2f" % float(monto_leido))
+                except Exception:
+                    pass
+                detalle = ("\n\nSe completó: " + " · ".join(avisos)) if avisos else ""
+                messagebox.showinfo("Comprobante",
+                                    "Se escaneó el comprobante de pago:\n"
+                                    + os.path.basename(ruta) + detalle, parent=v)
+            self.escanear_comprobante_pago(v, al_terminar)
+
+        def ver_comprobante():
+            ruta = ruta_comprobante.get("ruta") or ""
+            if ruta and os.path.isfile(ruta):
+                abrir_documento(ruta)
+            elif ruta:
+                messagebox.showwarning("Comprobante", "El archivo ya no está en esa ubicación:\n" + ruta, parent=v)
+            else:
+                messagebox.showinfo("Comprobante", "Todavía no ha cargado el comprobante de pago.", parent=v)
+
+        ctk.CTkButton(f_comp, text="📎 Cargar", width=110, height=30, font=("Arial", 11, "bold"),
+                      fg_color="#16a085", hover_color="#11806a",
+                      command=cargar_comprobante).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(f_comp, text="🖨️ Escanear", width=120, height=30, font=("Arial", 11, "bold"),
+                      fg_color="#0e7490", hover_color="#155e75",
+                      command=escanear_comprobante).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(f_comp, text="👁️ Ver", width=70, height=30, font=("Arial", 11, "bold"),
+                      fg_color="#5d6d7e", hover_color="#4a5967",
+                      command=ver_comprobante).pack(side="left", padx=(6, 0))
+        lbl_comprobante.pack(anchor="w", pady=(0, 6))
+        actualizar_lbl_comprobante()
+
         var_cruzada = tk.BooleanVar(value=False)
         chk_cruzada = ctk.CTkCheckBox(f, text="🔁 Es compra cruzada (factura pagada por un tercero)",
                                       font=("Arial", 11, "bold"), variable=var_cruzada)
@@ -3405,7 +3739,8 @@ class ModuloBancoApp:
                     "categoria": categoria_gasto, "proveedor": proveedor_gasto,
                     "evento": evento, "banco": construir_etiqueta_banco(banco),
                     "numero_operacion": numero_operacion,
-                    "soporte": estado_cruzada.get("soporte", "") if isinstance(estado_cruzada, dict) else "",
+                    "soporte": (ruta_comprobante.get("ruta") or
+                                 (estado_cruzada.get("soporte", "") if isinstance(estado_cruzada, dict) else "")),
                     "id_gasto": id_gasto_previo,
                     **detalle_igv,
                 }, id_movimiento=id_movimiento, parent=v)
@@ -3721,9 +4056,11 @@ class ModuloBancoApp:
                     c.execute("""
                         UPDATE pagos_comprobantes
                         SET monto_pagado=%s, fecha_pago=%s, cuenta_origen=%s, categoria_suministro=%s,
-                            proveedor_nombre=%s, numero_operacion=%s
+                            proveedor_nombre=%s, numero_operacion=%s,
+                            archivo_ruta=COALESCE(NULLIF(%s, ''), archivo_ruta)
                         WHERE id_factura=%s
-                    """, (total, fecha, banco_txt, categoria, proveedor, num_operacion, id_gasto))
+                    """, (total, fecha, banco_txt, categoria, proveedor, num_operacion,
+                          soporte_bd, id_gasto))
                 else:
                     c.execute("""
                         INSERT INTO facturas_recibidas

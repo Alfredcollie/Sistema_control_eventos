@@ -250,7 +250,13 @@ try {
             $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($flujo)) ([Windows.Graphics.Imaging.BitmapDecoder])
             $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
             $res = Await ($motor.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-            $texto = [string]$res.Text
+            # Se unen las lineas del OCR (no todo en una sola linea): asi el
+            # sistema puede leer cada dato en su renglon. Vale en Windows;
+            # macOS (Vision) y Tesseract ya devuelven lineas separadas.
+            $lineas_ocr = @()
+            try { foreach ($ln in $res.Lines) { $lineas_ocr += [string]$ln.Text } } catch { }
+            if ($lineas_ocr.Count -gt 0) { $texto = ($lineas_ocr -join "`n") }
+            else { $texto = [string]$res.Text }
             $flujo.Dispose()
         } catch { $texto = '' }
         $resultados += [pscustomobject]@{ ruta = [string]$ruta; texto = $texto }
@@ -334,6 +340,30 @@ def listar_escaneres():
             for e in escaneres]
 
 
+def _aviso_sin_escaner():
+    """Mensaje claro cuando no hay ningún escáner conectado o encendido."""
+    return ("No hay conexión con el escáner.\n\n"
+            "Verifique que la impresora/escáner esté ENCENDIDO y conectado "
+            "(cable USB o a la misma red WiFi), con papel en la bandeja. "
+            "Luego intente escanear de nuevo.")
+
+
+def _endurecer_error(resultado):
+    """Si no se pudo escanear y no hay escáner visible, avisa que no hay conexión."""
+    try:
+        if resultado and not (resultado.get("paginas") or []):
+            try:
+                hay = bool(listar_escaneres())
+            except Exception:
+                hay = False
+            _err = str(resultado.get("error") or "").lower()
+            if not hay or "no se detecto" in _err or "no se detectó" in _err:
+                resultado["error"] = _aviso_sin_escaner()
+    except Exception:
+        pass
+    return resultado
+
+
 def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
              origen="Cristal (una página a la vez)", paginas=1, optimizar=True,
              modo="Automático (sin ventanas)"):
@@ -348,8 +378,9 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
     if es_mac():
         # macOS (M1/M2): AirScan/eSCL, sin instalar nada
         try:
-            return _escanear_mac(carpeta, dispositivo=dispositivo, dpi=dpi, color=color,
-                                 origen=origen, paginas=paginas, modo=modo)
+            return _endurecer_error(_escanear_mac(carpeta, dispositivo=dispositivo, dpi=dpi,
+                                                  color=color, origen=origen,
+                                                  paginas=paginas, modo=modo))
         except Exception as e:
             return {"ok": False, "paginas": [], "escaner": "",
                     "error": ("No se pudo escanear en este Mac: " + str(e) +
@@ -367,6 +398,23 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
         paginas = max(1, int(str(paginas).strip() or 1))
     except Exception:
         paginas = 1
+
+    # 🔧 Si el identificador guardado ya no existe (Windows a veces le agrega un
+    #    sufijo al DeviceID), se usa el que el sistema detecta ahora. Se hace
+    #    SOLO al escanear, para no tocar la detección de la ventana de ajustes.
+    try:
+        if dispositivo:
+            _detectados = [str(d.get("id") or "") for d in listar_escaneres()]
+            if _detectados and dispositivo not in _detectados:
+                _elegido = ""
+                for _idd in _detectados:
+                    if _idd.startswith(dispositivo) or dispositivo.startswith(_idd):
+                        _elegido = _idd
+                        break
+                dispositivo = _elegido or _detectados[0]
+                print("[Escáner] Dispositivo ajustado a:", dispositivo)
+    except Exception as e_aj:
+        print("[Escáner] No se pudo validar el dispositivo:", e_aj)
 
     marca = datetime.now().strftime("%Y%m%d_%H%M%S")
     destino = os.path.join(carpeta, "escaneo_" + marca)
@@ -403,6 +451,7 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
             aviso = (aviso + " El escaner estaba ocupado; se reintento.").strip()
             time.sleep(4)
 
+
     convertidas = []
     for ruta in paginas_ok:
         # Siempre se convierte a JPEG real (WIA guarda BMP con nombre .jpg);
@@ -410,7 +459,7 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
         convertidas.append(_optimizar_imagen(ruta, max_lado=2600 if optimizar else None,
                                               calidad=72 if optimizar else 92) or ruta)
     paginas_ok = convertidas
-    return {
+    return _endurecer_error({
         "ok": bool(paginas_ok),
         "escaner": escaner_usado,
         "paginas": paginas_ok,
@@ -418,7 +467,7 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
         "error": error or ("" if paginas_ok else
                            "No se detecto ningun escaner. Encienda la impresora, revise la conexion "
                            "(USB o red) y vuelva a intentarlo."),
-    }
+    })
 
 
 def _error_ocupado(error):

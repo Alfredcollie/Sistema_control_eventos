@@ -159,6 +159,57 @@ def ajustar_al_area_de_trabajo(ventana):
         pass
 
 
+def _toplevels_visibles(padre):
+    """Recorre el árbol y devuelve los Toplevel visibles (los módulos)."""
+    encontrados = []
+    try:
+        hijos = padre.winfo_children()
+    except Exception:
+        return encontrados
+    for w in hijos:
+        try:
+            if isinstance(w, tk.Toplevel):
+                if w.winfo_exists() and w.winfo_viewable():
+                    encontrados.append(w)
+                continue
+        except Exception:
+            continue
+        encontrados.extend(_toplevels_visibles(w))
+    return encontrados
+
+
+def ventana_al_frente(root):
+    """Ventana que está DELANTE: el módulo o diálogo que el usuario tiene a la vista."""
+    if root is None:
+        return None
+    # 1) Orden de apilamiento REAL del sistema (de abajo hacia arriba). Sirve
+    #    aunque el módulo se cree dentro de un frame y no sea hijo directo.
+    try:
+        orden = list(root.tk.splitlist(root.tk.eval("wm stackorder %s" % root._w)))
+    except Exception:
+        orden = []
+    for nombre in reversed(orden):
+        if nombre == str(root._w):
+            continue
+        try:
+            w = root.nametowidget(nombre)
+        except Exception:
+            continue
+        try:
+            if w.winfo_exists() and w.winfo_viewable():
+                return w
+        except Exception:
+            continue
+    # 2) Respaldo: el último Toplevel visible del árbol
+    try:
+        visibles = _toplevels_visibles(root)
+        if visibles:
+            return visibles[-1]
+    except Exception:
+        pass
+    return root
+
+
 def maximizar_ventana(ventana):
     """Maximiza ventanas sin errores en macOS ni Windows."""
     try:
@@ -1042,11 +1093,36 @@ class ControlGeneralEventos:
             maximizar_ventana(self.root)
 
         def alternar_pantalla_completa():
-            """⛶ Pone la ventana a pantalla completa y esconde el menú lateral.
+            """⛶ Pone a pantalla completa la ventana que está ADELANTE.
 
-            Para volver se usa el botón flotante 'Salir de Pantalla Completa'
-            (arriba a la derecha) o la tecla Escape / F11.
+            Si hay un módulo abierto (ventana secundaria), se maximiza ESE; si no,
+            se usa la ventana principal y se esconde el menú lateral.
             """
+            destino = ventana_al_frente(self.root)
+            if destino is not None and destino is not self.root:
+                try:
+                    activo = bool(destino.attributes("-fullscreen"))
+                except Exception:
+                    activo = bool(getattr(destino, "_pantalla_completa_activa", False))
+                try:
+                    if not activo:
+                        destino._geometria_previa = destino.geometry()
+                        destino.attributes("-fullscreen", True)
+                        destino._pantalla_completa_activa = True
+                        destino.bind("<Escape>", lambda _e: alternar_pantalla_completa())
+                    else:
+                        destino.attributes("-fullscreen", False)
+                        try:
+                            destino.update_idletasks()
+                        except Exception:
+                            pass
+                        geo = getattr(destino, "_geometria_previa", "")
+                        if geo:
+                            destino.geometry(geo)
+                        destino._pantalla_completa_activa = False
+                except Exception:
+                    maximizar_ventana(destino)
+                return
             if getattr(self, "modo_pantalla_completa", False):
                 _salir_de_pantalla_completa()
                 return

@@ -14,9 +14,17 @@ bcrypt==4.1.2
 # --- Llavero del sistema (credenciales Supabase) ---
 keyring>=24.0
 
+# --- Cifrado del token de Rclone (sincronización en la nube) ---
+cryptography>=42.0
+
 # --- Lectura de PDF (facturas SUNAT / órdenes) ---
 pdfplumber>=0.11.0
 
 # --- Exportación a Excel/CSV (opcional, usado en reportes) ---
 openpyxl>=3.1.0
 pandas>=2.1.0
+
+
+# macOS (M1/M2): OCR con el motor nativo del sistema (Vision)
+pyobjc-framework-Vision ; sys_platform == "darwin"
+pyobjc-framework-Quartz ; sys_platform == "darwin"

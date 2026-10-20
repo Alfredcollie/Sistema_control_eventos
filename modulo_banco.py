@@ -3554,10 +3554,11 @@ class ModuloBancoApp:
                         c.execute("""INSERT INTO conciliacion_bancaria
                             (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado, fecha_conciliacion)
                             VALUES (%s,%s,%s,%s,%s,%s,'manual',0,'conciliado',%s)""",
-                            (banco.get("banco", ""), banco.get("cuenta", ""), f.get("fecha", ""),
+                            (banco.get("banco", ""), banco.get("cuenta", ""),
+                             fecha_para_mostrar(f.get("fecha", "")),
                              f.get("descripcion", ""), monto,
                              "ingreso" if monto >= 0 else "egreso",
-                             datetime.now().strftime("%Y-%m-%d")))
+                             datetime.now().strftime("%d/%m/%Y")))
                         agregados += 1
                     except Exception as e:
                         print("[Conciliación] No se pudo agregar faltante:", e)
@@ -3738,7 +3739,8 @@ class ModuloBancoApp:
                 origen = f.get("origen", "") or ""
                 idm = int(f.get("id", 0) or 0)
                 tabla = f.get("tabla", "") or ""
-                fecha = f.get("fecha", "") or ""
+                # 📅 Siempre dd/mm/aaaa (las líneas del PDF llegan en ISO)
+                fecha = fecha_para_mostrar(f.get("fecha", "") or "")
                 monto = float(f.get("monto", 0) or 0)
                 desc = f.get("descripcion", "") or ""
                 banco_nombre = banco.get("banco", "")
@@ -3766,7 +3768,7 @@ class ModuloBancoApp:
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'conciliado',%s)""",
                         (banco_nombre, banco.get("cuenta", ""), fecha, desc, monto,
                          f.get("tipo", "ingreso"), origen_persist, idm,
-                         datetime.now().strftime("%Y-%m-%d")))
+                         datetime.now().strftime("%d/%m/%Y")))
                     conn.commit()
                 return True
         except Exception as e:

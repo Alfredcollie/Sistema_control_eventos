@@ -20,6 +20,7 @@ import urllib.request
 import ssl
 import bcrypt
 import subprocess
+import shutil
 import threading
 import webbrowser
 from datetime import datetime, timedelta
@@ -49,7 +50,11 @@ if BASE_DIR not in sys.path:
 
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
-from app_paths import CONFIG_FILE, cargar_config_local
+from app_paths import CONFIG_FILE, cargar_config_local, DATA_DIR, obtener_device_id
+from tareas_seguras import ejecutar_en_hilo
+from config_nube import (cargar_rclone_sync, registrar_rclone_sync, borrar_rclone_sync,
+                         obtener_rclone_token, guardar_rclone_token, borrar_rclone_token,
+                         actualizar_cuenta_remotos)
 
 # 🏦 Cuentas bancarias del sistema (las comparten Configuración General,
 # el módulo de Bancos y el registro de cobros de Ventas).
@@ -583,6 +588,325 @@ def obtener_comando_rclone():
                 return r
     return "rclone"
 
+# =========================================================
+# CONFIG Y TOKEN DE RCLONE COMPARTIDO (cifrado en Supabase)
+# =========================================================
+_config_rclone_asegurada = False
+
+
+def _ruta_config_rclone_por_defecto():
+    """Mejor intento de la ruta de config que rclone usa por defecto."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Roaming"))
+        return os.path.join(base, "rclone", "rclone.conf")
+    return os.path.expanduser("~/.config/rclone/rclone.conf")
+
+
+def _asegurar_config_rclone():
+    """Devuelve la ruta del rclone.conf que controla la app (en DATA_DIR).
+
+    La primera vez, si ya existía un enlace hecho con el rclone.conf por defecto,
+    lo copiamos para no perder la cuenta ya vinculada.
+    """
+    global _config_rclone_asegurada
+    ruta = DATA_DIR / "rclone.conf"
+    try:
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    if not _config_rclone_asegurada:
+        _config_rclone_asegurada = True
+        if not ruta.exists():
+            origen = _ruta_config_rclone_por_defecto()
+            if origen and os.path.exists(origen):
+                try:
+                    shutil.copy2(origen, str(ruta))
+                except Exception:
+                    pass
+    return str(ruta)
+
+
+def _argumentos_config_rclone():
+    """Flags globales para que rclone use siempre nuestro rclone.conf."""
+    return ["--config", _asegurar_config_rclone()]
+
+
+def sincronizar_token_rclone_local():
+    """Descarga el token compartido (cifrado) desde Supabase y, si es válido y
+    distinto, lo escribe en el rclone.conf local. Así los equipos esclavos ven
+    los mismos archivos de Google Drive sin volver a vincular la cuenta."""
+    try:
+        texto = obtener_rclone_token()
+        if not texto:
+            return False
+        ruta = _asegurar_config_rclone()
+        actual = ""
+        if os.path.exists(ruta):
+            try:
+                with open(ruta, "r", encoding="utf-8") as f:
+                    actual = f.read()
+            except Exception:
+                pass
+        if texto == actual:
+            return False
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write(texto)
+        return True
+    except Exception:
+        return False
+
+
+def subir_token_rclone_nube():
+    """Lee el rclone.conf local y lo sube cifrado a Supabase. Solo lo invoca el
+    equipo propietario del enlace Rclone."""
+    try:
+        ruta = _asegurar_config_rclone()
+        if not os.path.exists(ruta):
+            return False
+        with open(ruta, "r", encoding="utf-8") as f:
+            texto = f.read()
+        if not texto.strip():
+            return False
+        guardado = guardar_rclone_token(texto)
+        # Se publica también la IDENTIDAD de las cuentas (remote -> huella estable,
+        # sin el access_token que rclone renueva cada hora). Así los demás equipos
+        # verifican que usan la misma cuenta sin depender del token.
+        try:
+            from politica_almacenamiento import identidad_local_actual
+            from config_nube import actualizar_cuenta_remotos
+            actualizar_cuenta_remotos(identidad_local_actual(), obtener_device_id())
+        except Exception:
+            pass
+        return guardado
+    except Exception:
+        return False
+
+
+def normalizar_ruta_local(ruta):
+    """Convierte rutas locales a una ruta válida del sistema actual.
+
+    Si la configuración guarda una ruta absoluta de Windows (ej: C:\\Users\\...
+    o C:/Users/...) y el programa corre en macOS/Linux, esa ruta no existe y
+    debe ignorarse (el usuario elegirá una carpeta válida en cada equipo).
+    """
+    if not ruta:
+        return ""
+    ruta = ruta.strip()
+    if sys.platform != "win32":
+        # Detectar prefijo de unidad de Windows (C:, D:, ...) sin importar el separador
+        if len(ruta) >= 2 and ruta[1] == ":" and ruta[0].isalpha():
+            return ""
+        # Normalizar separadores de ruta para el sistema actual
+        ruta = ruta.replace("\\", "/")
+    return ruta
+
+
+def _carpeta_archivos_programa(ruta_drive=""):
+    """Carpeta donde se guardan los archivos generados por el programa.
+    Usa la ruta_drive configurada si es válida y escribible; si no, la carpeta
+    del programa. Es el mismo lugar donde se guardan cobranzas, órdenes, etc."""
+    ruta = normalizar_ruta_local(ruta_drive or "")
+    if ruta:
+        ruta = os.path.expanduser(ruta)
+        if os.path.isdir(ruta):
+            try:
+                prueba = os.path.join(ruta, ".escritura_programa")
+                with open(prueba, "w", encoding="utf-8") as f:
+                    f.write("x")
+                os.remove(prueba)
+                return ruta
+            except Exception:
+                pass
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def limpiar_basura_macos(ruta_drive="", borrar_nube=True):
+    """Elimina los archivos basura de macOS (.DS_Store y ._*) de la carpeta local
+    de este equipo y de la carpeta de la nube.
+
+    Devuelve (ok, mensaje).
+    """
+    config = cargar_configuracion_general()
+    local = os.path.expanduser(normalizar_ruta_local(ruta_drive or config.get("ruta_drive", "")))
+    remote = str(config.get("rclone_remote", "") or "").strip()
+    nube = str(config.get("rclone_ruta_nube", "") or "").strip()
+
+    es_basura = lambda n: n.startswith(".DS_Store") or n.startswith("._")   # noqa: E731
+
+    borrados_local = 0
+    if local and os.path.isdir(local):
+        for raiz, _carpetas, archivos in os.walk(local):
+            for nombre in archivos:
+                if es_basura(nombre):
+                    try:
+                        os.remove(os.path.join(raiz, nombre))
+                        borrados_local += 1
+                    except Exception:
+                        pass
+
+    lineas = [f"🧹 Limpieza de archivos basura de macOS (.DS_Store)",
+              f"Carpeta local: {local or '(no configurada)'}",
+              f"   Archivos eliminados en local: {borrados_local}"]
+
+    if not borrar_nube or not remote or not nube:
+        return True, "\n".join(lineas)
+
+    cmd = obtener_comando_rclone()
+    args_cfg = _argumentos_config_rclone()
+    ruta_remota = f"{remote}{nube}" if remote.endswith(":") else f"{remote}:{nube}"
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000
+
+    # Si el equipo tiene filtros globales por variable de entorno (RCLONE_EXCLUDE),
+    # la limpieza debe ignorarlos: si no, los archivos basura no se verían ni borrarían.
+    entorno_limpio = {k: v for k, v in os.environ.items()
+                      if k.upper() not in ("RCLONE_EXCLUDE", "RCLONE_EXCLUDE_FROM",
+                                           "RCLONE_FILTER", "RCLONE_FILTER_FROM",
+                                           "RCLONE_INCLUDE", "RCLONE_INCLUDE_FROM")}
+
+    def _correr(args, timeout):
+        return subprocess.run([cmd, *args_cfg, *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout,
+                              env=entorno_limpio, **kwargs)
+
+    try:
+        previos = _correr(["lsf", ruta_remota, "--recursive", "--files-only",
+                           "--include", ".DS_Store*", "--include", "._*"], 1800)
+        cantidad = len([l for l in (previos.stdout or "").splitlines() if l.strip()])
+    except Exception:
+        cantidad = -1
+
+    try:
+        res = _correr(["delete", ruta_remota, "--include", ".DS_Store*", "--include", "._*",
+                       "--drive-use-trash=false", "--fast-list", "--quiet"], 3600)
+        if res.returncode != 0:
+            detalle = (res.stderr or "").strip()[:250]
+            return False, "\n".join(lineas + [f"Nube: no se pudo completar la limpieza.\n{detalle}"])
+    except subprocess.TimeoutExpired:
+        return False, "\n".join(lineas + ["Nube: la limpieza tardó demasiado (se puede repetir luego)."])
+    except Exception as e:
+        return False, "\n".join(lineas + [f"Nube: error al limpiar: {e}"])
+
+    try:
+        restantes = _correr(["lsf", ruta_remota, "--recursive", "--files-only",
+                             "--include", ".DS_Store*", "--include", "._*"], 1800)
+        quedan = len([l for l in (restantes.stdout or "").splitlines() if l.strip()])
+    except Exception:
+        quedan = -1
+
+    if cantidad >= 0:
+        lineas.append(f"   Archivos en la nube antes de limpiar: {cantidad}")
+    lineas.append(f"   Archivos en la nube ahora: {quedan if quedan >= 0 else 'no se pudo verificar'}")
+    lineas.append("✅ Limpieza terminada.")
+    return True, "\n".join(lineas)
+
+
+def verificar_sincronizacion_carpeta():
+    """Comprueba que la carpeta local de este equipo esté REALMENTE enlazada con
+    la nube del equipo principal (usando la cuenta de Rclone compartida).
+
+    Devuelve (ok: bool, mensaje: str).
+    """
+    config = cargar_configuracion_general()
+    local = os.path.expanduser(normalizar_ruta_local(config.get("ruta_drive", "")))
+    remote = str(config.get("rclone_remote", "") or "").strip()
+    nube = str(config.get("rclone_ruta_nube", "") or "").strip()
+
+    if not local or not os.path.isdir(local):
+        return False, ("No hay una carpeta local válida configurada.\n\n"
+                       "Ve a Configuración del Sistema → 'Carpeta Local' y elígela.")
+    if not remote or not nube:
+        return False, "Falta el nombre del Remote o de la Carpeta de la Nube."
+
+    # Asegura que el token del equipo principal esté en el rclone.conf local
+    sincronizar_token_rclone_local()
+
+    cmd = obtener_comando_rclone()
+    args_cfg = _argumentos_config_rclone()
+    ruta_remota = f"{remote}{nube}" if remote.endswith(":") else f"{remote}:{nube}"
+
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000
+
+    import time as _time
+    inicio = _time.time()
+
+    def _rclone(args, timeout):
+        # encoding/errors explícitos: la salida de rclone puede traer caracteres que
+        # no existen en cp1252 (Windows) y romper la lectura del resultado.
+        return subprocess.run([cmd, *args_cfg, *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout, **kwargs)
+
+    # 1) La CUENTA responde (consulta de cuota: rápida)
+    try:
+        res_cuenta = _rclone(["about", remote], 45)
+    except FileNotFoundError:
+        return False, "Rclone no está instalado (o no se encontró) en este equipo."
+    except subprocess.TimeoutExpired:
+        return False, ("La cuenta de Google Drive no respondió a tiempo (45 s).\n\n"
+                       "Revisa la conexión a Internet o ejecuta de nuevo la verificación.")
+    except Exception as e:
+        return False, f"No se pudo ejecutar Rclone:\n{e}"
+
+    if res_cuenta.returncode != 0:
+        detalle = (res_cuenta.stderr or "").strip()[:300]
+        return False, ("La cuenta de Rclone configurada no responde correctamente.\n\n" + detalle)
+
+    # 2) La CARPETA de la nube es accesible.
+    #    Se prueban primero subcarpetas de la app (rápidas) y, si aún no existen,
+    #    el listado de la carpeta raíz (lento si tiene muchísimos archivos).
+    subcarpetas = ("facturas_recibidas", "comprobantes_egresos", "ordenes_generadas",
+                   "facturas_emitidas", "cobranzas_generadas")
+    total_visible = None
+    for sub in subcarpetas:
+        try:
+            res = _rclone(["lsf", f"{ruta_remota}/{sub}", "--max-depth", "1", "--files-only"], 90)
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            continue
+        if res.returncode == 0:
+            total_visible = len([l for l in (res.stdout or "").splitlines() if l.strip()])
+            break
+
+    if total_visible is None:
+        try:
+            res_raiz = _rclone(["lsf", ruta_remota, "--max-depth", "1", "--dirs-only"], 240)
+        except subprocess.TimeoutExpired:
+            transcurrido = int(_time.time() - inicio)
+            return False, ("⏱️ La verificación no terminó a tiempo (la carpeta de la nube tiene "
+                           f"muchísimos archivos y el listado es lento).\n\n"
+                           f"La cuenta de Google Drive SÍ responde correctamente.\n"
+                           f"Tiempo transcurrido: {transcurrido} s\n\n"
+                           "Consejo: si la carpeta de la nube tiene miles de archivos basura "
+                           "(.DS_Store), conviene limpiarlos; eso también acelera la sincronización.")
+        except Exception as e:
+            return False, f"No se pudo verificar la carpeta de la nube:\n{e}"
+        if res_raiz.returncode != 0:
+            detalle = (res_raiz.stderr or "").strip()[:300]
+            return False, ("No se pudo acceder a la carpeta de la nube con la cuenta configurada.\n\n"
+                           f"Nube: {ruta_remota}\n\n{detalle}")
+        total_visible = len([l for l in (res_raiz.stdout or "").splitlines() if l.strip()])
+
+    segundos = _time.time() - inicio
+    detalle_cuota = ""
+    try:
+        for linea in (res_cuenta.stdout or "").splitlines():
+            if linea.strip().lower().startswith(("used", "free")):
+                detalle_cuota += f"\n{linea.strip()}"
+    except Exception:
+        detalle_cuota = ""
+
+    return True, (f"✅ Carpeta local SINCRONIZADA con la nube del equipo principal.\n\n"
+                  f"Carpeta local: {local}\n"
+                  f"Nube: {ruta_remota}\n"
+                  f"Elementos/enlaces visibles: {total_visible}\n"
+                  f"Verificación en {segundos:.1f} s{detalle_cuota}")
+
+
 def crear_contexto_ssl_seguro():
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -662,19 +986,37 @@ def cargar_configuracion_general():
     return config
 
 def ejecutar_sincronizacion_silenciosa():
+    """Ejecuta una copia bilateral sin bloquear el programa principal."""
     config = cargar_configuracion_general()
-    local = config.get("ruta_drive", "").strip()
+    local = os.path.expanduser(normalizar_ruta_local(config.get("ruta_drive", "")))
     remote = config.get("rclone_remote", "gdrive:").strip()
     nube = config.get("rclone_ruta_nube", "BlackCube").strip()
-    if not local or not remote or not nube: return
+
+    if not local or not remote or not nube or not os.path.exists(local):
+        return
+
+    # Asegura que el token compartido (del equipo propietario) esté en el
+    # rclone.conf local antes de sincronizar.
+    sincronizar_token_rclone_local()
+
     cmd = obtener_comando_rclone()
+    args_cfg = _argumentos_config_rclone()
     ruta_remota = f"{remote}{nube}" if remote.endswith(":") else f"{remote}:{nube}"
+
     kwargs = {}
-    if sys.platform == "win32": kwargs["creationflags"] = 0x08000000
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000
+
+    # Se excluyen los archivos basura de macOS (.DS_Store y AppleDouble "._"):
+    # son miles de archivos que ralentizan muchísimo el listado y la sincronización.
+    exclusiones = ["--exclude", ".DS_Store*", "--exclude", "._*"]
+
     try:
-        subprocess.run([cmd, "copy", ruta_remota, local, "--update", "--quiet"], **kwargs)
-        subprocess.run([cmd, "copy", local, ruta_remota, "--update", "--quiet"], **kwargs)
-    except Exception: pass
+        subprocess.run([cmd, *args_cfg, "copy", ruta_remota, local, "--update", "--quiet", *exclusiones], timeout=600, **kwargs)
+        subprocess.run([cmd, *args_cfg, "copy", local, ruta_remota, "--update", "--quiet", *exclusiones], timeout=600, **kwargs)
+    except Exception:
+        pass
+
 
 def lanzar_sync_background():
     threading.Thread(target=ejecutar_sincronizacion_silenciosa, daemon=True).start()
@@ -2808,7 +3150,7 @@ class ControlGeneralEventos:
         # ---------- 6. PREFERENCIAS REGIONALES Y RCLONE ----------
         f_region = ctk.CTkFrame(f_scroll, corner_radius=10)
         f_region.pack(fill="x", padx=10, pady=10, ipady=10)
-        ctk.CTkLabel(f_region, text="🌍 Preferencias Regionales y Sincronización", font=("Arial", 14, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(10, 10))
+        ctk.CTkLabel(f_region, text="🌍 Preferencias Regionales", font=("Arial", 14, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(10, 10))
         
         f_mon = ctk.CTkFrame(f_region, fg_color="transparent")
         f_mon.pack(fill="x", padx=15, pady=5)
@@ -2831,9 +3173,22 @@ class ControlGeneralEventos:
         cmb_fecha.pack(side="left")
         cmb_fecha.set(config_actual.get("formato_fecha", "DD/MM/AAAA"))
 
-        ctk.CTkLabel(f_region, text="☁️ Sincronización en la Nube (Rclone - Google Drive)", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+        ctk.CTkLabel(f_region, text="🖨️ Impresora por Defecto", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+        ent_impresora = ctk.CTkEntry(f_region, placeholder_text="Ej: Epson L3150 Series")
+        ent_impresora.pack(fill="x", padx=15)
+        ent_impresora.insert(0, config_actual.get("impresora", ""))
 
-        f_rclone_1 = ctk.CTkFrame(f_region, fg_color="transparent")
+        # =========================================================
+        # ☁️ SINCRONIZACIÓN EN LA NUBE (RCLONE - GOOGLE DRIVE)
+        #    Sección PROPIA, separada de Preferencias Regionales.
+        # =========================================================
+        f_nube = ctk.CTkFrame(f_scroll, corner_radius=10)
+        f_nube.pack(fill="x", padx=10, pady=10, ipady=10)
+        device_id = obtener_device_id()
+
+        ctk.CTkLabel(f_nube, text="☁️ Sincronización en la Nube (Rclone - Google Drive)", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+
+        f_rclone_1 = ctk.CTkFrame(f_nube, fg_color="transparent")
         f_rclone_1.pack(fill="x", padx=15, pady=2)
         ctk.CTkLabel(f_rclone_1, text="Carpeta Local:", font=("Arial", 11, "bold"), width=120, anchor="w").pack(side="left")
         ent_drive = ctk.CTkEntry(f_rclone_1, placeholder_text="Ej: ~/Documents/ArchivosFlota")
@@ -2848,7 +3203,7 @@ class ControlGeneralEventos:
 
         ctk.CTkButton(f_rclone_1, text="📁 Buscar", width=100, command=buscar_carpeta_drive).pack(side="right")
 
-        f_rclone_2 = ctk.CTkFrame(f_region, fg_color="transparent")
+        f_rclone_2 = ctk.CTkFrame(f_nube, fg_color="transparent")
         f_rclone_2.pack(fill="x", padx=15, pady=2)
 
         ctk.CTkLabel(f_rclone_2, text="Nombre Remote:", font=("Arial", 11, "bold"), width=120, anchor="w").pack(side="left")
@@ -2859,13 +3214,101 @@ class ControlGeneralEventos:
         ctk.CTkLabel(f_rclone_2, text="Carpeta Nube:", font=("Arial", 11, "bold"), width=90, anchor="w").pack(side="left")
         ent_rclone_nube = ctk.CTkEntry(f_rclone_2, placeholder_text="Ej: FlotaCube")
         ent_rclone_nube.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ent_rclone_nube.insert(0, config_actual.get("rclone_ruta_nube", "BlackCube"))
+        ent_rclone_nube.insert(0, config_actual.get("rclone_ruta_nube", "FlotaCube"))
+
+        # Registro en Supabase (first-write-wins) de la sincronización en la nube.
+        rclone_reg = cargar_rclone_sync() or {}
+        es_propietario = (rclone_reg.get("linked_by_device") or "") == device_id
+
+        def _datos_sync_actual():
+            return {
+                "rclone_remote": ent_rclone_remote.get().strip(),
+                "rclone_ruta_nube": ent_rclone_nube.get().strip(),
+            }
+
+        def _refrescar_estado_sync():
+            reg = cargar_rclone_sync() or {}
+            es_prop = (reg.get("linked_by_device") or "") == device_id
+            btn_borrar.configure(state="normal" if es_prop else "disabled")
+            if es_prop:
+                lbl_propietario.configure(text="☁️ Registro Nube: este equipo (propietario)", text_color="#27ae60")
+            elif reg:
+                lbl_propietario.configure(text="☁️ Registro Nube: registrado por OTRO equipo (solo lectura)", text_color="#d35400")
+            else:
+                lbl_propietario.configure(text="☁️ Registro Nube: aún sin registrar", text_color="gray")
+
+        def registrar_sync_nube():
+            """Registra en Supabase SOLO si aún no existe (el primero gana) y
+            refresca el botón de borrado según quién sea el propietario."""
+            datos = _datos_sync_actual()
+            datos["linked_by_device"] = device_id
+            datos["linked_at"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            registrar_rclone_sync(datos)
+            _refrescar_estado_sync()
+
+        def borrar_registro_rclone():
+            reg = cargar_rclone_sync() or {}
+            if (reg.get("linked_by_device") or "") != device_id:
+                messagebox.showwarning(
+                    "Acción no permitida",
+                    "Solo el equipo que realizó el enlace con Rclone puede borrar este registro.",
+                    parent=v_conf)
+                return
+            if not messagebox.askyesno(
+                "Borrar Registro de Nube",
+                "Se eliminará la configuración de sincronización en la nube registrada por este equipo.\n\n"
+                "Después, cualquier equipo podrá registrar una nueva configuración.\n\n"
+                "¿Deseas continuar?",
+                parent=v_conf):
+                return
+            if borrar_rclone_sync():
+                # También se elimina el token compartido: así ningún equipo
+                # esclavo seguirá usando la cuenta anterior.
+                borrar_rclone_token()
+                messagebox.showinfo(
+                    "Registro Borrado",
+                    "El registro de sincronización y su token compartido fueron eliminados.\n\n"
+                    "Guarda los cambios si deseas registrar una nueva configuración desde este equipo.",
+                    parent=v_conf)
+                _refrescar_estado_sync()
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "No se pudo borrar el registro de la nube. Revisa la conexión a Internet.",
+                    parent=v_conf)
 
         def vincular_drive_automatico():
+            # 🔒 Si ya existe una cuenta registrada por el EQUIPO PRINCIPAL y este
+            # equipo no es el dueño, no se permite vincular OTRA cuenta: la
+            # información podría guardarse en otro lugar.
+            try:
+                from politica_almacenamiento import estado_almacenamiento, reparar_cuenta_principal
+                est = estado_almacenamiento(forzar=True)
+                if est.get("principal_definido") and not est.get("es_principal"):
+                    if messagebox.askyesno(
+                            "Cuenta del equipo principal",
+                            "Este sistema ya tiene una cuenta de Rclone registrada por el EQUIPO PRINCIPAL, "
+                            "y todos los equipos deben usar ESA MISMA cuenta para que la información no se "
+                            "guarde en otro lugar.\n\n"
+                            "No está permitido vincular otra cuenta en este equipo.\n\n"
+                            "¿Deseas usar la cuenta del equipo principal en este equipo ahora?",
+                            parent=v_conf):
+                        ok, msg = reparar_cuenta_principal()
+                        (messagebox.showinfo if ok else messagebox.showwarning)(
+                            "Cuenta del equipo principal", msg, parent=v_conf)
+                    return
+            except ImportError:
+                pass
+
             remote = ent_rclone_remote.get().strip().replace(":", "")
             if not remote:
                 remote = "gdrive"
+            # Mantener el campo consistente con el remote que se va a vincular.
+            if not ent_rclone_remote.get().strip():
+                ent_rclone_remote.delete(0, tk.END)
+                ent_rclone_remote.insert(0, remote + ":")
             cmd_rclone = obtener_comando_rclone()
+            args_cfg = _argumentos_config_rclone()
 
             msg = ("Se abrirá el navegador web automáticamente.\n\n"
                    "1. Selecciona tu cuenta de Google.\n"
@@ -2877,9 +3320,18 @@ class ControlGeneralEventos:
                 kwargs = {}
                 if sys.platform == "win32":
                     kwargs["creationflags"] = 0x08000000
-                result = vincular_rclone_drive(cmd_rclone, [], remote, kwargs)
+                # 300 s: el inicio de sesión de Google en el navegador puede tardar
+                # más de un minuto y antes se cortaba la vinculación a los 60 s.
+                result = vincular_rclone_drive(cmd_rclone, args_cfg, remote, kwargs)
                 if result.returncode == 0:
-                    messagebox.showinfo("Éxito", "¡Google Drive vinculado correctamente!\nYa puedes realizar la prueba de conexión.", parent=v_conf)
+                    # Este equipo queda registrado como propietario de la
+                    # sincronización (el primero que lo registra es "el de siempre").
+                    registrar_sync_nube()
+                    # Sube el token cifrado a Supabase solo si quedó como propietario.
+                    reg = cargar_rclone_sync() or {}
+                    if (reg.get("linked_by_device") or "") == device_id:
+                        subir_token_rclone_nube()
+                    messagebox.showinfo("Éxito", "¡Google Drive vinculado correctamente!\n\nEste equipo quedó registrado como propietario de la sincronización y su token fue compartido (cifrado) con los demás equipos.\nYa puedes realizar la prueba de conexión.", parent=v_conf)
                 else:
                     detalle = result.stderr or ""
                     if _rclone_puerto_ocupado(detalle):
@@ -2893,7 +3345,7 @@ class ControlGeneralEventos:
         def probar_rclone():
             remote = ent_rclone_remote.get().strip()
             nube = ent_rclone_nube.get().strip()
-            local = ent_drive.get().strip()
+            local = os.path.expanduser(normalizar_ruta_local(ent_drive.get().strip()))
             
             if not remote:
                 messagebox.showwarning("Aviso", "Ingresa el nombre del remote primero.", parent=v_conf)
@@ -2901,30 +3353,39 @@ class ControlGeneralEventos:
                 
             if not local:
                 default_local = os.path.join(os.path.expanduser("~"), "BlackCube_Archivos")
+                ent_drive.delete(0, tk.END)
                 ent_drive.insert(0, default_local)
                 local = default_local
+                os.makedirs(local, exist_ok=True)
                 messagebox.showinfo("Atención: Carpeta Local Automática", 
-                                    f"Para sincronizar, el sistema necesita un lugar donde colocar los archivos primero.\n\n"
-                                    f"Hemos asignado por defecto tu carpeta:\n{local}\n\n"
+                                    f"Para sincronizar, el sistema necesita una carpeta local válida.\n\n"
+                                    f"Hemos creado y asignado por defecto:\n{local}\n\n"
                                     "Los archivos se guardarán aquí y luego se enviarán a la nube.", parent=v_conf)
                 
             cmd_rclone = obtener_comando_rclone()
+            args_cfg = _argumentos_config_rclone()
+
+            # Asegura que el token compartido esté en el rclone.conf local.
+            sincronizar_token_rclone_local()
+
             kwargs = {}
             if sys.platform == "win32":
                 kwargs["creationflags"] = 0x08000000
 
             try:
-                subprocess.run([cmd_rclone, "version"], check=True, capture_output=True, **kwargs)
-                result = subprocess.run([cmd_rclone, "about", remote], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
+                subprocess.run([cmd_rclone, *args_cfg, "version"], check=True, capture_output=True, timeout=10, **kwargs)
+                result = subprocess.run([cmd_rclone, *args_cfg, "about", remote], capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=60, **kwargs)
                 
                 if result.returncode == 0:
                     msg_adicional = ""
                     if nube:
                         ruta_remota = f"{remote}{nube}" if remote.endswith(":") else f"{remote}:{nube}"
-                        res_mkdir = subprocess.run([cmd_rclone, "mkdir", ruta_remota], capture_output=True, text=True, encoding="utf-8", errors="replace", **kwargs)
+                        res_mkdir = subprocess.run([cmd_rclone, *args_cfg, "mkdir", ruta_remota], capture_output=True, text=True,
+                                                   encoding="utf-8", errors="replace", timeout=180, **kwargs)
                         if res_mkdir.returncode == 0:
                             msg_adicional = f"\n\n📁 Se verificó/creó la carpeta en la nube: '{nube}'"
-                            lanzar_sync_background() 
+                            lanzar_sync_background()
                         else:
                             msg_adicional = f"\n\n⚠️ No se pudo crear la carpeta en la nube. Detalle:\n{res_mkdir.stderr}"
 
@@ -2936,15 +3397,174 @@ class ControlGeneralEventos:
             except Exception as e:
                 messagebox.showerror("Error", f"Error al ejecutar Rclone:\n{e}", parent=v_conf)
 
-        f_rclone_3 = ctk.CTkFrame(f_region, fg_color="transparent")
+        f_rclone_3 = ctk.CTkFrame(f_nube, fg_color="transparent")
         f_rclone_3.pack(fill="x", padx=15, pady=(5, 0))
+
+        lbl_propietario = ctk.CTkLabel(f_rclone_3, text="", font=("Arial", 10, "bold"))
+        lbl_propietario.pack(side="left")
+        btn_borrar = ctk.CTkButton(
+            f_rclone_3, text="🗑️ Borrar Registro Nube", font=("Arial", 11, "bold"),
+            fg_color="#c0392b", hover_color="#922b21",
+            command=borrar_registro_rclone,
+            state="normal" if es_propietario else "disabled")
+        btn_borrar.pack(side="left", padx=(10, 0))
+
         ctk.CTkButton(f_rclone_3, text="🚀 Probar Rclone", font=("Arial", 11, "bold"), fg_color="#27ae60", hover_color="#1e8449", command=probar_rclone).pack(side="right")
         ctk.CTkButton(f_rclone_3, text="🔗 Vincular Cuenta Auto", font=("Arial", 11, "bold"), fg_color="#8e44ad", hover_color="#732d91", command=vincular_drive_automatico).pack(side="right", padx=(0, 10))
-        
-        ctk.CTkLabel(f_region, text="🖨️ Impresora por Defecto", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-        ent_impresora = ctk.CTkEntry(f_region, placeholder_text="Ej: Epson L3150 Series")
-        ent_impresora.pack(fill="x", padx=15)
-        ent_impresora.insert(0, config_actual.get("impresora", ""))
+
+        # Estado inicial del registro en la nube.
+        _refrescar_estado_sync()
+
+        # =========================================================
+        # 🔒 ESTADO DE ALMACENAMIENTO (MONOUSUARIO / MULTIUSUARIO)
+        # =========================================================
+        f_politica = ctk.CTkFrame(f_nube, fg_color="#fff8e1", border_width=1, border_color="#f0c36d", corner_radius=8)
+        f_politica.pack(fill="x", padx=15, pady=(10, 2), ipady=6)
+
+        lbl_politica = ctk.CTkLabel(f_politica, text="Verificando…", font=("Arial", 11, "bold"),
+                                    justify="left", anchor="w", wraplength=760)
+        lbl_politica.pack(fill="x", padx=10, pady=(4, 6))
+
+        f_pol_btns = ctk.CTkFrame(f_politica, fg_color="transparent")
+        f_pol_btns.pack(fill="x", padx=10, pady=(0, 4))
+
+        def _refrescar_politica():
+            try:
+                from politica_almacenamiento import estado_almacenamiento
+                est = estado_almacenamiento(forzar=True)
+            except Exception as e:
+                lbl_politica.configure(text=f"⚠️ No se pudo verificar el almacenamiento: {e}", text_color="#c0392b")
+                return
+            codigo = est.get("codigo", "")
+            remoto_txt = (est.get("remoto") or "").strip()
+            nube_txt = (est.get("carpeta_nube") or "").strip()
+            destino_txt = (f"{remoto_txt}{nube_txt}" if remoto_txt.endswith(":")
+                           else f"{remoto_txt}:{nube_txt}" if nube_txt else remoto_txt) or "—"
+            if est.get("autorizado") and codigo == "OK_MONOUSUARIO":
+                lbl_politica.configure(
+                    text=("🖥️ MODO MONOUSUARIO (local): todavía no hay una cuenta Rclone del equipo principal asignada.\n"
+                          "Este equipo puede guardar archivos en su carpeta local. Cuando exista un equipo principal, "
+                          "todos los equipos deberán usar SU MISMA cuenta."),
+                    text_color="#1e6b3a")
+                btn_usar_principal.configure(state="disabled")
+                btn_compartir.configure(state="disabled")
+            elif est.get("autorizado") and codigo == "OK_PRINCIPAL":
+                lbl_politica.configure(
+                    text=("☁️ MODO MULTIUSUARIO — Este equipo es el PRINCIPAL (dueño de la cuenta Rclone).\n"
+                          f"Cuenta en uso: {destino_txt}\n"
+                          "Comparte su cuenta con los demás equipos para que todos usen la misma y la información "
+                          "no se guarde en otro lugar."),
+                    text_color="#1e6b3a")
+                btn_usar_principal.configure(state="disabled")
+                btn_compartir.configure(state="normal")
+            elif est.get("autorizado"):
+                lbl_politica.configure(
+                    text=("☁️ MODO MULTIUSUARIO — Este equipo usa la MISMA cuenta Rclone del equipo principal.\n"
+                          f"Cuenta en uso: {destino_txt} (verificada por identidad de cuenta)\n"
+                          "Puede guardar archivos con normalidad."),
+                    text_color="#1e6b3a")
+                btn_usar_principal.configure(state="disabled")
+                btn_compartir.configure(state="disabled")
+            else:
+                lbl_politica.configure(
+                    text=("🔒 GUARDADO DE ARCHIVOS BLOQUEADO\n" + str(est.get("motivo", "")) +
+                          "\nMientras no se corrija, NINGÚN módulo podrá guardar archivos (ni en local ni en la nube)."),
+                    text_color="#c0392b")
+                btn_usar_principal.configure(state="normal")
+                btn_compartir.configure(state="disabled")
+
+        def _usar_cuenta_principal():
+            try:
+                from politica_almacenamiento import reparar_cuenta_principal
+                ok, msg = reparar_cuenta_principal()
+            except Exception as e:
+                ok, msg = False, f"Error: {e}"
+            (messagebox.showinfo if ok else messagebox.showwarning)("Cuenta del equipo principal", msg, parent=v_conf)
+            _refrescar_politica()
+
+        def _compartir_cuenta_principal():
+            try:
+                compartido = subir_token_rclone_nube()
+            except Exception:
+                compartido = False
+            if compartido:
+                messagebox.showinfo("Cuenta compartida",
+                                    "La cuenta de Rclone de este equipo (principal) fue compartida (cifrada) con los demás equipos.\n\n"
+                                    "Los equipos secundarios deberán pulsar \"Usar la cuenta del equipo principal\".",
+                                    parent=v_conf)
+            else:
+                messagebox.showwarning("No se pudo compartir",
+                                       "No se pudo compartir la cuenta. Verifica que este equipo ya tenga su Rclone vinculado "
+                                       "(botón \"Vincular Cuenta Auto\") y que haya conexión a Internet.",
+                                       parent=v_conf)
+            _refrescar_politica()
+
+        def _verificar_sync():
+            """Comprueba con Rclone que la carpeta local vea la nube del principal."""
+            lbl_sync.configure(text="⏳ Verificando con Rclone… (puede tardar unos segundos)", text_color="#555555")
+
+            def tarea(estado):
+                # Hilo secundario: solo la verificación con Rclone
+                try:
+                    ok, msg = verificar_sincronizacion_carpeta()
+                except Exception as e:
+                    ok, msg = False, f"No se pudo verificar: {e}"
+                estado["ok"] = ok
+                estado["msg"] = msg
+
+            def pintar(estado):
+                # Hilo principal: se actualiza la etiqueta de estado
+                lbl_sync.configure(text=estado.get("msg", ""),
+                                   text_color="#1e6b3a" if estado.get("ok") else "#c0392b")
+
+            ejecutar_en_hilo(v_conf, tarea, al_terminar=pintar)
+
+        btn_usar_principal = ctk.CTkButton(f_pol_btns, text="🔗 Usar la cuenta del equipo principal",
+                                           font=("Arial", 11, "bold"), fg_color="#1f538d", hover_color="#163b65",
+                                           command=_usar_cuenta_principal)
+        btn_usar_principal.pack(side="left", padx=(0, 8))
+
+        btn_compartir = ctk.CTkButton(f_pol_btns, text="☁️ Compartir cuenta con los demás equipos",
+                                      font=("Arial", 11, "bold"), fg_color="#166534", hover_color="#14532d",
+                                      command=_compartir_cuenta_principal)
+        btn_compartir.pack(side="left")
+
+        def _limpiar_basura():
+            """Borra los .DS_Store de la carpeta local y de la nube."""
+            lbl_sync.configure(text="⏳ Limpiando archivos .DS_Store (local y nube)… puede tardar unos minutos",
+                               text_color="#555555")
+
+            def tarea(estado):
+                # Hilo secundario: solo el borrado de archivos .DS_Store
+                try:
+                    ok, msg = limpiar_basura_macos()
+                except Exception as e:
+                    ok, msg = False, f"No se pudo limpiar: {e}"
+                estado["ok"] = ok
+                estado["msg"] = msg
+
+            def pintar(estado):
+                # Hilo principal: se actualiza la etiqueta de estado
+                lbl_sync.configure(text=estado.get("msg", ""),
+                                   text_color="#1e6b3a" if estado.get("ok") else "#c0392b")
+
+            ejecutar_en_hilo(v_conf, tarea, al_terminar=pintar)
+
+        btn_verificar_sync = ctk.CTkButton(f_pol_btns, text="🔍 Verificar sincronización de la carpeta",
+                                           font=("Arial", 11, "bold"), fg_color="#2c3e50", hover_color="#1f2d3a",
+                                           command=_verificar_sync)
+        btn_verificar_sync.pack(side="left", padx=(8, 0))
+
+        btn_limpiar = ctk.CTkButton(f_pol_btns, text="🧹 Limpiar .DS_Store (local y nube)",
+                                    font=("Arial", 11, "bold"), fg_color="#7f8c8d", hover_color="#606b6b",
+                                    command=_limpiar_basura)
+        btn_limpiar.pack(side="left", padx=(8, 0))
+
+        lbl_sync = ctk.CTkLabel(f_politica, text="", font=("Arial", 10), justify="left",
+                                anchor="w", wraplength=760)
+        lbl_sync.pack(fill="x", padx=10, pady=(4, 2))
+
+        _refrescar_politica()
 
         # ---------- 7. DISEÑO Y ORDEN DEL MENÚ ----------
         f_menu = ctk.CTkFrame(f_scroll, corner_radius=10, fg_color="#eef2f3", border_width=1, border_color="#ccd1d9")

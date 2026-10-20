@@ -6,6 +6,8 @@ Garantiza que la configuración y los datos locales sobrevivan a las actualizaci
 import os
 import sys
 import json
+import uuid
+from pathlib import Path
 
 APP_NAME = "BlackCube"
 
@@ -38,6 +40,44 @@ CONFIG_DIR = obtener_directorio_datos_usuario()
 
 # El archivo de configuración ahora vivirá seguro fuera de la app
 CONFIG_FILE = os.path.join(CONFIG_DIR, "configuracion.json")
+
+# --- Sincronización en la nube (Rclone) -----------------------------------
+# DATA_DIR como Path: lo usan nube_archivos.py y politica_almacenamiento.py
+DATA_DIR = Path(CONFIG_DIR)
+
+# Identificador único y persistente de este equipo (para saber qué máquina
+# realizó el enlace con Rclone). Vive en DATA_DIR, fuera de la configuración.
+DEVICE_ID_FILE = DATA_DIR / "device_id.txt"
+
+
+def obtener_device_id():
+    """Devuelve (y crea si hace falta) un UUID único y persistente por equipo."""
+    try:
+        if DEVICE_ID_FILE.exists():
+            valor = DEVICE_ID_FILE.read_text(encoding="utf-8").strip()
+            if valor:
+                return valor
+    except Exception:
+        pass
+    nuevo = str(uuid.uuid4())
+    try:
+        DEVICE_ID_FILE.write_text(nuevo, encoding="utf-8")
+    except Exception:
+        pass
+    return nuevo
+
+
+def ruta_drive_configurada():
+    """Carpeta local configurada en Configuración del Sistema (ruta_drive)."""
+    try:
+        if os.path.exists(str(CONFIG_FILE)):
+            with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
+                datos = json.load(f)
+            if isinstance(datos, dict):
+                return str(datos.get("ruta_drive", "") or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def ruta_recurso(nombre_relativo):

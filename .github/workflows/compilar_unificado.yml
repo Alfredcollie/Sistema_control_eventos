@@ -56,7 +56,7 @@ jobs:
         Add-Content -Path $env:GITHUB_ENV -Value "RCLONE_BIN=$RCLONE_BIN"
 
     - name: Compilar con PyInstaller (Windows)
-      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring control_general.py
+      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py
 
     - name: Crear instalador Windows (Inno Setup)
       shell: pwsh
@@ -133,7 +133,7 @@ jobs:
         echo "RCLONE_BIN=$RCLONE_BIN" >> "$GITHUB_ENV"
 
     - name: Compilar con PyInstaller (macOS)
-      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring control_general.py
+      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
 
     - name: Comprimir en ZIP (macOS)
       run: |

@@ -33,6 +33,7 @@ def _cargar_clave(clave, default=""):
     try:
         with conn.cursor() as cursor:
             _asegurar_tabla(cursor)
+            conn.commit()          # persiste la tabla si se acaba de crear
             cursor.execute("SELECT valor FROM config_general WHERE clave = %s", (clave,))
             fila = cursor.fetchone()
             if fila and fila[0] is not None:
@@ -76,6 +77,7 @@ def clave_existe_en_nube(clave):
     try:
         with conn.cursor() as cursor:
             _asegurar_tabla(cursor)
+            conn.commit()          # persiste la tabla si se acaba de crear
             cursor.execute("SELECT 1 FROM config_general WHERE clave = %s", (clave,))
             return cursor.fetchone() is not None
     except Exception:

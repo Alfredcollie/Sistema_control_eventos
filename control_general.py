@@ -616,14 +616,54 @@ def _asegurar_config_rclone():
         pass
     if not _config_rclone_asegurada:
         _config_rclone_asegurada = True
-        if not ruta.exists():
-            origen = _ruta_config_rclone_por_defecto()
-            if origen and os.path.exists(origen):
+        origen = _ruta_config_rclone_por_defecto()
+        if origen and os.path.exists(origen):
+            try:
+                with open(origen, "r", encoding="utf-8", errors="ignore") as f:
+                    origen_txt = f.read()
+            except Exception:
+                origen_txt = ""
+            necesita = not ruta.exists()
+            if not necesita:
+                try:
+                    actual = ruta.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    actual = ""
+                # Si el archivo de la app quedo SIN token (una vinculacion a medias
+                # lo deja vacio) se recupera la cuenta del rclone.conf del sistema.
+                if "token" not in actual.lower() and "token" in origen_txt.lower():
+                    necesita = True
+            if necesita and origen_txt:
                 try:
                     shutil.copy2(origen, str(ruta))
                 except Exception:
                     pass
     return str(ruta)
+
+
+def _remoto_configurado_con_token(remote):
+    """¿El rclone.conf de la app tiene un token valido para ese remote?
+
+    rclone puede devolver codigo 0 en 'config create' SIN dejar token: en ese
+    caso la cuenta NO esta vinculada y el equipo no debe registrarse.
+    """
+    remote = str(remote or "").strip().strip(":").lower()
+    if not remote:
+        return False
+    try:
+        with open(_asegurar_config_rclone(), "r", encoding="utf-8", errors="ignore") as f:
+            texto = f.read()
+    except Exception:
+        return False
+    dentro = False
+    for linea in texto.splitlines():
+        s = linea.strip()
+        if s.startswith("["):
+            dentro = s.strip("[]").strip().lower() == remote
+            continue
+        if dentro and s.lower().startswith("token") and "=" in s:
+            return len(s.split("=", 1)[1].strip()) > 10
+    return False
 
 
 def _argumentos_config_rclone():
@@ -3322,8 +3362,25 @@ class ControlGeneralEventos:
                     kwargs["creationflags"] = 0x08000000
                 # 300 s: el inicio de sesión de Google en el navegador puede tardar
                 # más de un minuto y antes se cortaba la vinculación a los 60 s.
+                # Si la cuenta YA estaba vinculada en este equipo, no se vuelve a
+                # lanzar el navegador: solo se registra y se comparte.
+                if _remoto_configurado_con_token(remote):
+                    registrar_sync_nube()
+                    reg = cargar_rclone_sync() or {}
+                    if (reg.get("linked_by_device") or "") == device_id:
+                        subir_token_rclone_nube()
+                    messagebox.showinfo(
+                        "Cuenta ya vinculada",
+                        "Este equipo YA tiene la cuenta de Google vinculada.\n\n"
+                        "Quedo registrado como propietario de la sincronizacion y su token "
+                        "fue compartido (cifrado) con los demas equipos.",
+                        parent=v_conf)
+                    _refrescar_estado_sync()
+                    _refrescar_politica()
+                    return
+
                 result = vincular_rclone_drive(cmd_rclone, args_cfg, remote, kwargs)
-                if result.returncode == 0:
+                if result.returncode == 0 and _remoto_configurado_con_token(remote):
                     # Este equipo queda registrado como propietario de la
                     # sincronización (el primero que lo registra es "el de siempre").
                     registrar_sync_nube()
@@ -3332,6 +3389,17 @@ class ControlGeneralEventos:
                     if (reg.get("linked_by_device") or "") == device_id:
                         subir_token_rclone_nube()
                     messagebox.showinfo("Éxito", "¡Google Drive vinculado correctamente!\n\nEste equipo quedó registrado como propietario de la sincronización y su token fue compartido (cifrado) con los demás equipos.\nYa puedes realizar la prueba de conexión.", parent=v_conf)
+                elif result.returncode == 0:
+                    messagebox.showwarning(
+                        "No quedo vinculada",
+                        "rclone termino pero NO guardo el token de Google, asi que la cuenta "
+                        "no quedo vinculada y este equipo NO se registro.\n\n"
+                        "Que hacer:\n"
+                        "1. Abra una terminal (CMD) y ejecute:  rclone config\n"
+                        "2. Elija 'n' (nuevo), nombre 'gdrive', tipo 'drive', scope 'drive'.\n"
+                        "3. En 'Use auto config?' responda 'y' y autorice en el navegador.\n"
+                        "4. Vuelva aqui y pulse de nuevo Vincular Cuenta Auto.",
+                        parent=v_conf)
                 else:
                     detalle = result.stderr or ""
                     if _rclone_puerto_ocupado(detalle):

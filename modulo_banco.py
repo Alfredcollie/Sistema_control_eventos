@@ -34,6 +34,7 @@ from datetime import datetime
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from app_paths import CONFIG_FILE, CONFIG_DIR
 from bancos import cargar_bancos, CLAVE_CUENTAS
+import transferencias_soporte as tx_soporte
 
 # 🚀 CORTE DEL SISTEMA: impide registrar movimientos anteriores a la fecha de
 # comienzo configurada en Configuración General (igual que Compras y Ventas).
@@ -194,10 +195,18 @@ def ejecutar_en_hilo(parent, trabajo, al_terminar=None):
 
 
 def ruta_para_guardar(ruta):
-    """Ruta tal como queda guardada en la base de datos."""
+    """Ruta tal como queda guardada en la base de datos.
+
+    Se guarda RELATIVA a la carpeta sincronizada (ej. 'facturas_emitidas/x.pdf')
+    para que la misma fila sirva en Windows y en Mac.
+    """
     if not ruta:
         return ""
-    return os.path.normpath(str(ruta))
+    try:
+        from app_paths import ruta_para_guardar as _portable
+        return _portable(ruta) or os.path.normpath(str(ruta))
+    except Exception:
+        return os.path.normpath(str(ruta))
 
 
 def eliminar_archivo(ruta):
@@ -224,13 +233,20 @@ def resolver_ruta_archivo(ruta):
     if os.path.isfile(ruta):
         return ruta
     try:
+        from app_paths import resolver_ruta_archivo as _portable
+        encontrada = _portable(ruta)
+        if encontrada:
+            return encontrada
+    except Exception:
+        pass
+    try:
         nombre = os.path.basename(ruta.replace("\\", "/"))
         if not nombre:
             return None
         for base in (obtener_ruta_base(), str(CONFIG_DIR)):
             if not base:
                 continue
-            for sub in ("facturas_recibidas", "soportes_pagos_terceros", ""):
+            for sub in ("comprobantes_transferencias", "facturas_recibidas", "soportes_pagos_terceros", ""):
                 candidato = os.path.join(base, sub, nombre) if sub else os.path.join(base, nombre)
                 if os.path.isfile(candidato):
                     return candidato
@@ -353,6 +369,8 @@ def borrar_soporte_si_huerfano(ruta):
                 usos += int(c.fetchone()[0] or 0)
                 c.execute("SELECT COUNT(*) FROM pagos_comprobantes WHERE archivo_ruta = %s", (ruta,))
                 usos += int(c.fetchone()[0] or 0)
+                c.execute("SELECT COUNT(*) FROM transferencias_bancarias WHERE archivo_ruta = %s", (ruta,))
+                usos += int(c.fetchone()[0] or 0)
         finally:
             liberar_conexion(conn)
         if not usos:
@@ -398,7 +416,7 @@ COMISION_INTERBANCARIA_DEFAULT = "4.80"
 # Marca local: indica que las tablas/columnas del Banco ya se verificaron en este
 # equipo. Cada sentencia DDL es un viaje a Supabase (~0,3 s) y son ~24 seguidas,
 # así que sólo se ejecutan la primera vez (o cuando cambie esta clave).
-CLAVE_ESQUEMA_BANCO = "banco_esquema_ok_v4"
+CLAVE_ESQUEMA_BANCO = "banco_esquema_ok_v5"
 CLAVE_PERMISOS_BANCO = "banco_permisos_ok_v1"
 
 
@@ -1573,6 +1591,9 @@ class ModuloBancoApp:
                 """)
                 conn.commit()
                 for col_sql in (
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS comision NUMERIC DEFAULT 0",
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS referencia VARCHAR(120) DEFAULT ''",
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS archivo_ruta TEXT DEFAULT ''",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS ruc VARCHAR(50)",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS pagado_por_tercero VARCHAR(255) DEFAULT ''",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS soporte_pago_tercero TEXT DEFAULT ''",
@@ -1746,6 +1767,10 @@ class ModuloBancoApp:
 
     def _aplicar_datos_iniciales(self, estado):
         """Se ejecuta en el hilo principal cuando terminó la carga."""
+        if estado.get("error"):
+            self._mostrar_cargando("No se pudieron cargar los saldos. Revise conexión y esquema de Eventos.")
+            messagebox.showerror("Banco", estado["error"], parent=self.parent_frame)
+            return
         self.bancos = estado.get("bancos") or []
         self._actualizar_combos_bancos()
         self.refrescar_saldos(estado.get("datos"))
@@ -1791,8 +1816,13 @@ class ModuloBancoApp:
         def _trabajo(estado):
             estado["datos"] = self._cargar_movimientos_crudos()
 
-        ejecutar_en_hilo(self.parent_frame, _trabajo,
-                         al_terminar=lambda e: self.refrescar_saldos(e.get("datos")))
+        def _terminar(estado):
+            if estado.get("error"):
+                self._mostrar_cargando("No se pudieron cargar los saldos; revise la conexión y el esquema.")
+                return
+            self.refrescar_saldos(estado.get("datos"))
+
+        ejecutar_en_hilo(self.parent_frame, _trabajo, al_terminar=_terminar)
 
     # -----------------------------------------------------
     # TAB: SALDO DE BANCOS
@@ -2064,6 +2094,7 @@ class ModuloBancoApp:
         if not conn:
             return datos
         try:
+            tx_soporte.asegurar_esquema(conn)
             with conn.cursor() as c:
                 try:
                     # 🛡️ Solo se cuentan los cobros que APUNTAN A UNA FACTURA EXISTENTE:
@@ -2101,14 +2132,17 @@ class ModuloBancoApp:
                 try:
                     c.execute("""
                         SELECT id, banco_origen, cuenta_origen, banco_destino, cuenta_destino,
-                               fecha, descripcion, monto
+                               fecha, descripcion, monto, COALESCE(comision, 0),
+                               COALESCE(referencia, ''), COALESCE(archivo_ruta, '')
                         FROM transferencias_bancarias
                     """)
                     datos["transferencias"] = c.fetchall()
                 except Exception:
                     conn.rollback()
-        except Exception:
-            pass
+                    raise
+        except Exception as exc:
+            conn.rollback()
+            raise RuntimeError("No se pudieron verificar/cargar las transferencias; no se mostrará un saldo incompleto.") from exc
         finally:
             liberar_conexion(conn)
         return datos
@@ -2163,27 +2197,41 @@ class ModuloBancoApp:
                     "sin_cuenta": sin_cuenta,
                     "archivo_ruta": arch_p or "", "id_factura": idf or 0,
                 })
-        for idt, bo, co, bd, cd, fecha, desc, monto in (datos.get("transferencias") or []):
+        for fila_tx in (datos.get("transferencias") or []):
+            idt, bo, co, bd, cd, fecha, desc, monto = fila_tx[:8]
+            comision, referencia, archivo = (tuple(fila_tx[8:11]) + (0, "", ""))[:3]
             monto_v = float(monto or 0)
             et_origen = construir_etiqueta_banco({"banco": bo, "cuenta": co})
             et_destino = construir_etiqueta_banco({"banco": bd, "cuenta": cd})
-            if banco_matchea(banco, et_origen):
+            if (_norm_texto(banco.get("banco")) == _norm_texto(bo)
+                    and _norm_texto(banco.get("cuenta")) == _norm_texto(co)):
                 desc_eg = f"Transferencia a {bd or 'otra cuenta'}"
                 if desc:
                     desc_eg += f" ({desc})"
                 movs.append({
                     "id": idt, "fecha": fecha or "", "descripcion": desc_eg,
                     "monto": -monto_v, "tipo": "transferencia",
-                    "origen": "sistema", "tabla": "transferencias_bancarias", "documento": "",
+                    "origen": "sistema", "tabla": "transferencias_bancarias",
+                    "documento": referencia or "", "archivo_ruta": archivo or "",
                 })
-            if banco_matchea(banco, et_destino):
+                if float(comision or 0) > 0:
+                    movs.append({
+                        "id": idt, "fecha": fecha or "",
+                        "descripcion": f"Comisión transferencia a {bd or 'otra cuenta'}",
+                        "monto": -float(comision), "tipo": "egreso",
+                        "origen": "sistema", "tabla": tx_soporte.TABLA_COMISION,
+                        "documento": referencia or "", "archivo_ruta": archivo or "",
+                    })
+            if (_norm_texto(banco.get("banco")) == _norm_texto(bd)
+                    and _norm_texto(banco.get("cuenta")) == _norm_texto(cd)):
                 desc_in = f"Transferencia de {bo or 'otra cuenta'}"
                 if desc:
                     desc_in += f" ({desc})"
                 movs.append({
                     "id": idt, "fecha": fecha or "", "descripcion": desc_in,
                     "monto": monto_v, "tipo": "transferencia",
-                    "origen": "sistema", "tabla": "transferencias_bancarias", "documento": "",
+                    "origen": "sistema", "tabla": "transferencias_bancarias",
+                    "documento": referencia or "", "archivo_ruta": archivo or "",
                 })
         if mes:
             movs = [m for m in movs if clave_fecha(m["fecha"]).startswith(mes)]
@@ -2257,7 +2305,9 @@ class ModuloBancoApp:
         orden = {"columna": "fecha", "ascendente": True}
 
         def _valores(m):
-            if m.get("tipo") == "transferencia":
+            if m.get("tipo") == "comision":
+                tipo_txt = "Comisión interbancaria"
+            elif m.get("tipo") == "transferencia":
                 tipo_txt = "Transferencia (Ingreso)" if m["monto"] > 0 else "Transferencia (Egreso)"
             else:
                 tipo_txt = "Ingreso (Cobro)" if m["monto"] > 0 else "Egreso (Pago)"
@@ -2310,6 +2360,9 @@ class ModuloBancoApp:
             except Exception:
                 return
             _tabla = str(m.get("tabla") or "")
+            es_tx = _tabla in tx_soporte.TABLAS_TX
+            if es_tx:
+                _tabla = "transferencias_bancarias"
             _id = int(m.get("id") or 0)
             if _tabla not in ("pagos_clientes", "pagos_comprobantes", "transferencias_bancarias") or not _id:
                 return messagebox.showwarning("Eliminar",
@@ -2320,7 +2373,8 @@ class ModuloBancoApp:
                     "Eliminar movimiento",
                     "¿Eliminar este movimiento del sistema?" + chr(10) + chr(10)
                     + _desc + "   (" + _monto + ")" + chr(10) + chr(10)
-                    + "Se borrará de la base de datos (" + _tabla + ").",
+                    + ("Se eliminará la transferencia COMPLETA (origen, destino y comisión)." if es_tx
+                       else "Se borrará de la base de datos (" + _tabla + ")."),
                     parent=v):
                 return
             conn_del = conectar_db()
@@ -2328,6 +2382,8 @@ class ModuloBancoApp:
                 return
             try:
                 c_del = conn_del.cursor()
+                if es_tx:
+                    tx_soporte.limpiar_marcas(c_del, [_id])
                 c_del.execute("DELETE FROM " + _tabla + " WHERE id = %s", (_id,))
                 conn_del.commit()
             except Exception as e_del:
@@ -2350,6 +2406,12 @@ class ModuloBancoApp:
                 pass
             messagebox.showinfo("Eliminar", "Movimiento eliminado.", parent=v)
             v.destroy()
+            if es_tx:
+                if self.id_tx_edicion == _id:
+                    self._preparar_form_transferencia()
+                self.refrescar_transferencias()
+            self.actualizar_saldos_boton()
+            self.generar_reporte()
 
         f_botones = ctk.CTkFrame(v, fg_color="transparent")
         f_botones.pack(pady=(0, 15))
@@ -2391,6 +2453,8 @@ class ModuloBancoApp:
         self.ent_tx_fecha = ctk.CTkEntry(r3, width=170)
         self.ent_tx_fecha.pack(side="left", padx=6)
         self.ent_tx_fecha.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        ctk.CTkButton(r3, text="📅", width=40,
+                      command=lambda: CalendarioNativo(self.parent_frame, self.ent_tx_fecha)).pack(side="left")
         ctk.CTkLabel(r3, text="Monto:", width=90, anchor="w", font=("Arial", 12, "bold")).pack(side="left", padx=(16, 0))
         self.ent_tx_monto = ctk.CTkEntry(r3, width=170)
         self.ent_tx_monto.pack(side="left", padx=6)
@@ -2399,6 +2463,35 @@ class ModuloBancoApp:
         ctk.CTkLabel(r4, text="Descripción:", width=130, anchor="w", font=("Arial", 12, "bold")).pack(side="left")
         self.ent_tx_desc = ctk.CTkEntry(r4)
         self.ent_tx_desc.pack(side="left", fill="x", expand=True, padx=6)
+
+        r_com = ctk.CTkFrame(f_form, fg_color="transparent"); r_com.pack(fill="x", padx=12, pady=4)
+        self.var_tx_comision = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(r_com, text="Comisión interbancaria S/", variable=self.var_tx_comision,
+                        command=self._actualizar_comision_tx).pack(side="left")
+        self.ent_tx_comision = ctk.CTkEntry(r_com, width=100)
+        self.ent_tx_comision.pack(side="left", padx=6)
+        self.ent_tx_comision.insert(0, "4.80")
+        for _entrada_tx in (self.ent_tx_monto, self.ent_tx_comision):
+            _entrada_tx.bind("<KeyRelease>", lambda e, w=_entrada_tx: self._formatear_monto_tx(w))
+            _entrada_tx.bind("<FocusOut>", lambda e, w=_entrada_tx: self._formatear_monto_tx(w))
+        ctk.CTkLabel(r_com, text="Referencia / N° operación:").pack(side="left", padx=6)
+        self.ent_tx_referencia = ctk.CTkEntry(r_com, width=200)
+        self.ent_tx_referencia.pack(side="left", padx=6)
+
+        r_comp = ctk.CTkFrame(f_form, fg_color="transparent"); r_comp.pack(fill="x", padx=12, pady=4)
+        self.tx_archivo_ruta = ""
+        self._tx_archivo_original = ""
+        self._tx_ocr_token = 0
+        self.btn_tx_cargar = ctk.CTkButton(r_comp, text="📎 Cargar PDF/imagen", width=170,
+                                          command=self.cargar_comprobante_transferencia)
+        self.btn_tx_cargar.pack(side="left", padx=4)
+        self.btn_tx_escanear = ctk.CTkButton(r_comp, text="🖨 Escanear + OCR", width=160,
+                                            command=lambda: self._procesar_comprobante_tx(escanear=True))
+        self.btn_tx_escanear.pack(side="left", padx=4)
+        ctk.CTkButton(r_comp, text="Quitar adjunto", width=120,
+                      command=self._quitar_comprobante_tx).pack(side="left", padx=4)
+        self.lbl_tx_archivo = ctk.CTkLabel(r_comp, text="Sin comprobante", anchor="w")
+        self.lbl_tx_archivo.pack(side="left", padx=8)
 
         r5 = ctk.CTkFrame(f_form, fg_color="transparent"); r5.pack(fill="x", padx=12, pady=(4, 12))
         self.btn_tx_guardar = ctk.CTkButton(r5, text="💸 Realizar Transferencia", width=220, height=38,
@@ -2426,13 +2519,15 @@ class ModuloBancoApp:
                      font=("Arial", 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=5, pady=(0, 4))
         f_tabla = ctk.CTkFrame(self.tab_transferencias, fg_color="transparent")
         f_tabla.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-        columnas = ("fecha", "origen", "destino", "descripcion", "monto")
+        columnas = ("fecha", "origen", "destino", "descripcion", "monto", "comision", "referencia")
         self.tabla_tx = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
         for col, txt, w, anc in (("fecha", "Fecha", 100, "center"),
                                  ("origen", "Banco Origen", 200, "center"),
                                  ("destino", "Banco Destino", 200, "center"),
                                  ("descripcion", "Descripción", 260, "w"),
-                                 ("monto", "Monto", 130, "e")):
+                                 ("monto", "Monto", 130, "e"),
+                                 ("comision", "Comisión", 100, "e"),
+                                 ("referencia", "Referencia", 150, "w")):
             self.tabla_tx.heading(col, text=txt)
             self.tabla_tx.column(col, width=w, anchor=anc)
         vsb = ttk.Scrollbar(f_tabla, orient="vertical", command=self.tabla_tx.yview)
@@ -2444,7 +2539,331 @@ class ModuloBancoApp:
         self.tabla_tx.bind("<Double-1>", lambda _e: (
             self.editar_transferencia() if self.tabla_tx.selection() else None))
         vsb.pack(side="right", fill="y")
+        for evento in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            self.tabla_tx.bind(evento, self._menu_transferencia)
         # El historial lo rellena la carga inicial en segundo plano
+
+    def _actualizar_comision_tx(self):
+        self.ent_tx_comision.configure(state="normal" if self.var_tx_comision.get() else "disabled")
+
+    def _mostrar_archivo_tx(self):
+        nombre = os.path.basename(str(self.tx_archivo_ruta or "").replace("\\", "/"))
+        self.lbl_tx_archivo.configure(text=nombre or "Sin comprobante")
+
+    def _quitar_comprobante_tx(self):
+        self._tx_ocr_token += 1
+        self.tx_archivo_ruta = ""
+        self._mostrar_archivo_tx()
+
+    def cargar_comprobante_transferencia(self):
+        ruta = filedialog.askopenfilename(parent=self.parent_frame,
+            title="Comprobante de transferencia",
+            filetypes=[("PDF e imágenes", "*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp")])
+        if ruta:
+            self._procesar_comprobante_tx(ruta=ruta)
+
+    def _formatear_monto_tx(self, entrada):
+        """Deja el monto/comisión con separador de miles al escribir."""
+        try:
+            actual = entrada.get()
+            formateado = formatear_numero_entrada(actual)
+            if formateado and formateado != actual:
+                entrada.delete(0, tk.END)
+                entrada.insert(0, formateado)
+        except Exception:
+            pass
+
+    def _puntaje_ocr(self, texto):
+        """Cuántos datos útiles se leyeron (para elegir la mejor lectura)."""
+        if not texto or not texto.strip():
+            return -1
+        datos = tx_soporte.datos_comprobante(texto, monto_del_comprobante)
+        return ((1 if datos.get("monto") else 0) + (1 if datos.get("fecha") else 0)
+                + (1 if datos.get("referencia") else 0))
+
+    def _lista_para_ocr(self, motor, paginas):
+        """OCR de la página: prueba la imagen tal cual y ampliada, y deja la mejor."""
+        textos = []
+        try:
+            textos.append(motor.texto_de_resultados(motor.ocr_paginas(paginas, idioma="Español")))
+        except Exception:
+            textos.append("")
+        # 🔎 Sin volver a escanear: ampliar y subir contraste suele arreglar el monto.
+        if paginas:
+            ampliada = ""
+            try:
+                ampliada = tx_soporte.imagen_ampliada(paginas[0]) or ""
+            except Exception:
+                ampliada = ""
+            if ampliada:
+                try:
+                    textos.append(motor.texto_de_resultados(motor.ocr_paginas([ampliada], idioma="Español")))
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.remove(ampliada)
+                    except Exception:
+                        pass
+        mejor = ""
+        for texto in textos:
+            if self._puntaje_ocr(texto) > self._puntaje_ocr(mejor):
+                mejor = texto
+            elif self._puntaje_ocr(texto) == self._puntaje_ocr(mejor) and len(texto.strip()) > len(mejor.strip()):
+                mejor = texto
+        return mejor
+
+    def _ocr_suficiente(self, texto):
+        """¿El OCR leyó bien el comprobante?
+
+        Además del monto y otro dato, se exige que el importe traiga separador
+        decimal: a 300 ppp es típico leer "S/ 17700" (sin el punto) y eso obliga
+        a repetir el escaneo a 600 ppp.
+        """
+        if not texto or not texto.strip():
+            return False
+        datos = tx_soporte.datos_comprobante(texto, monto_del_comprobante)
+        if not datos.get("monto"):
+            return False
+        if not (datos.get("fecha") or datos.get("referencia")):
+            return False
+        for linea in str(texto).splitlines():
+            for token in re.findall(r"(?:s[/.]|\$)\s*([\d.,]+)", linea, re.I):
+                if re.fullmatch(r"\d{4,}", token):
+                    return False
+        return True
+
+    def _escanear_paginas(self, config, motor, dpi, area=None):
+        """Escanea una página al DPI indicado y arma el PDF. Devuelve (paginas, pdf, aviso)."""
+        datos = motor.config_escaner(config)
+        carpeta = motor.carpeta_escaneos(config)
+        escaneo = motor.escanear(
+            carpeta,
+            dispositivo=datos.get("escaner_dispositivo", ""),
+            dpi=str(dpi),
+            color="Escala de grises",
+            origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+            paginas=1,
+            optimizar=True,
+            modo=datos.get("escaner_modo", "Automático (sin ventanas)"),
+            area=area)
+        if not escaneo.get("ok") or not escaneo.get("paginas"):
+            raise ValueError(escaneo.get("error") or "No se pudo escanear el comprobante.")
+        paginas = escaneo["paginas"]
+        marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf = os.path.join(os.path.dirname(paginas[0]), "Transferencia_Escaneada_" + marca + ".pdf")
+        aviso = ""
+        try:
+            motor.imagenes_a_pdf(paginas, pdf)
+        except Exception as exc:
+            pdf = paginas[0]
+            aviso = "No se pudo armar el PDF (" + str(exc) + "); se adjunta la imagen."
+        return paginas, pdf, aviso
+
+    def _escanear_transferencia_ocr(self, config, motor):
+        """Escanea a 300 ppp; si el OCR no lee bien, repite el escaneo a 600 ppp."""
+        paginas, pdf, aviso = self._escanear_paginas(config, motor, 300)
+        texto = self._lista_para_ocr(motor, paginas)
+        if not self._ocr_suficiente(texto):
+            try:
+                # 2º intento: se escanea SOLO la zona del comprobante (más rápido).
+                # Se repite el escaneo completo: este driver ignora el área y los ppp.
+                paginas2, pdf2, aviso2 = self._escanear_paginas(config, motor, 600)
+            except Exception as exc:
+                paginas2, pdf2, aviso2 = [], "", str(exc)
+            if paginas2:
+                texto2 = self._lista_para_ocr(motor, paginas2)
+                # Si el primer escaneo no sirve, manda el segundo (para eso se repitió).
+                if texto2.strip() or not texto.strip():
+                    paginas, pdf, texto = paginas2, pdf2, texto2
+                    aviso = aviso2 or aviso
+        # Último ajuste: importes que el OCR pegó sin punto decimal.
+        try:
+            texto = tx_soporte.normalizar_montos_ocr(texto)
+        except Exception:
+            pass
+        return paginas, pdf, texto, aviso
+
+    def _ventana_comprobante_escaneado(self, resultado, aplicar):
+        """Ventana de revisión del escaneo (mismo flujo que Compras y Ventas)."""
+        ventana = ctk.CTkToplevel(self.parent_frame)
+        ventana.title("Comprobante escaneado (OCR)")
+        ventana.geometry("900x640")
+        ventana.transient(self.parent_frame)
+        ctk.CTkLabel(ventana, text="COMPROBANTE ESCANEADO - REVISE ANTES DE USAR",
+                     font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(10, 2))
+        datos = resultado.get("datos") or {}
+        monto_txt = ("%.2f" % float(datos.get("monto") or 0)) if datos.get("monto") else "sin dato"
+        ctk.CTkLabel(ventana, text="Fecha: " + str(datos.get("fecha") or "sin dato")
+                     + "   ·   Monto: " + monto_txt
+                     + "   ·   Referencia: " + str(datos.get("referencia") or "sin dato"),
+                     font=("Arial", 11, "bold"), text_color="#2c3e50").pack(pady=(0, 6))
+        cuerpo = ctk.CTkFrame(ventana, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, padx=10, pady=4)
+        f_izq = ctk.CTkFrame(cuerpo, fg_color="#f8f9fa")
+        f_izq.pack(side="left", fill="both", expand=False, padx=(0, 8))
+        paginas = resultado.get("paginas") or []
+        if paginas:
+            try:
+                from PIL import Image
+                with Image.open(paginas[0]) as imagen:
+                    copia = imagen.convert("RGB")
+                copia.thumbnail((420, 520))
+                foto = ctk.CTkImage(light_image=copia, size=copia.size)
+                ctk.CTkLabel(f_izq, text="", image=foto).pack(padx=6, pady=6)
+                ventana._foto_escaneo = foto
+            except Exception:
+                ctk.CTkLabel(f_izq, text="(sin vista previa)", font=("Arial", 10)).pack(padx=8, pady=8)
+        f_der = ctk.CTkFrame(cuerpo, fg_color="transparent")
+        f_der.pack(side="left", fill="both", expand=True)
+        ctk.CTkLabel(f_der, text="Texto leído (OCR):", font=("Arial", 11, "bold")).pack(anchor="w")
+        caja = ctk.CTkTextbox(f_der, width=420, height=430)
+        caja.pack(fill="both", expand=True)
+        caja.insert("1.0", resultado.get("texto") or "(sin texto legible)")
+        if resultado.get("aviso"):
+            ctk.CTkLabel(ventana, text="Aviso: " + str(resultado["aviso"]), font=("Arial", 10),
+                         text_color="#c0392b").pack(pady=(2, 0))
+        barra = ctk.CTkFrame(ventana, fg_color="transparent")
+        barra.pack(fill="x", pady=8)
+
+        def usar():
+            try:
+                aplicar(resultado)
+            finally:
+                ventana.destroy()
+
+        ctk.CTkButton(barra, text="Usar estos datos", width=200, height=34,
+                      fg_color="#27ae60", hover_color="#1e8449", command=usar).pack(side="left", padx=8)
+        ctk.CTkButton(barra, text="Escanear de nuevo", width=190, height=34,
+                      fg_color="#8e44ad", hover_color="#71368a",
+                      command=lambda: (ventana.destroy(), self._procesar_comprobante_tx(escanear=True))
+                      ).pack(side="left", padx=6)
+        ctk.CTkButton(barra, text="Cerrar", width=120, height=34, fg_color="#7f8c8d",
+                      hover_color="#606b6b", command=ventana.destroy).pack(side="left")
+
+    def _procesar_comprobante_tx(self, ruta="", escanear=False):
+        if getattr(self, "_tx_ocr_ocupado", False):
+            return
+        self._tx_ocr_ocupado = True
+        self._tx_ocr_token += 1
+        token = self._tx_ocr_token
+        iniciales = {"fecha": self.ent_tx_fecha.get(), "monto": self.ent_tx_monto.get(),
+                     "referencia": self.ent_tx_referencia.get()}
+        config = dict(cargar_config())
+        config.update(leer_config_disco())
+        self.btn_tx_cargar.configure(state="disabled")
+        self.btn_tx_escanear.configure(state="disabled")
+        self.btn_tx_guardar.configure(state="disabled")
+        self.lbl_tx_archivo.configure(text="Escaneando / leyendo OCR...")
+        progreso = None
+        if escanear:
+            try:
+                progreso = ctk.CTkToplevel(self.parent_frame)
+                progreso.title("Escaneando comprobante de transferencia")
+                progreso.geometry("470x175")
+                progreso.transient(self.parent_frame)
+                try:
+                    progreso.grab_set()
+                except Exception:
+                    pass
+                ctk.CTkLabel(progreso, text="Escaneando y leyendo el comprobante...",
+                             font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(18, 4))
+                ctk.CTkLabel(progreso, text="Coloque el comprobante en el cristal del escáner."
+                                            + chr(10) + "Escanea a 300 ppp; si no se lee bien, repite a 600 ppp.",
+                             font=("Arial", 10), text_color="gray", justify="center").pack()
+                barra_prog = ctk.CTkProgressBar(progreso, width=340, mode="indeterminate")
+                barra_prog.pack(pady=10)
+                barra_prog.start()
+            except Exception:
+                progreso = None
+
+        def trabajo():
+            import escaner as motor
+            if escanear:
+                paginas, archivo, texto, aviso = self._escanear_transferencia_ocr(config, motor)
+            else:
+                paginas, archivo, texto, aviso = [], ruta, "", ""
+                try:
+                    texto, aviso = tx_soporte.leer_comprobante(archivo, extraer_texto_pdf, motor, fitz)
+                except Exception:
+                    aviso = "No se pudo leer OCR; complete los datos manualmente."
+            return {"archivo": archivo, "paginas": paginas,
+                    "datos": tx_soporte.datos_comprobante(texto, monto_del_comprobante),
+                    "aviso": aviso, "texto": texto}
+
+        def aplicar(resultado):
+            self.tx_archivo_ruta = resultado["archivo"]
+            self._mostrar_archivo_tx()
+            datos = resultado["datos"]
+            for clave, entrada in (("fecha", self.ent_tx_fecha), ("monto", self.ent_tx_monto),
+                                   ("referencia", self.ent_tx_referencia)):
+                valor = datos.get(clave)
+                if not valor or entrada.get() != iniciales[clave]:
+                    continue
+                entrada.delete(0, tk.END)
+                if clave == "monto":
+                    entrada.insert(0, formatear_numero_entrada("%.2f" % float(valor)))
+                else:
+                    entrada.insert(0, str(valor))
+
+        def terminado(resultado, error):
+            try:
+                if progreso is not None and progreso.winfo_exists():
+                    progreso.grab_release()
+                    progreso.destroy()
+            except Exception:
+                pass
+            self._tx_ocr_ocupado = False
+            self.btn_tx_cargar.configure(state="normal")
+            self.btn_tx_escanear.configure(state="normal")
+            self.btn_tx_guardar.configure(state="normal")
+            if token != self._tx_ocr_token:
+                self._mostrar_archivo_tx()
+                return
+            if error:
+                self._mostrar_archivo_tx()
+                messagebox.showerror("Comprobante", error, parent=self.parent_frame)
+                return
+            self.tx_archivo_ruta = resultado["archivo"]
+            self._mostrar_archivo_tx()
+            if escanear:
+                # 🚀 Escaneo: se completan los datos directamente (sin ventana de revisión).
+                aplicar(resultado)
+                datos = resultado.get("datos") or {}
+                if not (datos.get("monto") or datos.get("fecha") or datos.get("referencia")):
+                    messagebox.showwarning(
+                        "Comprobante",
+                        "Se adjuntó el comprobante, pero el OCR no pudo leer los datos."
+                        + chr(10) + "Complete la fecha, el monto y la referencia a mano.",
+                        parent=self.parent_frame)
+                return
+            aplicar(resultado)
+            aviso = resultado.get("aviso") or ("" if resultado.get("texto") else "OCR sin texto legible.")
+            messagebox.showinfo("Comprobante",
+                                "Adjunto cargado. Revise fecha, monto y referencia antes de guardar."
+                                + (chr(10) + aviso if aviso else ""), parent=self.parent_frame)
+
+        tx_soporte.ejecutar_sin_tk(self.parent_frame, trabajo, terminado)
+
+    def _menu_transferencia(self, event):
+        iid = self.tabla_tx.identify_row(event.y)
+        if not iid:
+            return "break"
+        self.tabla_tx.selection_set(iid)
+        tx = getattr(self, "_transferencias_por_id", {}).get(int(iid), {})
+        ruta = self._ruta_existente(tx.get("archivo_ruta"))
+        menu = tk.Menu(self.parent_frame, tearoff=0)
+        menu.add_command(label="Ver comprobante" if ruta else "Ver comprobante (sin archivo)",
+                         state="normal" if ruta else "disabled",
+                         command=lambda: abrir_documento(ruta))
+        menu.add_separator()
+        menu.add_command(label="Editar", command=self.editar_transferencia)
+        menu.add_command(label="Eliminar transferencia y comisión", command=self.eliminar_transferencia)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _preparar_form_transferencia(self, tx=None):
         """Deja el formulario de transferencias listo: en blanco (nueva) o con los datos de 'tx'.
@@ -2469,7 +2888,7 @@ class ModuloBancoApp:
         self.cmb_tx_destino.set(destino)
 
         self.ent_tx_fecha.delete(0, tk.END)
-        self.ent_tx_fecha.insert(0, tx.get("fecha") or datetime.now().strftime("%d/%m/%Y"))
+        self.ent_tx_fecha.insert(0, fecha_para_mostrar(tx.get("fecha")) or datetime.now().strftime("%d/%m/%Y"))
         self.ent_tx_monto.delete(0, tk.END)
         if tx:
             self.ent_tx_monto.insert(0, formatear_numero_entrada(f"{float(tx.get('monto') or 0):.2f}"))
@@ -2477,6 +2896,17 @@ class ModuloBancoApp:
         if tx:
             self.ent_tx_desc.insert(0, tx.get("descripcion", ""))
 
+        self._tx_ocr_token += 1  # descarta resultados OCR de un formulario anterior
+        self.ent_tx_referencia.delete(0, tk.END)
+        self.ent_tx_referencia.insert(0, tx.get("referencia") or "")
+        self.var_tx_comision.set(bool(tx.get("comision")) if tx else True)
+        self.ent_tx_comision.configure(state="normal")
+        self.ent_tx_comision.delete(0, tk.END)
+        self.ent_tx_comision.insert(0, f"{float(tx.get('comision') or 0):.2f}" if tx else "4.80")
+        self._actualizar_comision_tx()
+        self.tx_archivo_ruta = tx.get("archivo_ruta") or ""
+        self._tx_archivo_original = self.tx_archivo_ruta
+        self._mostrar_archivo_tx()
         self.id_tx_edicion = tx.get("id")
         try:
             if self.id_tx_edicion:
@@ -2504,7 +2934,11 @@ class ModuloBancoApp:
                                 parent=self.parent_frame)
             return
         id_tx = int(sel[0])
-        tx = next((t for t in self.cargar_transferencias() if t["id"] == id_tx), None)
+        try:
+            tx = next((t for t in self.cargar_transferencias() if t["id"] == id_tx), None)
+        except RuntimeError as exc:
+            messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
+            return
         if not tx:
             messagebox.showerror("Error", "No se encontró la transferencia.", parent=self.parent_frame)
             return
@@ -2524,11 +2958,30 @@ class ModuloBancoApp:
         if origen == destino:
             messagebox.showwarning("Transferencia", "El banco origen y destino deben ser diferentes.", parent=self.parent_frame)
             return
-        monto = normalizar_monto(self.ent_tx_monto.get())
-        if monto <= 0:
-            messagebox.showerror("Error", "Ingrese un monto mayor a 0.", parent=self.parent_frame)
+        if getattr(self, "_tx_ocr_ocupado", False):
             return
-        fecha = self.ent_tx_fecha.get().strip() or datetime.now().strftime("%d/%m/%Y")
+        try:
+            monto = tx_soporte.importe(self.ent_tx_monto.get(), positivo=True)
+            comision = tx_soporte.importe(self.ent_tx_comision.get()) if self.var_tx_comision.get() else tx_soporte.importe("0")
+            fecha = tx_soporte.fecha_valida(self.ent_tx_fecha.get().strip())
+            referencia = tx_soporte.referencia_valida(self.ent_tx_referencia.get())
+        except ValueError as exc:
+            messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
+            return
+        if validar_fecha_registro is not None:
+            permitido, aviso = validar_fecha_registro(fecha)
+            if not permitido:
+                messagebox.showwarning("Fecha fuera del corte del sistema", aviso, parent=self.parent_frame)
+                return
+        archivo = self.tx_archivo_ruta or ""
+        if archivo and archivo != self._tx_archivo_original:
+            try:
+                archivo = tx_soporte.copiar_comprobante(archivo, obtener_ruta_base())
+                self.tx_archivo_ruta = archivo  # permite reintentar sin volver a copiar
+                self._mostrar_archivo_tx()
+            except (ValueError, OSError) as exc:
+                messagebox.showerror("Comprobante", str(exc), parent=self.parent_frame)
+                return
         desc = self.ent_tx_desc.get().strip() or "Transferencia entre cuentas"
 
         bo = self.bancos[etiquetas.index(origen)]
@@ -2540,24 +2993,30 @@ class ModuloBancoApp:
             messagebox.showerror("Error", "Sin conexión a la base de datos.", parent=self.parent_frame)
             return
         try:
+            tx_soporte.asegurar_esquema(conn)
             with conn.cursor() as c:
                 if id_edicion:
                     c.execute("""
                         UPDATE transferencias_bancarias
                         SET banco_origen=%s, cuenta_origen=%s, banco_destino=%s, cuenta_destino=%s,
-                            fecha=%s, descripcion=%s, monto=%s
+                            fecha=%s, descripcion=%s, monto=%s, comision=%s, referencia=%s, archivo_ruta=%s
                         WHERE id=%s
                     """, (bo.get("banco", ""), bo.get("cuenta", ""), bd.get("banco", ""), bd.get("cuenta", ""),
-                          fecha, desc, monto, id_edicion))
+                          fecha, desc, monto, comision, referencia, archivo, id_edicion))
+                    if c.rowcount != 1:
+                        raise ValueError("La transferencia ya no existe; vuelva a cargar el historial.")
+                    tx_soporte.limpiar_marcas(c, [id_edicion])
                 else:
                     c.execute("""
                         INSERT INTO transferencias_bancarias
-                        (banco_origen, cuenta_origen, banco_destino, cuenta_destino, fecha, descripcion, monto)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (banco_origen, cuenta_origen, banco_destino, cuenta_destino, fecha, descripcion, monto,
+                         comision, referencia, archivo_ruta)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (bo.get("banco", ""), bo.get("cuenta", ""), bd.get("banco", ""), bd.get("cuenta", ""),
-                          fecha, desc, monto))
+                          fecha, desc, monto, comision, referencia, archivo))
                 conn.commit()
         except Exception as e:
+            conn.rollback()
             messagebox.showerror("Error", f"No se pudo guardar la transferencia:\n{e}", parent=self.parent_frame)
             return
         finally:
@@ -2569,12 +3028,15 @@ class ModuloBancoApp:
                              f"Transferencia {formatear_monto(monto)} de {origen} a {destino}"))
         self._preparar_form_transferencia()      # el formulario vuelve al modo "nueva"
         self.refrescar_transferencias()
-        self.refrescar_saldos()
+        self.actualizar_saldos_boton()
+        self.generar_reporte()
         if id_edicion:
             messagebox.showinfo("Éxito", "Transferencia actualizada correctamente.", parent=self.parent_frame)
         else:
             messagebox.showinfo("Éxito", f"Transferencia de {formatear_monto(monto)} registrada:\n"
-                                         f"• Egreso en {origen}\n• Ingreso en {destino}", parent=self.parent_frame)
+                                         f"• Egreso en {origen}: {formatear_monto(monto)}\n"
+                                         f"• Comisión separada: {formatear_monto(comision)}\n"
+                                         f"• Ingreso en {destino}: {formatear_monto(monto)}", parent=self.parent_frame)
 
     def cargar_transferencias(self):
         conn = conectar_db(silencioso=True)
@@ -2582,46 +3044,56 @@ class ModuloBancoApp:
             return []
         rows = []
         try:
+            tx_soporte.asegurar_esquema(conn)
             with conn.cursor() as c:
                 c.execute("""
                     SELECT id, banco_origen, cuenta_origen, banco_destino, cuenta_destino,
-                           fecha, descripcion, monto
+                           fecha, descripcion, monto, COALESCE(comision, 0),
+                           COALESCE(referencia, ''), COALESCE(archivo_ruta, '')
                     FROM transferencias_bancarias
                     ORDER BY id DESC
                 """)
-                for idt, bo, co, bd, cd, fecha, desc, monto in c.fetchall():
+                for idt, bo, co, bd, cd, fecha, desc, monto, comision, referencia, archivo in c.fetchall():
                     rows.append({
                         "id": idt,
                         "origen": construir_etiqueta_banco({"banco": bo, "cuenta": co}),
                         "destino": construir_etiqueta_banco({"banco": bd, "cuenta": cd}),
-                        "fecha": fecha or "", "descripcion": desc or "", "monto": float(monto or 0),
+                        "fecha": fecha_para_mostrar(fecha or ""), "descripcion": desc or "",
+                        "monto": float(monto or 0), "comision": float(comision or 0),
+                        "referencia": referencia or "", "archivo_ruta": archivo or "",
                     })
-        except Exception:
-            pass
+        except Exception as exc:
+            conn.rollback()
+            raise RuntimeError("No se pudo verificar/cargar el historial de transferencias.") from exc
         finally:
             liberar_conexion(conn)
         return rows
 
     def _pintar_transferencias(self, filas):
         """Dibuja el historial ya cargado (no consulta la base)."""
+        self._transferencias_por_id = {int(t["id"]): t for t in filas}
         try:
             self.tabla_tx.delete(*self.tabla_tx.get_children())
         except Exception:
             return
         for t in filas:
             self.tabla_tx.insert("", tk.END, iid=str(t["id"]),
-                                 values=(t["fecha"], t["origen"], t["destino"],
-                                         t["descripcion"], formatear_monto(t["monto"])))
+                                 values=(fecha_para_mostrar(t["fecha"]), t["origen"], t["destino"],
+                                         t["descripcion"], formatear_monto(t["monto"]),
+                                         formatear_monto(t.get("comision", 0)), t.get("referencia", "")))
 
     def refrescar_transferencias(self):
-        self._pintar_transferencias(self.cargar_transferencias())
+        try:
+            self._pintar_transferencias(self.cargar_transferencias())
+        except RuntimeError as exc:
+            messagebox.showerror("Transferencias", str(exc), parent=self.parent_frame)
 
     def eliminar_transferencia(self):
         sel = self.tabla_tx.selection()
         if not sel:
             messagebox.showinfo("Eliminar", "Seleccione una o más transferencias para eliminar.", parent=self.parent_frame)
             return
-        if not messagebox.askyesno("Confirmar", f"¿Eliminar {len(sel)} transferencia(s) seleccionada(s)?", parent=self.parent_frame):
+        if not messagebox.askyesno("Confirmar", f"¿Eliminar {len(sel)} transferencia(s) seleccionada(s) y sus comisiones?", parent=self.parent_frame):
             return
         ids = [int(i) for i in sel]
         conn = conectar_db(silencioso=True)
@@ -2630,16 +3102,21 @@ class ModuloBancoApp:
             return
         try:
             with conn.cursor() as c:
+                tx_soporte.limpiar_marcas(c, ids)
                 c.execute("DELETE FROM transferencias_bancarias WHERE id = ANY(%s)", (ids,))
                 conn.commit()
         except Exception as e:
+            conn.rollback()
             messagebox.showerror("Error", f"No se pudo eliminar:\n{e}", parent=self.parent_frame)
             return
         finally:
             liberar_conexion(conn)
+        if self.id_tx_edicion in ids:
+            self._preparar_form_transferencia()
         registrar_auditoria(self.usuario_activo, "Banco", f"Eliminó {len(ids)} transferencia(s)")
         self.refrescar_transferencias()
-        self.refrescar_saldos()
+        self.actualizar_saldos_boton()
+        self.generar_reporte()
         messagebox.showinfo("Éxito", "Transferencia(s) eliminada(s) correctamente.", parent=self.parent_frame)
 
     # -----------------------------------------------------
@@ -2915,7 +3392,8 @@ class ModuloBancoApp:
         except Exception:
             idm = 0
         if idm:
-            return f"{tabla or ''}|{idm}"
+            lado = ("|ingreso" if float(monto or 0) >= 0 else "|egreso") if tabla == "transferencias_bancarias" else ""
+            return f"{tabla or ''}|{idm}{lado}"
         return "pdf|%s|%.2f|%s" % (normalizar_fecha(fecha), float(monto or 0),
                                    _norm_texto(descripcion))
 
@@ -3151,17 +3629,24 @@ class ModuloBancoApp:
 
     def _reunir_movimientos(self, banco, mes_key=None, desde=None, hasta=None):
         """Reúne los datos de la conciliación SIN tocar la interfaz (segundo plano)."""
+        fecha_inicio = clave_fecha(banco.get("fecha", ""))
+        if fecha_inicio:
+            desde = max(desde or "", fecha_inicio)
         # 🚫 Movimientos que el usuario eliminó de esta conciliación: no se vuelven a cargar
         ignorados = self.cargar_ignorados(banco)
         ign_sistema = ignorados.get("sistema", set())
         ign_pdf = ignorados.get("estado_cuenta", set())
 
         movs_sistema = []
+        movs_totales = []
         # ⚠️ Se incluyen también los cobros/pagos SIN cuenta bancaria asignada: si no,
         # no aparecerían en ninguna cuenta y la conciliación saldría vacía.
         for m in self.cargar_movimientos_sistema(banco, incluir_sin_cuenta=True):
             if not self._en_periodo(m.get("fecha"), mes_key, desde, hasta):
                 continue
+            # Ocultar una línea no altera el saldo del sistema.
+            if not m.get("sin_cuenta"):
+                movs_totales.append(m)
             if m.get("sin_cuenta"):
                 m = {**m, "descripcion": f"⚠️ Sin cuenta asignada | {m.get('descripcion', '')}"}
             clave = self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
@@ -3180,9 +3665,11 @@ class ModuloBancoApp:
                     if self._en_periodo(m.get("fecha"), mes_key, desde, hasta)]
 
         bank_movs = []
+        bank_totales = []
         for b in self.movimientos_pdf:
             if not self._en_periodo(b.get("fecha"), mes_key, desde, hasta):
                 continue
+            bank_totales.append(b)
             clave = self._clave_ignorado("estado_cuenta", "", 0, b.get("fecha"),
                                          b.get("monto"), b.get("descripcion"))
             if clave not in ign_pdf:
@@ -3270,7 +3757,7 @@ class ModuloBancoApp:
                               "origen": "estado_cuenta", "tabla": "", "estado": "diferencia"})
 
         filas.sort(key=lambda f: (normalizar_fecha(f["fecha"]), f["monto"]))
-        return {"filas": filas, "movs_sistema": movs_sistema, "bank_movs": bank_movs,
+        return {"filas": filas, "movs_sistema": movs_totales, "bank_movs": bank_totales,
                 "desde": desde or "", "hasta": hasta or ""}
 
     def _pintar_reporte(self, banco, etiqueta_periodo, datos):
@@ -3394,7 +3881,9 @@ class ModuloBancoApp:
             estado_txt = "⚠️ Sin conciliar (Sistema)"
         else:
             estado_txt = "📝 Manual / Pendiente"
-        if f.get("tipo") == "transferencia":
+        if f.get("tipo") == "comision":
+            tipo_txt = "Comisión interbancaria"
+        elif f.get("tipo") == "transferencia":
             tipo_txt = "Transferencia (Ingreso)" if f["monto"] >= 0 else "Transferencia (Egreso)"
         else:
             tipo_txt = "Ingreso" if f["monto"] >= 0 else "Egreso"
@@ -3602,11 +4091,11 @@ class ModuloBancoApp:
         if not ruta:
             return ""
         try:
-            from app_paths import resolver_ruta_archivo
-            resuelta = resolver_ruta_archivo(ruta)
+            from app_paths import resolver_ruta_archivo as resolver_compartida
+            resuelta = resolver_compartida(ruta)
         except Exception:
             resuelta = ""
-        for candidata in (resuelta, ruta, os.path.abspath(ruta)):
+        for candidata in (resuelta, resolver_ruta_archivo(ruta), ruta, os.path.abspath(ruta)):
             try:
                 if candidata and os.path.isfile(candidata):
                     return candidata
@@ -3681,7 +4170,8 @@ class ModuloBancoApp:
         except Exception:
             idm = 0
         if (origen or "") == "sistema" and idm:
-            return "sis|%s|%s" % (tabla or "", idm)
+            lado = ("|ingreso" if float(monto or 0) >= 0 else "|egreso") if tabla == "transferencias_bancarias" else ""
+            return "sis|%s|%s%s" % (tabla or "", idm, lado)
         if (origen or "") == "estado_cuenta":
             return "ec|%s|%.2f|%s" % (normalizar_fecha(fecha), float(monto or 0), _norm_texto(descripcion))
         return "otro|%s|%s" % (origen or "", idm)
@@ -3706,11 +4196,11 @@ class ModuloBancoApp:
             with conn.cursor() as c:
                 c.execute("""
                     SELECT COALESCE(origen,''), COALESCE(id_movimiento,0),
-                           COALESCE(fecha,''), COALESCE(monto,0), COALESCE(descripcion,'')
+                           COALESCE(fecha,''), COALESCE(monto,0), COALESCE(descripcion,''), COALESCE(cuenta,'')
                     FROM conciliacion_bancaria
                     WHERE banco = %s AND estado = 'conciliado' AND COALESCE(origen,'') <> 'manual'
                 """, (banco.get("banco", ""),))
-                for origen, idm, fecha, monto, desc in c.fetchall():
+                for origen, idm, fecha, monto, desc, cuenta in c.fetchall():
                     o = origen or ""
                     if o.startswith("s:"):
                         base, tabla = "sistema", o[2:]
@@ -3720,6 +4210,8 @@ class ModuloBancoApp:
                         base, tabla = "estado_cuenta", ""
                     else:
                         base, tabla = o, ""
+                    if tabla in tx_soporte.TABLAS_TX and _norm_texto(cuenta) != _norm_texto(banco.get("cuenta")):
+                        continue
                     claves.add(self._clave_conciliado(base, tabla, idm, fecha, monto, desc))
         except Exception as e:
             print("[Conciliación] No se pudo leer lo conciliado:", e)
@@ -3753,7 +4245,12 @@ class ModuloBancoApp:
                     return True
 
                 origen_persist = ("s:" + tabla) if origen == "sistema" and tabla else ("e" if origen == "estado_cuenta" else origen)
-                if origen == "sistema" and idm:
+                if origen == "sistema" and idm and tabla in tx_soporte.TABLAS_TX:
+                    c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
+                                 WHERE banco=%s AND cuenta=%s AND origen=%s AND id_movimiento=%s
+                                 AND SIGN(monto)=SIGN(%s)""",
+                              (banco_nombre, banco.get("cuenta", ""), origen_persist, idm, monto))
+                elif origen == "sistema" and idm:
                     c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
                                  WHERE banco=%s AND origen=%s AND id_movimiento=%s""",
                               (banco_nombre, origen_persist, idm))
@@ -4954,6 +5451,16 @@ class ModuloBancoApp:
                                 parent=self.parent_frame)
             return
         f = filas[0]
+        if f.get("tabla") in tx_soporte.TABLAS_TX:
+            try:
+                tx = next((t for t in self.cargar_transferencias() if t["id"] == f.get("id")), None)
+            except RuntimeError as exc:
+                messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
+                return
+            if tx:
+                self._preparar_form_transferencia(tx)
+                self.tabview.set(" 🔄 Transferencias ")
+            return
 
         # Los pagos registrados desde este módulo ("➕ Registrar Pago / Compra
         # Cruzada") se editan en ESA MISMA ventana, con todos los datos cargados.
@@ -5112,9 +5619,16 @@ class ModuloBancoApp:
                                     if borrado:
                                         gastos_borrados += 1
                             elif origen == "sistema" and idp:
-                                c.execute("""DELETE FROM conciliacion_bancaria
-                                             WHERE origen = 'sistema' AND id_movimiento = %s AND banco = %s""",
-                                          (idp, nombre_banco))
+                                if f.get("tabla") in tx_soporte.TABLAS_TX:
+                                    c.execute("""DELETE FROM conciliacion_bancaria
+                                        WHERE origen = ANY(%s) AND id_movimiento=%s AND banco=%s
+                                        AND cuenta=%s AND SIGN(monto)=SIGN(%s)""",
+                                        (["s:" + f["tabla"], "sistema:" + f["tabla"]], idp,
+                                         nombre_banco, banco.get("cuenta", ""), f.get("monto", 0)))
+                                else:
+                                    c.execute("""DELETE FROM conciliacion_bancaria
+                                                 WHERE origen = 'sistema' AND id_movimiento = %s AND banco = %s""",
+                                              (idp, nombre_banco))
                                 borrados_db += max(c.rowcount, 0)
                                 # 🚫 Queda descartado: no vuelve a aparecer al recargar la lista
                                 self._registrar_ignorado(c, banco, f)

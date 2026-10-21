@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-APP_PATHS.PY - Gestor de Rutas Seguras
-Garantiza que la configuración y los datos locales sobrevivan a las actualizaciones.
+APP_PATHS.PY - Rutas de configuración, recursos y RESOLUCIÓN PORTABLE de archivos.
+- BASE_DIR / RESOURCES_DIR: carpeta del ejecutable (recursos de SOLO LECTURA).
+- DATA_DIR / CONFIG_FILE: carpeta de datos del usuario (ESCRIBIBLE):
+    Windows -> %APPDATA%\\BlackCube
+    macOS   -> ~/Library/Application Support/BlackCube
+    Linux   -> ~/.config/BlackCube
 """
 import os
 import sys
@@ -11,43 +15,48 @@ from pathlib import Path
 
 APP_NAME = "BlackCube"
 
-# Directorio donde vive este archivo (la carpeta de la app), independiente del cwd.
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _base_dir():
+    """Carpeta base: la del .exe/.app si está compilado, o la del script."""
+    if getattr(sys, "frozen", False):
+        return Path(os.path.dirname(sys.executable))
+    return Path(__file__).resolve().parent
+
+
+def _data_dir():
+    """Carpeta de datos del usuario (escribible)."""
+    if sys.platform == "win32":
+        raiz = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    elif sys.platform == "darwin":
+        raiz = Path.home() / "Library" / "Application Support"
+    else:
+        raiz = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    carpeta = raiz / APP_NAME
+    try:
+        carpeta.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return carpeta
+
+
+BASE_DIR = _base_dir()
+DATA_DIR = _data_dir()
+RESOURCES_DIR = BASE_DIR
+
+# Directorio donde vive este archivo (compatibilidad con el código existente).
+APP_DIR = str(BASE_DIR)
+CONFIG_DIR = str(DATA_DIR)
+
+# Configuración del usuario (se conserva el nombre histórico del programa).
+CONFIG_FILE = DATA_DIR / "configuracion.json"
+
+# Identificador único y persistente de este equipo.
+DEVICE_ID_FILE = DATA_DIR / "device_id.txt"
+
 
 def obtener_directorio_datos_usuario():
-    """
-    Obtiene la ruta segura del sistema operativo para guardar datos de usuario.
-    Esta carpeta NO se borra cuando la aplicación se actualiza.
-    """
-    if sys.platform == "win32":
-        # Windows: C:\Users\Usuario\AppData\Roaming\BlackCube
-        base_dir = os.environ.get("APPDATA", os.path.expanduser("~"))
-    elif sys.platform == "darwin":
-        # Mac: /Users/Usuario/Library/Application Support/BlackCube
-        base_dir = os.path.join(os.path.expanduser("~"), "Library", "Application Support")
-    else:
-        # Linux / Otros: ~/.config/BlackCube
-        base_dir = os.path.join(os.path.expanduser("~"), ".config")
-    
-    app_dir = os.path.join(base_dir, APP_NAME)
-    
-    # Crear la carpeta de forma silenciosa si no existe
-    os.makedirs(app_dir, exist_ok=True)
-    return app_dir
-
-# --- RUTAS GLOBALES SEGURAS ---
-CONFIG_DIR = obtener_directorio_datos_usuario()
-
-# El archivo de configuración ahora vivirá seguro fuera de la app
-CONFIG_FILE = os.path.join(CONFIG_DIR, "configuracion.json")
-
-# --- Sincronización en la nube (Rclone) -----------------------------------
-# DATA_DIR como Path: lo usan nube_archivos.py y politica_almacenamiento.py
-DATA_DIR = Path(CONFIG_DIR)
-
-# Identificador único y persistente de este equipo (para saber qué máquina
-# realizó el enlace con Rclone). Vive en DATA_DIR, fuera de la configuración.
-DEVICE_ID_FILE = DATA_DIR / "device_id.txt"
+    """Ruta segura del sistema operativo para los datos del usuario."""
+    return str(DATA_DIR)
 
 
 def obtener_device_id():
@@ -67,41 +76,24 @@ def obtener_device_id():
     return nuevo
 
 
-def ruta_drive_configurada():
-    """Carpeta local configurada en Configuración del Sistema (ruta_drive)."""
-    try:
-        if os.path.exists(str(CONFIG_FILE)):
-            with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
-                datos = json.load(f)
-            if isinstance(datos, dict):
-                return str(datos.get("ruta_drive", "") or "").strip()
-    except Exception:
-        pass
-    return ""
-
-
 def ruta_recurso(nombre_relativo):
-    """Resuelve un recurso (logo, icono, json, etc.) sin depender del directorio de trabajo.
-    Funciona tanto en desarrollo como empaquetado con PyInstaller (.exe / .app)."""
+    """Resuelve un recurso (logo, icono, json, etc.) sin depender del cwd."""
     try:
         base = sys._MEIPASS  # Carpeta temporal de PyInstaller
     except Exception:
-        base = APP_DIR
+        base = str(BASE_DIR)
     return os.path.join(base, nombre_relativo)
 
 
 def cargar_config_local():
-    """Lee la configuración local de forma segura (independiente del cwd).
-    Prioriza CONFIG_FILE (datos del usuario) sobre 'config_local.json' (valores por defecto)."""
+    """Configuración local: valores por defecto (junto a la app) + los del usuario."""
     config = {}
-    # Valores por defecto (junto a la app / empaquetados) con menor prioridad.
-    candidatos = [os.path.join(APP_DIR, "config_local.json")]
+    candidatos = [os.path.join(str(BASE_DIR), "config_local.json")]
     try:
         candidatos.append(os.path.join(sys._MEIPASS, "config_local.json"))
     except Exception:
         pass
-    # La configuración del usuario se aplica al final para que tenga prioridad.
-    candidatos.append(CONFIG_FILE)
+    candidatos.append(str(CONFIG_FILE))   # el usuario tiene prioridad
     for ruta in candidatos:
         try:
             if os.path.exists(ruta):
@@ -110,3 +102,150 @@ def cargar_config_local():
         except Exception:
             continue
     return config
+
+
+# =========================================================
+# RESOLUCIÓN PORTABLE DE RUTAS DE ARCHIVOS
+# =========================================================
+# Subcarpetas que usa el programa para guardar documentos. Sirven para reconocer
+# una ruta guardada (aunque venga de otro equipo o de otro sistema operativo) y
+# volver a encontrarla en la carpeta local de ESTE equipo.
+SUBCARPETAS_CONOCIDAS = (
+    "facturas_recibidas", "facturas_emitidas", "comprobantes_egresos", "comprobantes_ingresos",
+    "comprobantes_impuestos", "ordenes_generadas", "ordenes_anuladas", "ordenes_compra_recibidas",
+    "cobranzas_generadas", "Inspecciones", "Inspecciones_PDF", "archivos_flota",
+    "Cotizaciones", "soportes_pagos_terceros", "cartas_eventos", "formularios_proveedores",
+    "Pautas_Eventos", "tarjetas_propiedad", "expedientes_choferes",
+)
+
+
+def ruta_drive_configurada():
+    """Carpeta local configurada en Configuración del Sistema (ruta_drive)."""
+    try:
+        datos = cargar_config_local()
+        if isinstance(datos, dict):
+            return str(datos.get("ruta_drive", "") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _normalizar_nombre(nombre):
+    """Normaliza un nombre para compararlo (acentos NFC/NFD y mayúsculas)."""
+    try:
+        import unicodedata
+        return unicodedata.normalize("NFC", str(nombre)).casefold()
+    except Exception:
+        return str(nombre).casefold()
+
+
+def partir_ruta_guardada(ruta):
+    """(subcarpeta, nombre_archivo) de una ruta guardada, sea Windows o macOS."""
+    texto = str(ruta or "").replace("\\", "/").strip()
+    if not texto:
+        return "", ""
+    partes = [p for p in texto.split("/") if p not in ("", ".")]
+    if not partes:
+        return "", ""
+    nombre = partes[-1]
+    subcarpeta = ""
+    for i in range(len(partes) - 1, -1, -1):
+        if partes[i] in SUBCARPETAS_CONOCIDAS:
+            subcarpeta = "/".join(partes[i:-1])
+            break
+    return subcarpeta, nombre
+
+
+def resolver_ruta_archivo(ruta_guardada, ruta_base=""):
+    """Ruta REAL del archivo en este equipo, o "" si no se encuentra.
+
+    1) si la ruta existe tal cual, se devuelve;
+    2) si es relativa, se resuelve contra la carpeta local (ruta_drive);
+    3) se reconstruye subcarpeta + nombre dentro de la carpeta local;
+    4) se busca el nombre en las subcarpetas conocidas de la carpeta local.
+    """
+    if not ruta_guardada:
+        return ""
+    base = os.path.expanduser(str(ruta_base or "").strip()) or os.path.expanduser(ruta_drive_configurada())
+    candidatas = []
+
+    texto = str(ruta_guardada).replace("\\", os.sep).strip()
+    if os.path.isabs(texto):
+        candidatas.append(texto)
+    elif base:
+        candidatas.append(os.path.join(base, texto))
+
+    subcarpeta, nombre = partir_ruta_guardada(ruta_guardada)
+    if base and nombre:
+        if subcarpeta:
+            candidatas.append(os.path.join(base, *subcarpeta.split("/"), nombre))
+        candidatas.append(os.path.join(base, nombre))
+        for conocida in SUBCARPETAS_CONOCIDAS:
+            candidatas.append(os.path.join(base, conocida, nombre))
+    if nombre:
+        candidatas.append(os.path.join(str(BASE_DIR), nombre))
+
+    for candidata in candidatas:
+        try:
+            if candidata and os.path.exists(candidata):
+                return os.path.normpath(candidata)
+        except Exception:
+            continue
+
+    objetivo = _normalizar_nombre(nombre) if nombre else ""
+    if objetivo:
+        carpetas = []
+        if base:
+            carpetas.append(base)
+            if subcarpeta:
+                carpetas.append(os.path.join(base, *subcarpeta.split("/")))
+            carpetas.extend(os.path.join(base, conocida) for conocida in SUBCARPETAS_CONOCIDAS)
+        for carpeta in carpetas:
+            try:
+                if not os.path.isdir(carpeta):
+                    continue
+                for entrada in os.listdir(carpeta):
+                    if _normalizar_nombre(entrada) == objetivo:
+                        ruta = os.path.join(carpeta, entrada)
+                        if os.path.isfile(ruta):
+                            return os.path.normpath(ruta)
+            except Exception:
+                continue
+    return ""
+
+
+def ruta_para_guardar(ruta, ruta_base=""):
+    """Ruta que se debe GUARDAR en la base de datos.
+
+    Si el archivo está dentro de la carpeta local sincronizada (ruta_drive) se
+    guarda RELATIVA (por ejemplo 'facturas_emitidas/archivo.pdf'): así la misma
+    fila sirve en Windows y en Mac. Fuera de esa carpeta se guarda absoluta.
+    """
+    if not ruta:
+        return ruta
+    try:
+        base = os.path.expanduser(str(ruta_base or "").strip()) or os.path.expanduser(ruta_drive_configurada())
+        if not base:
+            return ruta
+        ruta_abs = os.path.abspath(os.path.expanduser(str(ruta)))
+        base_abs = os.path.abspath(base)
+        if os.path.commonpath([ruta_abs, base_abs]) != base_abs:
+            return ruta
+        relativa = os.path.relpath(ruta_abs, base_abs)
+        if relativa.startswith(".."):
+            return ruta
+        return relativa.replace(os.sep, "/")
+    except Exception:
+        return ruta
+
+
+def eliminar_archivo(ruta_guardada, ruta_base=""):
+    """Elimina el archivo resolviendo la ruta (aunque se guardó en otro equipo/SO)."""
+    ruta = resolver_ruta_archivo(ruta_guardada, ruta_base)
+    if not ruta:
+        return False
+    try:
+        os.remove(ruta)
+        return True
+    except Exception:
+        return False

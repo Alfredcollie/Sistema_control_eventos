@@ -195,6 +195,13 @@ try {
         try { if ($intent -gt 0) { $item.Properties.Item('Current Intent').Value = $intent } } catch { }
         try { $item.Properties.Item('Horizontal Resolution').Value = $dpi } catch { }
         try { $item.Properties.Item('Vertical Resolution').Value = $dpi } catch { }
+        # Recorte opcional: escanear solo la zona del comprobante (2º intento).
+        if ($areaX -ne '' -and $areaAncho -ne '' -and $areaAlto -ne '') {
+            try { $item.Properties.Item('Horizontal Start Position').Value = [int]$areaX } catch { }
+            try { $item.Properties.Item('Vertical Start Position').Value = [int]$areaY } catch { }
+            try { $item.Properties.Item('Horizontal Extent').Value = [int]$areaAncho } catch { }
+            try { $item.Properties.Item('Vertical Extent').Value = [int]$areaAlto } catch { }
+        }
         $imagen = $item.Transfer('{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}')
         $hechas++
         $ruta = Join-Path $carpeta ('pagina_{0:D2}.jpg' -f $hechas)
@@ -366,7 +373,7 @@ def _endurecer_error(resultado):
 
 def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
              origen="Cristal (una página a la vez)", paginas=1, optimizar=True,
-             modo="Automático (sin ventanas)"):
+             modo="Automático (sin ventanas)", area=None):
     """Escanea y devuelve {'ok', 'escaner', 'paginas': [...], 'error', 'aviso'}.
 
     Modos:
@@ -439,7 +446,7 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
         # El escáner a veces responde "dispositivo ocupado" (sobre todo si se acaba
         # de escanear): se reintenta un par de veces antes de rendirse.
         for intento in range(1, 4):
-            res = _ejecutar_ps(_PS_ESCANEAR, [destino, dispositivo, dpi, intent, origen_wia, paginas], timeout=420)
+            res = _ejecutar_ps(_PS_ESCANEAR, [destino, dispositivo, dpi, intent, origen_wia, paginas] + list(area if area else ['', '', '', '']), timeout=420)
             paginas_ok = [str(p) for p in (res.get("paginas") or []) if os.path.exists(str(p))]
             aviso = res.get("aviso", "")
             error = res.get("error", "")

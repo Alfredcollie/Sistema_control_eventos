@@ -1049,7 +1049,13 @@ def ejecutar_sincronizacion_silenciosa():
 
     # Se excluyen los archivos basura de macOS (.DS_Store y AppleDouble "._"):
     # son miles de archivos que ralentizan muchísimo el listado y la sincronización.
-    exclusiones = ["--exclude", ".DS_Store*", "--exclude", "._*"]
+    # Basura de macOS + restos del código fuente que no deben bajarse a la carpeta
+    # de trabajo (el equipo antiguo tenía la carpeta del programa como carpeta local).
+    exclusiones = ["--exclude", ".DS_Store*", "--exclude", "._*",
+                   "--exclude", ".git/**", "--exclude", ".github/**",
+                   "--exclude", "__pycache__/**", "--exclude", "*.pyc",
+                   "--exclude", "tests/**", "--exclude", "__dsh_test__/**",
+                   "--exclude", "Archivo Exe/**"]
 
     try:
         subprocess.run([cmd, *args_cfg, "copy", ruta_remota, local, "--update", "--quiet", *exclusiones], timeout=600, **kwargs)

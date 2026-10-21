@@ -413,6 +413,30 @@ def menu_columnas(tabla, clave):
         menu.grab_release()
 
 
+# 🧾 Columnas para los impuestos deducibles del cobro (se crean una vez)
+_PAGOS_IMPUESTOS_OK = False
+
+
+def _asegurar_columnas_impuestos(conn):
+    """Agrega (una sola vez por sesión) las columnas de impuestos deducibles."""
+    global _PAGOS_IMPUESTOS_OK
+    if _PAGOS_IMPUESTOS_OK or conn is None:
+        return
+    try:
+        with conn.cursor() as c:
+            c.execute("ALTER TABLE pagos_clientes ADD COLUMN IF NOT EXISTS "
+                      "impuestos_deducibles NUMERIC DEFAULT 0")
+            c.execute("ALTER TABLE pagos_clientes ADD COLUMN IF NOT EXISTS "
+                      "archivo_impuesto TEXT DEFAULT ''")
+        conn.commit()
+        _PAGOS_IMPUESTOS_OK = True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 class FacturasEmitidasTab:
     def __init__(self, tab_frame, main_root, app_padre):
         self.tab_frame, self.main_root, self.app_padre = tab_frame, main_root, app_padre
@@ -739,6 +763,9 @@ class FacturasEmitidasTab:
         self.tabla.column("evento", width=120, anchor="w"); self.tabla.column("neto", width=85, anchor="e"); self.tabla.column("estado_sunat", width=95, anchor="center")
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "cliente", "concepto", "evento", "neto", "estado_sunat"))
         self.tabla.bind("<Double-1>", self.abrir_archivo_desde_tabla)
+        # 🖱️ Clic derecho: editar / ver factura / comprobante
+        self.tabla.bind("<Button-3>", self._menu_contextual_factura)
+        self.tabla.bind("<Button-2>", self._menu_contextual_factura)
         scroll_y = ttk.Scrollbar(f_tabla, orient="vertical", command=self.tabla.yview)
         scroll_x = ttk.Scrollbar(f_tabla, orient="horizontal", command=self.tabla.xview); self.tabla.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
         scroll_x.pack(side="bottom", fill="x")
@@ -757,8 +784,6 @@ class FacturasEmitidasTab:
         self.btn_ant = ctk.CTkButton(f_paginacion, text="◀ Ant", width=60, command=self.pagina_anterior); self.btn_ant.pack(side="left", padx=2)
         self.lbl_pagina = ctk.CTkLabel(f_paginacion, text=f"Pág {self.pagina_actual}", font=("Arial", 11, "bold")); self.lbl_pagina.pack(side="left", padx=5)
         self.btn_sig = ctk.CTkButton(f_paginacion, text="Sig ▶", width=60, command=self.pagina_siguiente); self.btn_sig.pack(side="left", padx=2)
-        ctk.CTkButton(f_btn_tabla, text="⚙️ Gestionar Registro Seleccionado", command=self.abrir_ventana_edicion, fg_color="#34495e", hover_color="#2c3e50").pack(side="right")
-
         self.cargar_clientes_bd(); self.cargar_eventos_aprobados(); self.cargar_ordenes_compra(); self.sugerir_correlativo()
         self.main_root.after(100, lambda: self.cargar_datos_tabla(reset_pagina=True))
 
@@ -929,7 +954,7 @@ class FacturasEmitidasTab:
                 if facturas_historicas:
                     ids_fac = [r[0] for r in facturas_historicas]
                     placeholders = ",".join(["%s"] * len(ids_fac))
-                    cursor.execute(f"SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
+                    cursor.execute(f"SELECT id_factura, SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
                     pagos_por_factura = {pr[0]: (float(pr[1]) if pr[1] else 0.0) for pr in cursor.fetchall()}
                 for r in facturas_historicas:
                     id_fac, tot_b, det_m, t_doc, imp_val = r
@@ -988,10 +1013,10 @@ class FacturasEmitidasTab:
         if not conn: self.main_root.after(0, lambda: self._pintar_tabla_facturas([], token_actual)); return
         try:
             cursor = conn.cursor()
-            if filtro == "": cursor.execute("SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
+            if filtro == "": cursor.execute("SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
             else:
                 val = f"%{filtro}%"
-                cursor.execute("""SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas WHERE numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s""", (val, val, val, self.registros_por_pagina, offset))
+                cursor.execute("""SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas WHERE numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s""", (val, val, val, self.registros_por_pagina, offset))
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
             for r in cursor.fetchall():
                 tiene_arch = "✅ Ver" if r[12] else "❌ No"
@@ -1031,6 +1056,115 @@ class FacturasEmitidasTab:
             else: self.btn_ant.configure(state="disabled")
             if len(filas_resultado) == self.registros_por_pagina: self.btn_sig.configure(state="normal")
             else: self.btn_sig.configure(state="disabled")
+
+    # =========================================================
+    # 🖱️ MENÚ DE CLIC DERECHO EN LA FACTURA
+    # =========================================================
+    def _datos_factura_venta(self, id_factura):
+        """(ruta_local, enlace_sunat, comprobantes) de una factura de venta."""
+        ruta_local, enlace, comprobantes = "", "", []
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return ruta_local, enlace, comprobantes
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT COALESCE(archivo_ruta, ''), COALESCE(enlace_pdf_sunat, '')
+                             FROM facturas_emitidas WHERE id = %s""", (id_factura,))
+                fila = c.fetchone()
+                if fila:
+                    ruta_local = str(fila[0] or "").strip()
+                    enlace = str(fila[1] or "").strip()
+                c.execute("""SELECT COALESCE(archivo_ruta, '') FROM pagos_clientes
+                             WHERE id_factura = %s AND COALESCE(archivo_ruta, '') <> ''
+                             ORDER BY id DESC""", (id_factura,))
+                comprobantes = [r[0] for r in c.fetchall()]
+        except Exception as e:
+            print("Aviso - archivos de la factura de venta:", e)
+        finally:
+            liberar_conexion(conn)
+        return ruta_local, enlace, comprobantes
+
+    def _primera_ruta_venta(self, candidatas):
+        """Primera ruta de la lista que exista en este equipo (o '')."""
+        for ruta in (candidatas or []):
+            ruta = str(ruta or "").strip()
+            if not ruta:
+                continue
+            resuelta = ""
+            try:
+                from app_paths import resolver_ruta_archivo as _resolver
+                resuelta = _resolver(ruta)
+            except Exception:
+                resuelta = ruta if os.path.exists(ruta) else ""
+            for candidata in (resuelta, ruta):
+                try:
+                    if candidata and os.path.isfile(candidata):
+                        return candidata
+                except Exception:
+                    continue
+        return ""
+
+    def _abrir_comprobantes_venta(self, comprobantes):
+        """Abre todos los comprobantes de pago disponibles de la factura."""
+        abiertos = 0
+        for ruta in (comprobantes or []):
+            resuelta = self._primera_ruta_venta([ruta])
+            if not resuelta:
+                continue
+            try:
+                abrir_documento(resuelta)
+                abiertos += 1
+            except Exception:
+                pass
+        if not abiertos:
+            messagebox.showwarning(
+                "Comprobante de pago",
+                "Los comprobantes están registrados pero los archivos no se encuentran en este equipo."
+                + chr(10) + chr(10) +
+                "Verifique que la carpeta sincronizada esté actualizada (Rclone).",
+                parent=getattr(self, "main_root", None))
+
+    def _menu_contextual_factura(self, event):
+        """Botón derecho: editar registro / ver factura / ver comprobante (y cobros)."""
+        tabla = event.widget
+        try:
+            fila = tabla.identify_row(event.y)
+            if not fila:
+                return
+            tabla.selection_set(fila)
+            id_fact = int(tabla.item(fila, "values")[1])
+        except Exception:
+            return
+
+        es_cobranza = hasattr(self, "cargar_comprobante_cobro")
+        ruta_local, enlace, comprobantes = self._datos_factura_venta(id_fact)
+        ruta_factura = self._primera_ruta_venta([ruta_local])
+        ruta_comp = self._primera_ruta_venta(comprobantes)
+
+        menu = tk.Menu(getattr(self, "main_root", None), tearoff=0)
+        if es_cobranza:
+            menu.add_command(label="🧾 Registrar cobro", command=self.cargar_comprobante_cobro)
+            menu.add_command(label="✏️ Editar cobro", command=self.abrir_ventana_edicion)
+        else:
+            menu.add_command(label="✏️ Editar registro", command=self.abrir_ventana_edicion)
+        menu.add_separator()
+        if ruta_factura:
+            menu.add_command(label="📄 Ver factura",
+                             command=lambda r=ruta_factura: abrir_documento(r))
+        elif enlace:
+            menu.add_command(label="📄 Ver factura (SUNAT)",
+                             command=lambda e=enlace: webbrowser.open(e))
+        else:
+            menu.add_command(label="📄 Ver factura (sin archivo)", state="disabled")
+        if ruta_comp:
+            menu.add_command(label="🧾 Ver comprobante de pago",
+                             command=lambda c=comprobantes: self._abrir_comprobantes_venta(c))
+        else:
+            menu.add_command(label="🧾 Ver comprobante de pago (sin archivo)", state="disabled")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def abrir_archivo_desde_tabla(self, event):
         sel = self.tabla.selection()
@@ -1221,7 +1355,7 @@ class FacturasEmitidasTab:
                         if facturas_historicas:
                             ids_fac = [r[0] for r in facturas_historicas]
                             placeholders = ",".join(["%s"] * len(ids_fac))
-                            c2.execute(f"SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
+                            c2.execute(f"SELECT id_factura, SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes WHERE id_factura IN ({placeholders}) GROUP BY id_factura", tuple(ids_fac))
                             pagos_por_factura = {pr[0]: (float(pr[1]) if pr[1] else 0.0) for pr in c2.fetchall()}
                         for r in facturas_historicas:
                             f_id, tot_b, det_m, t_doc, imp_val = r
@@ -1231,7 +1365,7 @@ class FacturasEmitidasTab:
                             else: neto_fac = tot_val - det_val
                             pagado = pagos_por_factura.get(f_id, 0.0)
                             saldo = max(0.0, neto_fac - (float(pagado) if pagado else 0.0)); deuda_actual += saldo
-                        c2.execute("SELECT SUM(monto_pagado) FROM pagos_clientes WHERE id_factura = %s", (id_doc,))
+                        c2.execute("SELECT SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes WHERE id_factura = %s", (id_doc,))
                         pag_esta = c2.fetchone()[0]
                         saldo_nuevo_esta = max(0.0, neto_nuevo - (float(pag_esta) if pag_esta else 0.0))
                         deuda_proyectada = deuda_actual + saldo_nuevo_esta
@@ -1306,6 +1440,12 @@ class FacturasEmitidasTab:
 # PESTAÑA 2: CUENTAS POR COBRAR (COBROS Y DEUDAS)
 # =========================================================
 class CuentasPorCobrarTab:
+    # 🖱️ Mismo menú de clic derecho que la pestaña de facturas
+    _datos_factura_venta = FacturasEmitidasTab._datos_factura_venta
+    _primera_ruta_venta = FacturasEmitidasTab._primera_ruta_venta
+    _abrir_comprobantes_venta = FacturasEmitidasTab._abrir_comprobantes_venta
+    _menu_contextual_factura = FacturasEmitidasTab._menu_contextual_factura
+
     def __init__(self, tab_frame, main_root, app_padre):
         self.tab_frame, self.main_root, self.app_padre = tab_frame, main_root, app_padre
         self.orden_columnas, self._id_debounce_busqueda = {}, None
@@ -1346,9 +1486,6 @@ class CuentasPorCobrarTab:
         # 🚀 BOTÓN UNIFICADO DE REPORTES Y RESÚMENES
         btn_reporte = ctk.CTkButton(frame_acciones, text="📈 Reporte y Resumen Avanzado", font=("Arial", 12, "bold"), command=self.mostrar_reporte_totales, fg_color="#1f538d", hover_color="#163b65")
         btn_reporte.pack(side="left", padx=5, pady=5)
-        ctk.CTkButton(frame_acciones, text="🧾 Registrar Cobro", font=("Arial", 12, "bold"), command=self.cargar_comprobante_cobro, fg_color="#34495e", hover_color="#2c3e50").pack(side="left", padx=5, pady=5)
-        ctk.CTkButton(frame_acciones, text="✏️ Editar Cobros", font=("Arial", 12, "bold"), command=self.abrir_ventana_edicion, fg_color="#34495e", hover_color="#2c3e50").pack(side="left", padx=5, pady=5)
-
         btn_varias = ctk.CTkButton(frame_acciones, text="🧾 Cobrar Varias",
                                     font=("Arial", 12, "bold"), fg_color="#b9770e", hover_color="#8e5e0a",
                                     command=self.cobrar_varias_facturas)
@@ -1356,7 +1493,7 @@ class CuentasPorCobrarTab:
         # 📅 Listado de TODAS las facturas por cobrar ordenadas por días para vencer
         ctk.CTkButton(frame_acciones, text="📅 Ver por Días por Vencer", font=("Arial", 12, "bold"),
                       command=self.ver_por_vencer, fg_color="#8e44ad", hover_color="#703688").pack(side="left", padx=5, pady=5)
-        ctk.CTkButton(frame_acciones, text="🔄 Actualizar", font=("Arial", 12, "bold"), command=lambda: self.cargar_datos_cobrar(reset_pagina=True), fg_color="#7f8c8d", hover_color="#606b6b").pack(side="right", padx=10, pady=5)
+        ctk.CTkButton(frame_acciones, text="🔄 Actualizar", font=("Arial", 12, "bold"), command=lambda: self._refrescar_listas_cobro(), fg_color="#7f8c8d", hover_color="#606b6b").pack(side="right", padx=10, pady=5)
 
         f_busqueda = ctk.CTkFrame(self.tab_frame, fg_color="transparent")
         f_busqueda.pack(fill="x", padx=15, pady=(0, 5))
@@ -1364,7 +1501,7 @@ class CuentasPorCobrarTab:
         self.ent_buscar_cobros = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, cliente, evento, concepto...")
         self.ent_buscar_cobros.pack(side="left", fill="x", expand=True)
         self.ent_buscar_cobros.bind("<KeyRelease>", self._on_buscar_cobros_keyrelease)
-        self.ent_buscar_cobros.bind("<Return>", lambda e: self.cargar_datos_cobrar(reset_pagina=True))
+        self.ent_buscar_cobros.bind("<Return>", lambda e: self._refrescar_listas_cobro())
 
         f_tabla = ctk.CTkFrame(self.tab_frame, fg_color="transparent")
         f_tabla.pack(fill="both", expand=True, padx=15, pady=0)
@@ -1382,6 +1519,8 @@ class CuentasPorCobrarTab:
         self.tabla.column("cobrado", width=90, anchor="e"); self.tabla.column("saldo", width=90, anchor="e"); self.tabla.column("archivos", width=100, anchor="center")
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "cliente", "concepto", "evento", "neto_facturado", "cobrado", "saldo", "archivos"))
         self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos)
+        self.tabla.bind("<Button-3>", self._menu_contextual_factura)
+        self.tabla.bind("<Button-2>", self._menu_contextual_factura)
 
         # 🎨 Colores de las filas según el vencimiento del crédito (ver leyenda abajo)
         self.tabla.tag_configure("pagado", background="#d5f5e3")     # 🟢 ya cobrada
@@ -1427,7 +1566,7 @@ class CuentasPorCobrarTab:
         ctk.CTkButton(self.frame_bottom, text="📊 Exportar a Excel", font=("Arial", 12, "bold"), width=160, fg_color="#27ae60", hover_color="#1e8449", command=self.exportar_excel).pack(side="left", padx=20)
         self.lbl_total_general = ctk.CTkLabel(self.frame_bottom, text="Total Pendiente General por Cobrar: 0.00", font=("Arial", 12, "bold"), text_color="#c0392b")
         self.lbl_total_general.pack(side="right")
-        self.main_root.after(100, lambda: self.cargar_datos_cobrar(reset_pagina=True))
+        self.main_root.after(100, lambda: self._refrescar_listas_cobro())
 
     def _datos_tooltip(self, iid):
         """(vencimiento, pagada) de una fila, para el cuadrito del mouse.
@@ -1538,7 +1677,7 @@ class CuentasPorCobrarTab:
                     FROM facturas_emitidas ORDER BY id DESC
                 """)
                 registros = cursor.fetchall()
-                cursor.execute("SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes GROUP BY id_factura")
+                cursor.execute("SELECT id_factura, SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes GROUP BY id_factura")
                 pagos_lookup = {r[0]: float(r[1] or 0) for r in cursor.fetchall()}
             except Exception:
                 registros, pagos_lookup = [], {}
@@ -1671,7 +1810,7 @@ class CuentasPorCobrarTab:
         if self._id_debounce_busqueda is not None:
             try: self.main_root.after_cancel(self._id_debounce_busqueda)
             except Exception: pass
-        self._id_debounce_busqueda = self.main_root.after(350, lambda: self.cargar_datos_cobrar(reset_pagina=True))
+        self._id_debounce_busqueda = self.main_root.after(350, lambda: self._refrescar_listas_cobro())
 
     def cobrar_varias_facturas(self):
         """🧾 Cobra dos o más facturas de una vez, con UN solo comprobante de depósito.
@@ -1711,7 +1850,7 @@ class CuentasPorCobrarTab:
                                 SELECT f.numero_documento, f.cliente, COALESCE(f.total, 0),
                                        COALESCE(f.impuesto, 0), COALESCE(f.det_monto, 0),
                                        COALESCE(f.tipo_documento, ''),
-                                       COALESCE((SELECT SUM(monto_pagado) FROM pagos_clientes p
+                                       COALESCE((SELECT SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes p
                                                  WHERE p.id_factura = f.id), 0)
                                 FROM facturas_emitidas f WHERE f.id = %s""", (idf,))
                             fila = cur.fetchone()
@@ -1806,7 +1945,8 @@ class CuentasPorCobrarTab:
         ent_oper = ctk.CTkEntry(f)
         ent_oper.pack(fill="x")
 
-        ctk.CTkLabel(f, text="💰 Monto recibido:", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(f, text="💰 Monto recibido del cliente (neto, sin el impuesto):",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         ent_monto = ctk.CTkEntry(f)
         ent_monto.pack(fill="x")
         _total_pendiente = sum(max(0.0, p["saldo"]) for p in pendientes)
@@ -1831,6 +1971,7 @@ class CuentasPorCobrarTab:
                                    text_color="#1e8449")
 
         ent_monto.bind("<KeyRelease>", actualizar_calc)
+        ent_impuestos.bind("<KeyRelease>", actualizar_calc)
         lbl_calc.pack(anchor="w", pady=(2, 0))
         actualizar_calc()
 
@@ -2012,7 +2153,7 @@ class CuentasPorCobrarTab:
             except Exception:
                 pass
             try:
-                self.cargar_datos_cobrar(reset_pagina=True)
+                self._refrescar_listas_cobro()
                 self.app_padre.app_facturas.cargar_datos_tabla(reset_pagina=True)
             except Exception:
                 pass
@@ -2067,7 +2208,11 @@ class CuentasPorCobrarTab:
             if registros:
                 ids_pagina = [r[0] for r in registros]
                 placeholders = ",".join(["%s"] * len(ids_pagina))
-                cursor.execute(f"SELECT id_factura, SUM(monto_pagado), COUNT(archivo_ruta) FROM pagos_clientes WHERE id_factura IN ({placeholders}) AND archivo_ruta != '' GROUP BY id_factura", tuple(ids_pagina))
+                cursor.execute(f"""SELECT id_factura,
+                                                     COALESCE(SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)), 0),
+                                                     COUNT(*) FILTER (WHERE COALESCE(archivo_ruta, '') <> '')
+                                              FROM pagos_clientes WHERE id_factura IN ({placeholders})
+                                              GROUP BY id_factura""", tuple(ids_pagina))
                 pagos_por_factura = {pr[0]: pr for pr in cursor.fetchall()}
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
             for reg in registros:
@@ -2124,6 +2269,17 @@ class CuentasPorCobrarTab:
             if len(filas_resultado) == self.registros_por_pagina: self.btn_sig.configure(state="normal")
             else: self.btn_sig.configure(state="disabled")
 
+    def _refrescar_listas_cobro(self):
+        """Refresca la lista de cobros y la de facturas (para el color de cobrado)."""
+        try:
+            self.cargar_datos_cobrar(reset_pagina=True)
+        except Exception:
+            pass
+        try:
+            self.app_padre.app_facturas.cargar_datos_tabla(reset_pagina=True)
+        except Exception:
+            pass
+
     def cargar_comprobante_cobro(self):
         """🧾 Registrar Cobro (mismo formato que el cobro múltiple)."""
         ruta_base = obtener_ruta_base_drive()
@@ -2136,7 +2292,7 @@ class CuentasPorCobrarTab:
             return messagebox.showwarning("Selección", "Seleccione una factura.")
         valores = self.tabla.item(seleccion[0], "values")
         id_factura, nro_doc, cliente = valores[1], valores[3], valores[4]
-        saldo_actual = desformatear_numero(valores[11])
+        saldo_actual = desformatear_numero(self.tabla.set(seleccion[0], "saldo"))
         if saldo_actual <= 0:
             return messagebox.showinfo("Aviso", "Esta factura ya está cobrada por completo.",
                                        parent=ventana_para_mensaje(getattr(self, "main_root", None)))
@@ -2156,13 +2312,16 @@ class CuentasPorCobrarTab:
 
         v = ctk.CTkToplevel(getattr(self, "main_root", None))
         v.title("🧾 Registrar Cobro")
-        v.geometry("620x620")
+        # 🪟 Se abre lo más arriba posible y con scroll si el formulario es alto.
+        _alto_cobro = min(880, max(480, v.winfo_screenheight() - 90))
+        _x_cobro = max(0, (v.winfo_screenwidth() - 620) // 2)
+        v.geometry("620x%d+%d+0" % (_alto_cobro, _x_cobro))
         v.transient(getattr(self, "main_root", None))
         try:
             v.grab_set()
         except Exception:
             pass
-        f = ctk.CTkFrame(v, fg_color="transparent")
+        f = ctk.CTkScrollableFrame(v, fg_color="transparent")
         f.pack(fill="both", expand=True, padx=16, pady=12)
 
         ctk.CTkLabel(f, text="Cobro para: %s" % cliente, font=("Arial", 13, "bold"),
@@ -2194,6 +2353,44 @@ class CuentasPorCobrarTab:
         ent_monto = ctk.CTkEntry(f)
         ent_monto.pack(fill="x")
         ent_monto.insert(0, "%.2f" % saldo_actual)
+
+        # 🧾 Otros impuestos deducibles (retenciones) del cobro
+        ctk.CTkLabel(f, text="🧾 Otros impuestos deducibles (S/):",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ent_impuestos = ctk.CTkEntry(f)
+        ent_impuestos.pack(fill="x")
+        ent_impuestos.insert(0, "0.00")
+        estado_imp = {"ruta": ""}
+        lbl_imp = ctk.CTkLabel(f, text="", font=("Arial", 10), text_color="#999999", anchor="w")
+
+        def _pintar_impuesto():
+            nombre = os.path.basename(estado_imp["ruta"]) if estado_imp["ruta"] else ""
+            lbl_imp.configure(text=("📎 " + nombre) if nombre
+                              else "Sin comprobante del impuesto (opcional)",
+                              text_color="#1e8449" if nombre else "#999999")
+
+        def _cargar_impuesto():
+            try:
+                ruta = seleccionar_archivo_dialogo(titulo="Comprobante del impuesto")
+            except Exception:
+                ruta = ""
+            if ruta:
+                estado_imp["ruta"] = ruta
+                _pintar_impuesto()
+
+        def _quitar_impuesto():
+            estado_imp["ruta"] = ""
+            _pintar_impuesto()
+
+        f_imp = ctk.CTkFrame(f, fg_color="transparent")
+        f_imp.pack(fill="x")
+        ctk.CTkButton(f_imp, text="📎 Cargar comprobante del impuesto", height=30,
+                      font=("Arial", 11, "bold"),
+                      command=_cargar_impuesto).pack(side="left")
+        ctk.CTkButton(f_imp, text="✖ Quitar", width=80, height=30, font=("Arial", 11, "bold"),
+                      command=_quitar_impuesto).pack(side="left", padx=6)
+        lbl_imp.pack(anchor="w", pady=(2, 0))
+        _pintar_impuesto()
         lbl_calc = ctk.CTkLabel(f, text="", font=("Arial", 11, "bold"), text_color="#555555")
 
         def actualizar_calc(event=None):
@@ -2201,18 +2398,27 @@ class CuentasPorCobrarTab:
                 _monto = float(ent_monto.get().strip() or 0)
             except ValueError:
                 _monto = 0.0
+            try:
+                _impuestos = float(ent_impuestos.get().strip() or 0)
+            except ValueError:
+                _impuestos = 0.0
+            _monto = _monto + max(0.0, _impuestos)   # impuestos deducibles suman al cobro
             _diff = round(_monto - saldo_actual, 2)
+            _aplicado = formatear_moneda(_monto)
             if _diff < -0.005:
-                lbl_calc.configure(text="Saldo pendiente: %s   ·   Falta: %s"
-                                   % (formatear_moneda(saldo_actual), formatear_moneda(abs(_diff))),
+                lbl_calc.configure(text="Aplicado a la factura: %s   ·   Saldo: %s   ·   Falta: %s"
+                                   % (_aplicado, formatear_moneda(saldo_actual),
+                                      formatear_moneda(abs(_diff))),
                                    text_color="#c0392b")
             elif _diff > 0.005:
-                lbl_calc.configure(text="Saldo pendiente: %s   ·   Sobra: %s"
-                                   % (formatear_moneda(saldo_actual), formatear_moneda(_diff)),
+                lbl_calc.configure(text="Aplicado a la factura: %s   ·   Saldo: %s   ·   Sobra: %s"
+                                   % (_aplicado, formatear_moneda(saldo_actual),
+                                      formatear_moneda(_diff)),
                                    text_color="#b9770e")
             else:
-                lbl_calc.configure(text="Saldo pendiente: %s   ·   Exacto"
-                                   % formatear_moneda(saldo_actual), text_color="#1e8449")
+                lbl_calc.configure(text="Aplicado a la factura: %s   ·   Saldo: %s   ·   Exacto"
+                                   % (_aplicado, formatear_moneda(saldo_actual)),
+                                   text_color="#1e8449")
 
         ent_monto.bind("<KeyRelease>", actualizar_calc)
         lbl_calc.pack(anchor="w", pady=(2, 0))
@@ -2339,10 +2545,20 @@ class CuentasPorCobrarTab:
                 monto_val = float(ent_monto.get().strip() or 0)
             except ValueError:
                 return messagebox.showerror("Error", "Ingrese un monto numérico válido.", parent=v)
-            if monto_val <= 0:
-                return messagebox.showerror("Error", "El monto debe ser mayor a 0.", parent=v)
-            if monto_val > (saldo_actual + 0.01):
-                return messagebox.showerror("Error", "El monto supera el saldo pendiente.", parent=v)
+            try:
+                impuestos_val = float(ent_impuestos.get().strip() or 0)
+            except ValueError:
+                return messagebox.showerror("Error", "Los impuestos deducibles deben ser numéricos.",
+                                            parent=v)
+            if impuestos_val < 0:
+                return messagebox.showerror("Error", "Los impuestos deducibles no pueden ser negativos.",
+                                            parent=v)
+            total_val = round(monto_val + impuestos_val, 2)
+            if total_val <= 0:
+                return messagebox.showerror("Error", "El total del cobro debe ser mayor a 0.", parent=v)
+            if total_val > (saldo_actual + 0.01):
+                return messagebox.showerror(
+                    "Error", "El total (monto + impuestos deducibles) supera el saldo pendiente.", parent=v)
             fecha_val = ent_fecha.get().strip() or datetime.now().strftime("%d/%m/%Y")
             cuenta_val = cmb_cuenta.get().strip()
             oper_val = ent_oper.get().strip()
@@ -2357,13 +2573,21 @@ class CuentasPorCobrarTab:
                 if not conn:
                     return
                 cursor = conn.cursor()
+                ruta_imp_bd = ""
+                if estado_imp["ruta"]:
+                    try:
+                        ruta_imp_bd = ruta_para_guardar(estado_imp["ruta"]) or estado_imp["ruta"]
+                    except Exception:
+                        ruta_imp_bd = estado_imp["ruta"]
                 try:
+                    _asegurar_columnas_impuestos(conn)
                     cursor.execute("""
                         INSERT INTO pagos_clientes
                         (id_factura, monto_pagado, archivo_ruta, cliente_nombre, fecha_pago,
-                         cuenta_destino, numero_operacion)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                        (id_factura, monto_val, ruta_bd, cliente, fecha_val, cuenta_val, oper_val))
+                         cuenta_destino, numero_operacion, impuestos_deducibles, archivo_impuesto)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (id_factura, monto_val, ruta_bd, cliente, fecha_val, cuenta_val, oper_val,
+                         impuestos_val, ruta_imp_bd))
                 except Exception:
                     conn.rollback()
                     cursor.execute("""
@@ -2390,7 +2614,7 @@ class CuentasPorCobrarTab:
                 pass
             messagebox.showinfo("Éxito", "Cobro de %s registrado." % formatear_moneda(monto_val),
                                 parent=ventana_para_mensaje(getattr(self, "main_root", None)))
-            self.cargar_datos_cobrar(reset_pagina=True)
+            self._refrescar_listas_cobro()
 
         barra = ctk.CTkFrame(v, fg_color="transparent")
         barra.pack(fill="x", padx=16, pady=(0, 12))
@@ -2423,7 +2647,7 @@ class CuentasPorCobrarTab:
         if not sel: return messagebox.showwarning("Selección", "Seleccione la factura para editar sus cobros.")
         valores = self.tabla.item(sel[0], "values")
         id_factura, nro_doc, cliente = valores[1], valores[3], valores[4] 
-        saldo_actual_global = float(desformatear_numero(valores[12]) or 0) 
+        saldo_actual_global = float(desformatear_numero(self.tabla.set(sel[0], "saldo")) or 0) 
 
         v_edit = ctk.CTkToplevel(self.main_root)
         v_edit.title(f"✏️ Gestión de Cobros - Fac. {nro_doc}"); v_edit.geometry("720x400"); v_edit.transient(self.main_root); v_edit.grab_set()
@@ -2519,7 +2743,7 @@ class CuentasPorCobrarTab:
                     registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Cobrar", f"Modificó el cobro ID {id_pago} a {formatear_moneda(nuevo_monto)}")
 
                 saldo_actual_global -= diferencia_de_aumento
-                v_mod_cobro.destroy(); refrescar_subtabla(); self.cargar_datos_cobrar(reset_pagina=True)
+                v_mod_cobro.destroy(); refrescar_subtabla(); self._refrescar_listas_cobro()
 
             ent_mod_monto.bind("<Return>", guardar_mod); ent_mod_fecha.bind("<Return>", guardar_mod)
             ctk.CTkButton(v_mod_cobro, text="💾 Guardar Cambios", command=guardar_mod, fg_color="#27ae60", hover_color="#1e8449").pack(pady=10); ent_mod_monto.focus()
@@ -2547,7 +2771,7 @@ class CuentasPorCobrarTab:
                     cursor.execute("UPDATE pagos_clientes SET archivo_ruta = %s WHERE id = %s", (ruta_destino, id_pago))
                     conn.commit(); liberar_conexion(conn); registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Cobrar", f"Actualizó soporte del cobro ID {id_pago}")
                     messagebox.showinfo("Éxito", "Soporte actualizado.", parent=v_edit)
-                    refrescar_subtabla(); self.cargar_datos_cobrar(reset_pagina=True)
+                    refrescar_subtabla(); self._refrescar_listas_cobro()
                 except Exception as e: messagebox.showerror("Error", str(e), parent=v_edit)
 
         def eliminar_soporte():
@@ -2566,7 +2790,7 @@ class CuentasPorCobrarTab:
                     conn.commit(); liberar_conexion(conn)
                     registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Cobrar", f"Eliminó soporte del cobro ID {id_pago}")
                     messagebox.showinfo("Éxito", "Soporte eliminado.", parent=v_edit)
-                    refrescar_subtabla(); self.cargar_datos_cobrar(reset_pagina=True)
+                    refrescar_subtabla(); self._refrescar_listas_cobro()
                 except Exception as e: messagebox.showerror("Error", str(e), parent=v_edit)
 
         def eliminar_cobro_completo():
@@ -2587,7 +2811,7 @@ class CuentasPorCobrarTab:
                     conn.commit(); liberar_conexion(conn); cache_sistema.invalidar()
                     registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Cobrar", f"Eliminó completamente el cobro ID {id_pago}")
                     messagebox.showinfo("Éxito", "Cobro eliminado.", parent=v_edit)
-                    refrescar_subtabla(); self.cargar_datos_cobrar(reset_pagina=True); saldo_actual_global += monto_eliminado
+                    refrescar_subtabla(); self._refrescar_listas_cobro(); saldo_actual_global += monto_eliminado
                 except Exception as e: messagebox.showerror("Error", str(e), parent=v_edit)
 
         frame_lateral_btns = ctk.CTkFrame(frame_cuerpo, fg_color="transparent")
@@ -2688,10 +2912,10 @@ class CuentasPorCobrarTab:
             if not conn: return
             try:
                 c = conn.cursor()
-                c.execute("SELECT id_factura, SUM(monto_pagado) FROM pagos_clientes GROUP BY id_factura")
+                c.execute("SELECT id_factura, SUM(monto_pagado + COALESCE(impuestos_deducibles, 0)) FROM pagos_clientes GROUP BY id_factura")
                 cobros_dict = {id_f: (float(monto) if monto else 0.0) for id_f, monto in c.fetchall()}
 
-                c.execute("SELECT id, fecha, cliente, subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento, enlace_pdf_sunat, archivo_ruta, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas")
+                c.execute("SELECT id, fecha, cliente, subtotal, impuesto, total, COALESCE(det_monto, 0), tipo_documento, enlace_pdf_sunat, archivo_ruta, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas")
                 
                 tot_bruto = 0.0
                 tot_igv = 0.0

@@ -1234,7 +1234,8 @@ def inicializar_seguridad_db():
             if cursor.fetchone()[0] == 0:
                 todos_permisos = json.dumps({k: True for k in (
                     "clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores",
-                    "inventario", "locaciones", "ventas", "compras", "bancos", "libro_diario", "libro_mayor",
+                    "inventario", "locaciones", "bandeja", "ventas", "compras", "bancos",
+                    "libro_diario", "libro_mayor",
                     "impuestos", "dashboard", "configuracion", "usuarios", "bitacora", "solicitud_proveedor")})
                 cursor.execute(
                     "INSERT INTO usuarios (usuario, clave, clave_hash, rol, permisos) VALUES (%s, NULL, %s, %s, %s)",
@@ -1276,6 +1277,7 @@ class ControlGeneralEventos:
             "proveedores": "📦 Gestión de Proveedores",
             "inventario": "📋 Inventario y Almacén",
             "locaciones": "📍 Inventario de Locaciones",
+            "bandeja": "📥 Bandeja de Entrada",
             "ventas": "💼 Ventas (Facturas y Cobros)",
             "compras": "🛒 Compras (Facturas y Pagos)",
             "bancos": "🏦 Bancos (Saldos y Conciliación)",
@@ -1302,6 +1304,7 @@ class ControlGeneralEventos:
             "proveedores": self._crear_modulo_proveedores,
             "inventario": self._crear_modulo_inventario,
             "locaciones": self._crear_modulo_locaciones,
+            "bandeja": self._crear_modulo_bandeja,
             "ventas": self._crear_modulo_ventas,
             "compras": self._crear_modulo_compras,
             "bancos": self._crear_modulo_bancos,
@@ -2285,6 +2288,20 @@ class ControlGeneralEventos:
         except Exception as e:
             messagebox.showerror("Error", f"Fallo al abrir:\n{e}")
         return locals().get("app")          # 🪟 instancia del módulo (None si falló)
+
+    def _crear_modulo_bandeja(self, contenedor):
+        """📥 Bandeja de Entrada: procesa las facturas y comprobantes de la nube."""
+        try:
+            import modulo_bandeja
+            importlib.reload(modulo_bandeja)
+            app = modulo_bandeja.BandejaEntradaApp(contenedor, self.usuario_activo)
+            app.usuario_activo = self.usuario_activo
+            registrar_auditoria(self.usuario_activo, "Bandeja",
+                                "Abrió la Bandeja de Entrada")
+        except Exception as e:
+            messagebox.showerror("Error", f"Fallo al abrir la Bandeja de Entrada:\n{e}")
+            app = None
+        return app
 
     def _crear_modulo_ventas(self, contenedor):
         try:

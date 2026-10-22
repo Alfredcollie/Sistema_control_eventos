@@ -4,8 +4,20 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from app_paths import CONFIG_DIR, ruta_recurso
 
-def generar_pdf_interactivo_proveedor():
-    nombre_archivo = os.path.join(str(CONFIG_DIR), "Ficha_Registro_Proveedor.pdf")
+def generar_pdf_interactivo_proveedor(ruta_destino=""):
+    """Genera la ficha interactiva de proveedor.
+
+    ruta_destino: dónde guardarla. Si se deja vacío se guarda en la carpeta de
+    datos del programa (CONFIG_DIR).
+    Devuelve la ruta del PDF generado.
+    """
+    if ruta_destino:
+        carpeta = os.path.dirname(str(ruta_destino))
+        if carpeta:
+            os.makedirs(carpeta, exist_ok=True)
+        nombre_archivo = str(ruta_destino)
+    else:
+        nombre_archivo = os.path.join(str(CONFIG_DIR), "Ficha_Registro_Proveedor.pdf")
     c = canvas.Canvas(nombre_archivo, pagesize=letter)
     form = c.acroForm
     
@@ -153,7 +165,9 @@ def generar_pdf_interactivo_proveedor():
     c.drawString(40, 102, "No escanee ni imprima este documento fisico; el sistema lo leera electronicamente en segundos.")
     
     c.save()
-    print("Ficha interactiva oficial 'Ficha_Registro_Proveedor.pdf' generada con éxito sin la dirección fiscal y con campos de categorías alineados.")
+    print("Ficha interactiva de proveedor generada en:", nombre_archivo)
+    return nombre_archivo
+    # (texto histórico) Ficha interactiva oficial 'Ficha_Registro_Proveedor.pdf' generada con éxito sin la dirección fiscal y con campos de categorías alineados.")
 
 if __name__ == "__main__":
     generar_pdf_interactivo_proveedor()

@@ -13,6 +13,7 @@ from tkinter import messagebox, filedialog, ttk, colorchooser
 import sys
 import ctypes
 import os
+import time
 import json
 import importlib
 import inspect
@@ -751,8 +752,41 @@ def tomar_control_cuenta_principal():
     datos["linked_by_device"] = obtener_device_id()
     datos["linked_at"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     datos["cuenta_remotos"] = identidad
-    if not sobrescribir_rclone_sync(datos):
-        return False, "No se pudo guardar el registro en la nube (revise la conexión)."
+    # Escritura con 2 intentos (en macOS la red puede tardar en despertar).
+    guardado = None
+    for intento in (1, 2):
+        try:
+            guardado = sobrescribir_rclone_sync(datos)
+        except Exception as e:
+            global _ULTIMO_ERROR_TOMAR
+            _ULTIMO_ERROR_TOMAR = "excepcion: %s" % str(e)[:200]
+            guardado = None
+        if guardado:
+            break
+        try:
+            time.sleep(1.5)
+        except Exception:
+            pass
+    if not guardado:
+        motivo = ""
+        try:
+            from config_nube import ULTIMO_ERROR_SYNC as _err
+            motivo = str(_err or "")
+        except Exception:
+            pass
+        if not motivo:
+            motivo = str(globals().get("_ULTIMO_ERROR_TOMAR", "") or "")
+        # Se deja constancia en un archivo para poder revisarlo con calma.
+        try:
+            ruta_log = os.path.join(str(DATA_DIR), "error_principal_nube.txt")
+            with open(ruta_log, "w", encoding="utf-8") as f:
+                f.write("Equipo: %s\nFecha: %s\nMotivo: %s\nRegistro intentado: %s\n"
+                        % (obtener_device_id(), datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                           motivo or "(sin detalle)", str(datos)))
+        except Exception:
+            pass
+        return False, ("No se pudo guardar el registro en la nube."
+                       + chr(10) + chr(10) + (motivo or "Revise la conexión a Internet (Supabase)."))
 
     if not subir_token_rclone_nube():
         return False, ("Se asignó este equipo como principal, pero no se pudo publicar la cuenta."

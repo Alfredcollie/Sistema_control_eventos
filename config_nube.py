@@ -125,32 +125,61 @@ def registrar_rclone_sync(datos):
     return cargar_rclone_sync()
 
 
+ULTIMO_ERROR_SYNC = ""
+
+
 def sobrescribir_rclone_sync(datos):
     """Reemplaza el registro de sincronización a propósito (sin 'first-write-wins').
 
     Lo usa el equipo que TOMA EL CONTROL como PRINCIPAL (por ejemplo, al pasar
-    el mando del Windows a un Mac).
+    el mando del Windows a un Mac). Si algo falla deja el motivo en
+    ULTIMO_ERROR_SYNC para poder mostrarlo.
     """
+    global ULTIMO_ERROR_SYNC
+    ULTIMO_ERROR_SYNC = ""
+    texto = json.dumps(datos or {}, ensure_ascii=False)
     conn = conectar_db(silencioso=True)
     if not conn:
+        ULTIMO_ERROR_SYNC = "No hay conexión con la base de datos (Supabase)."
         return None
     try:
         with conn.cursor() as cursor:
             _asegurar_tabla(cursor)
-            cursor.execute(
-                "INSERT INTO config_general (clave, valor) VALUES (%s, %s) "
-                "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor",
-                (CLAVE_RCLONE, json.dumps(datos or {}, ensure_ascii=False)),
-            )
+            try:
+                cursor.execute(
+                    "INSERT INTO config_general (clave, valor) VALUES (%s, %s) "
+                    "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor",
+                    (CLAVE_RCLONE, texto))
+            except Exception as e_upsert:
+                # Plan B: la tabla podría no tener la clave única esperada.
+                ULTIMO_ERROR_SYNC = "upsert: %s" % str(e_upsert)[:200]
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                cursor.execute("UPDATE config_general SET valor = %s WHERE clave = %s",
+                               (texto, CLAVE_RCLONE))
+                if cursor.rowcount == 0:
+                    cursor.execute("INSERT INTO config_general (clave, valor) VALUES (%s, %s)",
+                                   (CLAVE_RCLONE, texto))
         conn.commit()
-    except Exception:
+    except Exception as e:
+        ULTIMO_ERROR_SYNC = "escritura: %s" % str(e)[:200]
         try:
             conn.rollback()
         except Exception:
             pass
     finally:
         liberar_conexion(conn)
-    return cargar_rclone_sync()
+
+    registro = cargar_rclone_sync() or {}
+    if not registro:
+        ULTIMO_ERROR_SYNC = ULTIMO_ERROR_SYNC or "El registro no se pudo leer de vuelta."
+        return None
+    if (registro.get("linked_by_device") or "") != (datos or {}).get("linked_by_device"):
+        ULTIMO_ERROR_SYNC = "La nube no guardó el cambio (quedó otro equipo como principal)."
+        return None
+    return registro
 
 
 def actualizar_cuenta_remotos(cuenta_remotos, device_id=""):

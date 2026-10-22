@@ -4,6 +4,44 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from app_paths import CONFIG_DIR, ruta_recurso
 
+CATEGORIAS_RESPALDO = (
+    "Luces", "Estructura", "Sonido", "Video", "Electrógenos", "Catering", "Bebidas",
+    "Menaje", "Mobiliario", "Mantelería", "Decoración", "Impresiones", "Merchandising",
+    "Personal", "Seguridad", "Movilidad", "Fotografía", "Artistas", "Otros",
+)
+
+
+def categorias_vigentes():
+    """Categorías ACTUALES de proveedores (tabla 'categorias').
+
+    Se leen en el momento de generar la ficha, así el PDF siempre sale con las
+    categorías que hay hoy en el módulo de Proveedores (Gestionar).
+    """
+    lista = ["Seleccione una opcion"]
+    try:
+        from conexion import conectar_db, liberar_conexion
+        conn = conectar_db(silencioso=True)
+        if conn:
+            try:
+                with conn.cursor() as c:
+                    c.execute("""SELECT nombre FROM categorias
+                                 WHERE COALESCE(nombre,'') <> '' ORDER BY nombre""")
+                    for (nombre,) in c.fetchall():
+                        nombre = str(nombre or "").strip()
+                        if nombre and nombre not in lista:
+                            lista.append(nombre)
+            finally:
+                liberar_conexion(conn)
+    except Exception as e:
+        print("[ficha] no se pudieron leer las categorías:", e)
+    # Si la tabla está vacía (o no hay BD) se usa la lista de respaldo
+    if len(lista) <= 1:
+        lista = ["Seleccione una opcion"] + list(CATEGORIAS_RESPALDO)
+    if "Otros" not in lista:
+        lista.append("Otros")
+    return lista
+
+
 def generar_pdf_interactivo_proveedor(ruta_destino=""):
     """Genera la ficha interactiva de proveedor.
 
@@ -48,14 +86,8 @@ def generar_pdf_interactivo_proveedor(ruta_destino=""):
     c.drawString(260, 680, "Nombre / Razon Social:")
     form.textfield(name="razon_social", tooltip="Nombre o Razon Social", x=380, y=675, width=190, height=16, fontSize=9.5)
     
-    lista_categorias = [
-        "Seleccione una opcion",
-        "Luces", "Estructuras", "Sonido", "Video", "Generadores",
-        "Catering", "Bebidas", "Menaje", "Mobiliario", "Manteleria",
-        "Decoracion", "Impresiones", "Merchandising",
-        "Personal", "Seguridad", "Movilidad", "Fotografia", "Artistas",
-        "Otros"
-    ]
+    # 📋 Categorías ACTUALES (se leen de la base en este momento)
+    lista_categorias = categorias_vigentes()
     
     # Fila 2: Categoría 1 y 2
     c.drawString(40, 655, "Categoria Principal:")

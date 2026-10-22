@@ -354,6 +354,63 @@ class SistemaProveedores:
             except Exception:
                 pass
 
+    def generar_ficha_proveedor(self):
+        """Genera la ficha interactiva de registro de proveedor.
+
+        Pregunta DÓNDE guardarla (por defecto en la carpeta sincronizada
+        'formularios_proveedores') y ofrece abrirla al terminar.
+        """
+        # Carpeta sugerida: la de la nube, para que quede compartida
+        carpeta = ""
+        try:
+            from app_paths import ruta_drive_configurada
+            base = ruta_drive_configurada()
+            if base:
+                carpeta = os.path.join(base, "formularios_proveedores")
+                os.makedirs(carpeta, exist_ok=True)
+        except Exception:
+            carpeta = ""
+
+        opciones = dict(title="Guardar la ficha de registro de proveedor",
+                        defaultextension=".pdf",
+                        initialfile="Ficha_Registro_Proveedor.pdf",
+                        filetypes=[("Documento PDF", "*.pdf"), ("Todos", "*.*")])
+        if carpeta and os.path.isdir(carpeta):
+            opciones["initialdir"] = carpeta
+        try:
+            destino = filedialog.asksaveasfilename(**opciones)
+        except Exception:
+            destino = filedialog.asksaveasfilename(title="Guardar la ficha de registro",
+                                                   defaultextension=".pdf",
+                                                   initialfile="Ficha_Registro_Proveedor.pdf")
+        if not destino:
+            return
+
+        try:
+            import importlib
+            import crear_formulario_pdf
+            importlib.reload(crear_formulario_pdf)
+            generado = crear_formulario_pdf.generar_pdf_interactivo_proveedor(destino)
+        except Exception as e:
+            return messagebox.showerror("Ficha de proveedor",
+                                        "No se pudo generar la ficha:" + chr(10) + str(e))
+        if not generado:
+            generado = destino
+        try:
+            registrar_auditoria(getattr(self, "usuario_activo", "Sistema"), "Proveedores",
+                                "Generó la ficha de registro de proveedor: " +
+                                os.path.basename(str(generado)))
+        except Exception:
+            pass
+        if messagebox.askyesno("Ficha de proveedor",
+                               "Ficha generada correctamente en:" + chr(10) + str(generado) +
+                               chr(10) + chr(10) + "¿Desea abrirla ahora?"):
+            try:
+                abrir_documento(str(generado))
+            except Exception as e:
+                messagebox.showwarning("Ficha de proveedor",
+                                       "No se pudo abrir el PDF:" + chr(10) + str(e))
+
     def buscar_catalogo_pdf(self, entry_widget):
         ruta = filedialog.askopenfilename(title="Seleccionar Catálogo PDF", filetypes=[("Archivos PDF", "*.pdf")])
         if ruta:
@@ -895,7 +952,14 @@ class SistemaProveedores:
         f_pdf = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f_pdf.pack(fill="x", padx=10, pady=(0, 10))
         btn_importar_rapido = ctk.CTkButton(f_pdf, text="📄 Importar Datos de Ficha PDF", font=("Arial", 12, "bold"), fg_color="#27ae60", hover_color="#1e8449", command=self.ejecutar_importacion_pdf)
-        btn_importar_rapido.pack(fill="x", padx=15, pady=12)
+        btn_importar_rapido.pack(fill="x", padx=15, pady=(12, 6))
+
+        # 📝 Genera la ficha interactiva de registro y deja elegir dónde guardarla
+        btn_generar_ficha = ctk.CTkButton(
+            f_pdf, text="📝 Generar Ficha de Registro (PDF)", font=("Arial", 12, "bold"),
+            fg_color="#8e44ad", hover_color="#703688",
+            command=self.generar_ficha_proveedor)
+        btn_generar_ficha.pack(fill="x", padx=15, pady=(0, 12))
 
         f1 = ctk.CTkFrame(self.scroll_frame, corner_radius=12)
         f1.pack(fill="x", padx=10, pady=10, ipady=15)

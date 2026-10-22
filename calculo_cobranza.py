@@ -359,10 +359,14 @@ def feriados_locales(anio):
 # 🚀 CLASIFICACIÓN DE DÍAS DE LA QUINCENA
 # =========================================================
 def clasificar_dia(fecha, feriados):
-    if fecha in feriados:
-        return "feriado"
+    """Clasifica el día: domingo, feriado (según la lista de Perú) o normal.
+
+    El feriado SE MUESTRA en la quincena pero NO se cobra el día.
+    """
     if fecha.weekday() == 6:  # Domingo
         return "domingo"
+    if feriados and fecha in feriados:
+        return "feriado"
     return "normal"  # Lunes a sábado
 
 
@@ -1484,7 +1488,11 @@ class CalculoCobranzaApp:
             for clave, _ in CATEGORIAS:
                 cant = c[clave]
                 precio = precio_cat[clave]
-                base_cat = cant * precio * horas_dia  # Por Hora: precio × horas del día
+                if clave == "feriado":
+                    # 📅 El feriado aparece en la quincena pero NO se cobra el día.
+                    base_cat = 0.0
+                else:
+                    base_cat = cant * precio * horas_dia  # Por Hora: precio × horas del día
                 monto_cat_u[clave] = base_cat
                 monto_cat_global[clave] += base_cat
                 base_u += base_cat

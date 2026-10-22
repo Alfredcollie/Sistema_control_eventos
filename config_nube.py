@@ -125,6 +125,34 @@ def registrar_rclone_sync(datos):
     return cargar_rclone_sync()
 
 
+def sobrescribir_rclone_sync(datos):
+    """Reemplaza el registro de sincronización a propósito (sin 'first-write-wins').
+
+    Lo usa el equipo que TOMA EL CONTROL como PRINCIPAL (por ejemplo, al pasar
+    el mando del Windows a un Mac).
+    """
+    conn = conectar_db(silencioso=True)
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cursor:
+            _asegurar_tabla(cursor)
+            cursor.execute(
+                "INSERT INTO config_general (clave, valor) VALUES (%s, %s) "
+                "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor",
+                (CLAVE_RCLONE, json.dumps(datos or {}, ensure_ascii=False)),
+            )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        liberar_conexion(conn)
+    return cargar_rclone_sync()
+
+
 def actualizar_cuenta_remotos(cuenta_remotos, device_id=""):
     """Guarda la IDENTIDAD de las cuentas Rclone (remote -> huella estable).
     Solo puede cambiarla el equipo PROPIETARIO del registro."""

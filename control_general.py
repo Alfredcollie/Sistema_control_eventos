@@ -54,7 +54,7 @@ from app_paths import CONFIG_FILE, cargar_config_local, DATA_DIR, obtener_device
 from tareas_seguras import ejecutar_en_hilo
 from config_nube import (cargar_rclone_sync, registrar_rclone_sync, borrar_rclone_sync,
                          obtener_rclone_token, guardar_rclone_token, borrar_rclone_token,
-                         actualizar_cuenta_remotos)
+                         actualizar_cuenta_remotos, sobrescribir_rclone_sync)
 
 # 🏦 Cuentas bancarias del sistema (las comparten Configuración General,
 # el módulo de Bancos y el registro de cobros de Ventas).
@@ -720,6 +720,51 @@ def subir_token_rclone_nube():
         return guardado
     except Exception:
         return False
+
+
+def tomar_control_cuenta_principal():
+    """Convierte ESTE equipo en el PRINCIPAL (dueño) de la cuenta Rclone.
+
+    Sirve cuando el equipo que figura como dueño ya no es el que debe compartir
+    la cuenta (por ejemplo, al pasar el mando a un Mac): deja el registro con el
+    identificador de este equipo y publica su rclone.conf cifrado para los demás.
+    """
+    try:
+        from politica_almacenamiento import leer_rclone_local, identidad_remotos
+    except Exception as e:
+        return False, "No se pudo leer la configuración de Rclone: %s" % e
+
+    texto = leer_rclone_local() or ""
+    if not texto.strip() or "[" not in texto:
+        return False, ("Este equipo todavía no tiene una cuenta de Google vinculada en Rclone."
+                       + chr(10) + chr(10) +
+                       "Pulse «Vinculación automática de la cuenta» (Vincular Cuenta Auto) y reintente.")
+    identidad = identidad_remotos(texto) or {}
+    if not identidad:
+        return False, "Este equipo no tiene ninguna cuenta de Rclone vinculada."
+
+    registro = cargar_rclone_sync() or {}
+    datos = dict(registro)
+    datos["rclone_remote"] = str(datos.get("rclone_remote") or "gdrive:").strip()
+    if not datos.get("rclone_ruta_nube"):
+        datos["rclone_ruta_nube"] = str(cargar_config_local().get("rclone_ruta_nube", "") or "").strip()
+    datos["linked_by_device"] = obtener_device_id()
+    datos["linked_at"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    datos["cuenta_remotos"] = identidad
+    if not sobrescribir_rclone_sync(datos):
+        return False, "No se pudo guardar el registro en la nube (revise la conexión)."
+
+    if not subir_token_rclone_nube():
+        return False, ("Se asignó este equipo como principal, pero no se pudo publicar la cuenta."
+                       + chr(10) + "Revise que Rclone esté configurado en este equipo.")
+    try:
+        sincronizar_token_rclone_local()
+    except Exception:
+        pass
+    return True, ("✅ Este equipo es ahora el PRINCIPAL de la cuenta Rclone."
+                  + chr(10) + chr(10) +
+                  "Los demás equipos deben pulsar «Usar la cuenta del equipo principal» "
+                  "para quedar sincronizados.")
 
 
 def normalizar_ruta_local(ruta):
@@ -3547,6 +3592,11 @@ class ControlGeneralEventos:
                 btn_usar_principal.configure(state="normal")
                 btn_compartir.configure(state="disabled")
 
+            try:
+                btn_principal.configure(state="disabled" if codigo == "OK_PRINCIPAL" else "normal")
+            except Exception:
+                pass
+
         def _usar_cuenta_principal():
             try:
                 from politica_almacenamiento import reparar_cuenta_principal
@@ -3602,6 +3652,23 @@ class ControlGeneralEventos:
                                       font=("Arial", 11, "bold"), fg_color="#166534", hover_color="#14532d",
                                       command=_compartir_cuenta_principal)
         btn_compartir.pack(side="left")
+
+        def _tomar_control_principal():
+            if not messagebox.askyesno(
+                    "Equipo principal",
+                    "¿Convertir ESTE equipo en el PRINCIPAL de la cuenta Rclone?" + chr(10) + chr(10) +
+                    "Se publicará la cuenta de Google de este equipo y los demás deberán pulsar "
+                    "«Usar la cuenta del equipo principal».",
+                    parent=v_conf):
+                return
+            ok, msg = tomar_control_cuenta_principal()
+            (messagebox.showinfo if ok else messagebox.showwarning)("Equipo principal", msg, parent=v_conf)
+            _refrescar_politica()
+
+        btn_principal = ctk.CTkButton(f_pol_btns, text="👑 Usar este equipo como PRINCIPAL",
+                                      font=("Arial", 11, "bold"), fg_color="#7d3c98", hover_color="#5b2c6f",
+                                      command=_tomar_control_principal)
+        btn_principal.pack(side="left", padx=(8, 0))
 
         def _limpiar_basura():
             """Borra los .DS_Store de la carpeta local y de la nube."""

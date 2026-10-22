@@ -55,7 +55,8 @@ from app_paths import CONFIG_FILE, cargar_config_local, DATA_DIR, obtener_device
 from tareas_seguras import ejecutar_en_hilo
 from config_nube import (cargar_rclone_sync, registrar_rclone_sync, borrar_rclone_sync,
                          obtener_rclone_token, guardar_rclone_token, borrar_rclone_token,
-                         actualizar_cuenta_remotos, sobrescribir_rclone_sync)
+                         actualizar_cuenta_remotos, sobrescribir_rclone_sync,
+                         liberar_rclone_sync)
 
 # 🏦 Cuentas bancarias del sistema (las comparten Configuración General,
 # el módulo de Bancos y el registro de cobros de Ventas).
@@ -799,6 +800,32 @@ def tomar_control_cuenta_principal():
                   + chr(10) + chr(10) +
                   "Los demás equipos deben pulsar «Usar la cuenta del equipo principal» "
                   "para quedar sincronizados.")
+
+
+def dejar_de_ser_principal():
+    """Este equipo deja de ser el PRINCIPAL (sin borrar la configuración).
+
+    Se conserva el remote, la carpeta de la nube y la cuenta compartida; queda
+    libre para que otro equipo (por ejemplo el Mac) tome el mando.
+    """
+    registro = cargar_rclone_sync() or {}
+    if not registro:
+        return False, "Todavía no hay un registro de nube creado."
+    if (registro.get("linked_by_device") or "") != obtener_device_id():
+        return False, "Este equipo no es el principal; no hay nada que liberar."
+    if not liberar_rclone_sync():
+        motivo = ""
+        try:
+            from config_nube import ULTIMO_ERROR_SYNC as _err
+            motivo = str(_err or "")
+        except Exception:
+            pass
+        return False, ("No se pudo liberar el mando en la nube."
+                       + chr(10) + chr(10) + (motivo or "Revise la conexión a Internet (Supabase)."))
+    return True, ("✅ Este equipo YA NO es el principal." + chr(10) + chr(10) +
+                  "Ahora, en el Mac: Configuración General → Sincronización en la Nube → "
+                  "«👑 Usar este equipo como PRINCIPAL». Después, aquí, pulsa "
+                  "«Usar la cuenta del equipo principal» si te lo pide.")
 
 
 def normalizar_ruta_local(ruta):
@@ -3628,6 +3655,7 @@ class ControlGeneralEventos:
 
             try:
                 btn_principal.configure(state="disabled" if codigo == "OK_PRINCIPAL" else "normal")
+                btn_dejar_principal.configure(state="normal" if codigo == "OK_PRINCIPAL" else "disabled")
             except Exception:
                 pass
 
@@ -3703,6 +3731,22 @@ class ControlGeneralEventos:
                                       font=("Arial", 11, "bold"), fg_color="#7d3c98", hover_color="#5b2c6f",
                                       command=_tomar_control_principal)
         btn_principal.pack(side="left", padx=(8, 0))
+
+        def _dejar_de_ser_principal():
+            if not messagebox.askyesno(
+                    "Dejar de ser principal",
+                    "¿Este equipo deja de ser el PRINCIPAL de la cuenta Rclone?" + chr(10) + chr(10) +
+                    "La configuración NO se borra: otro equipo podrá tomar el mando.",
+                    parent=v_conf):
+                return
+            ok, msg = dejar_de_ser_principal()
+            (messagebox.showinfo if ok else messagebox.showwarning)("Equipo principal", msg, parent=v_conf)
+            _refrescar_politica()
+
+        btn_dejar_principal = ctk.CTkButton(f_pol_btns, text="🖐 Dejar de ser principal",
+                                            font=("Arial", 11, "bold"), fg_color="#7f8c8d", hover_color="#5d6d6e",
+                                            command=_dejar_de_ser_principal)
+        btn_dejar_principal.pack(side="left", padx=(8, 0))
 
         def _limpiar_basura():
             """Borra los .DS_Store de la carpeta local y de la nube."""

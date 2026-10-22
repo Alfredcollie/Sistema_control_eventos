@@ -182,6 +182,28 @@ def sobrescribir_rclone_sync(datos):
     return registro
 
 
+def liberar_rclone_sync():
+    """Deja de haber un equipo PRINCIPAL, sin borrar la configuración.
+
+    Mantiene el remote, la carpeta de la nube y la identidad de la cuenta, pero
+    deja 'linked_by_device' vacío: así cualquier equipo puede reclamar el mando
+    con 'Usar este equipo como PRINCIPAL' y los demás siguen funcionando.
+    """
+    registro = cargar_rclone_sync() or {}
+    if not registro:
+        return None
+    import time as _time
+    datos = dict(registro)
+    datos["linked_by_device"] = ""
+    datos["linked_at"] = _time.strftime("%d/%m/%Y %H:%M:%S")
+    try:
+        from app_paths import obtener_device_id as _dev
+        datos["liberado_por"] = _dev()
+    except Exception:
+        datos["liberado_por"] = ""
+    return sobrescribir_rclone_sync(datos)
+
+
 def actualizar_cuenta_remotos(cuenta_remotos, device_id=""):
     """Guarda la IDENTIDAD de las cuentas Rclone (remote -> huella estable).
     Solo puede cambiarla el equipo PROPIETARIO del registro."""

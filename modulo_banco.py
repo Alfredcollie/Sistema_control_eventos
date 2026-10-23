@@ -1477,6 +1477,12 @@ class ModuloBancoApp:
         self.tab_conciliacion = self.tabview.add(" 🧾 Conciliación Bancaria ")
         self.tab_transferencias = self.tabview.add(" 🔄 Transferencias ")
 
+        # 🖱️ Al pulsar una pestaña (sin romper el cambio de pestaña del Tabview)
+        try:
+            self.tabview._segmented_button.bind(
+                "<ButtonRelease-1>", lambda e: self.after(150, self._cargar_si_conciliacion), add="+")
+        except Exception:
+            pass
         self.construir_tab_saldos()
         self.construir_tab_conciliacion()
         self.construir_tab_transferencias()
@@ -2120,7 +2126,7 @@ class ModuloBancoApp:
                                COALESCE(p.cuenta_origen, ''), p.id_factura,
                                COALESCE(f.numero_documento, ''), COALESCE(p.codigo_cotizacion, ''),
                                (COALESCE(f.tipo_documento, '') = 'PAGO BANCO'
-                                OR COALESCE(f.es_compra_cruzada, FALSE)) AS espejo_banco,
+                                ) AS espejo_banco,
                                COALESCE(p.archivo_ruta, '')
                         FROM pagos_comprobantes p
                         LEFT JOIN facturas_recibidas f ON p.id_factura = f.id
@@ -3122,6 +3128,27 @@ class ModuloBancoApp:
     # -----------------------------------------------------
     # TAB: CONCILIACION BANCARIA
     # -----------------------------------------------------
+    def _al_cambiar_tab_banco(self, valor=None):
+        """Compatibilidad: carga los movimientos si la pestaña activa es Conciliación."""
+        self._cargar_si_conciliacion()
+
+    def _cargar_si_conciliacion(self):
+        """Al abrir Conciliación: mes en curso y carga de los movimientos del sistema."""
+        try:
+            actual = str(self.tabview.get() or "").lower()
+        except Exception:
+            return
+        if "conciliaci" not in actual:
+            return
+        try:
+            self.cmb_mes.set(mes_actual_etiqueta())     # 📅 siempre el mes en curso
+        except Exception:
+            pass
+        try:
+            self.generar_reporte()
+        except Exception as e:
+            print("Aviso - carga de conciliación:", e)
+
     def construir_tab_conciliacion(self):
         f_sel = ctk.CTkFrame(self.tab_conciliacion, fg_color="#f8f9fa",
                              border_width=1, border_color="#e0e0e0", corner_radius=8)
@@ -3131,7 +3158,8 @@ class ModuloBancoApp:
         etiquetas = [construir_etiqueta_banco(b) for b in self.bancos]
         if not etiquetas:
             etiquetas = ["(Sin bancos configurados)"]
-        self.cmb_banco = ctk.CTkComboBox(f_sel, values=etiquetas, width=320, state="readonly")
+        self.cmb_banco = ctk.CTkComboBox(f_sel, values=etiquetas, width=320, state="readonly",
+                                          command=lambda _v=None: self.generar_reporte())
         self.cmb_banco.pack(side="left", padx=6, pady=10)
         if etiquetas:
             self.cmb_banco.set(etiquetas[0])
@@ -3140,7 +3168,8 @@ class ModuloBancoApp:
         # 🗓️ Primera opción por defecto: todo lo registrado desde la Fecha de Comienzo
         # del Sistema (Configuración General) hasta hoy.
         valores_mes = [ETIQUETA_DESDE_COMIENZO] + construir_valores_mes()
-        self.cmb_mes = ctk.CTkComboBox(f_sel, values=valores_mes, width=210, state="readonly")
+        self.cmb_mes = ctk.CTkComboBox(f_sel, values=valores_mes, width=210, state="readonly",
+                                         command=lambda _v=None: self.generar_reporte())
         self.cmb_mes.pack(side="left", padx=6, pady=10)
         self.cmb_mes.set(ETIQUETA_DESDE_COMIENZO)
 
@@ -3184,6 +3213,12 @@ class ModuloBancoApp:
                                                              "y cargue los movimientos del sistema.",
                                         font=("Arial", 12), text_color="#1f538d", justify="left")
         self.lbl_resumen.pack(anchor="w", padx=12, pady=10)
+
+        # 🔄 Los movimientos del sistema se cargan SOLOS al abrir la conciliación
+        try:
+            self.after(600, self.generar_reporte)   # auto: movimientos del sistema
+        except Exception:
+            pass
 
         # ⚠️ Movimientos del estado de cuenta que NO están en el sistema
         self.f_faltantes = ctk.CTkFrame(self.tab_conciliacion, fg_color="#fdebd0",
@@ -3756,6 +3791,9 @@ class ModuloBancoApp:
                 filas.append({**b, "id": 0, "tipo": "ingreso" if b["monto"] > 0 else "egreso",
                               "origen": "estado_cuenta", "tabla": "", "estado": "diferencia"})
 
+        # 🧹 Si se eligió un mes, solo se muestran movimientos de ESE mes
+        if mes_key:
+            filas = [f for f in filas if normalizar_fecha(f.get("fecha", "")).startswith(mes_key)]
         filas.sort(key=lambda f: (normalizar_fecha(f["fecha"]), f["monto"]))
         return {"filas": filas, "movs_sistema": movs_totales, "bank_movs": bank_totales,
                 "desde": desde or "", "hasta": hasta or ""}

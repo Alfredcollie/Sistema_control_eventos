@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import customtkinter as ctk
 import os
+import time
 import sys  
 import shutil
 import calendar
@@ -33,6 +34,17 @@ from datetime import datetime
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+
+# 📁 Rutas portables: la BD guarda rutas RELATIVAS a la carpeta sincronizada,
+#    así que para abrir un archivo hay que resolverlas con app_paths.
+try:
+    from app_paths import resolver_ruta_archivo, ruta_para_guardar
+except Exception:  # pragma: no cover
+    def resolver_ruta_archivo(ruta, ruta_base=""):
+        return str(ruta) if ruta and os.path.exists(str(ruta)) else ""
+
+    def ruta_para_guardar(ruta, ruta_base=""):
+        return ruta
 
 # 🏦 Cuentas bancarias del sistema (las mismas que usa el módulo de Bancos):
 # al registrar un pago se indica de qué cuenta salió el dinero.
@@ -83,6 +95,199 @@ if sys.platform == "win32":
             ctypes.windll.user32.ShowWindow(hwnd_cmd, 6)
     except Exception:
         pass
+def activar_busqueda_rapida(combo, titulo="Buscar proveedor", al_elegir=None):
+    """Buscador del desplegable: clic en el combo abre la lista con filtro al escribir."""
+    estado = {"abierta": False}
+
+    def _plano(t):
+        t = str(t or "")
+        try:
+            import unicodedata
+            t = "".join(c for c in unicodedata.normalize("NFD", t)
+                        if unicodedata.category(c) != "Mn")
+        except Exception:
+            pass
+        return t.casefold().strip()
+
+    def abrir(event=None):
+        if estado["abierta"]:
+            return None
+        completo = list(getattr(combo, "_valores_completos", []) or [])
+        if not completo:
+            try:
+                completo = [str(v) for v in (combo.cget("values") or [])]
+            except Exception:
+                completo = []
+        completo = [v for v in completo if str(v).strip()]
+        if not completo:
+            return None
+        try:
+            menu = getattr(combo, "_dropdown_menu", None)
+            if menu is not None and getattr(menu, "_is_open", False):
+                menu._close_menu()
+        except Exception:
+            pass
+        try:
+            ancho = max(int(combo.winfo_width()), 420)
+            x = combo.winfo_rootx()
+            y = combo.winfo_rooty() + combo.winfo_height()
+        except Exception:
+            return None
+        try:
+            top = ctk.CTkToplevel(combo)
+            top.overrideredirect(True)
+            top.geometry("%dx360+%d+%d" % (ancho, x, y))
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            cabecera = ctk.CTkLabel(top, text="\U0001f50d " + titulo + ": escriba para filtrar",
+                                    font=("Arial", 11, "bold"), anchor="w")
+            cabecera.pack(fill="x", padx=8, pady=(8, 2))
+            entrada = ctk.CTkEntry(top, placeholder_text="Escriba el nombre... (ej. coesti)")
+            entrada.pack(fill="x", padx=8, pady=(0, 4))
+            cuenta = ctk.CTkLabel(top, text="", font=("Arial", 10), text_color="gray", anchor="w")
+            cuenta.pack(fill="x", padx=10)
+            lista = tk.Listbox(top, height=9, activestyle="none", exportselection=False,
+                               selectbackground="#2c3e50", selectforeground="white",
+                               font=("Arial", 11))
+            lista.pack(fill="both", expand=True, padx=8, pady=(2, 2))
+            pie = ctk.CTkLabel(top, text="clic para elegir  ·  ↑↓ mover  ·  Enter acepta  ·  Esc/click fuera cierra",
+                               font=("Arial", 10), text_color="gray")
+            pie.pack(fill="x", padx=8, pady=(0, 8))
+        except Exception:
+            return None
+
+        estado["abierta"] = True
+
+        def cerrar(_e=None):
+            if not estado["abierta"]:
+                return
+            estado["abierta"] = False
+            try:
+                top.destroy()
+            except Exception:
+                pass
+
+        def elegir(_e=None):
+            sel = lista.curselection()
+            if not sel:
+                return "break"
+            valor = lista.get(sel[0])
+            cerrar()
+            try:
+                combo.set(valor)
+            except Exception:
+                pass
+            # 🔎 se avisa al combo para que complete el RUC / detracción
+            try:
+                accion = al_elegir or getattr(combo, "_al_elegir", None)
+                if callable(accion):
+                    accion()
+            except Exception as e_sel:
+                print("Aviso - al elegir proveedor:", e_sel)
+            try:
+                combo.event_generate("<<ComboboxSelected>>")
+            except Exception:
+                pass
+            return "break"
+
+        def pintar(texto=""):
+            lista.delete(0, tk.END)
+            t = _plano(texto)
+            hallados = [v for v in completo if not t or t in _plano(v)]
+            for valor in hallados:
+                lista.insert(tk.END, valor)
+            if hallados:
+                lista.selection_clear(0, tk.END)
+                lista.selection_set(0)
+                lista.activate(0)
+            cuenta.configure(text="%d resultado(s) — clic en uno para elegirlo" % len(hallados))
+
+        pintar()
+        entrada.bind("<KeyRelease>", lambda e: pintar(entrada.get()))
+        entrada.bind("<Return>", elegir)
+        entrada.bind("<Escape>", cerrar)
+        entrada.bind("<Down>", lambda e: (lista.focus_set(), None)[1])
+        lista.bind("<ButtonRelease-1>", elegir)     # 👈 UN clic elige y cierra
+        lista.bind("<Return>", elegir)
+        lista.bind("<Escape>", cerrar)
+        try:
+            top.bind("<FocusOut>", lambda e: top.after(200, carpeta_salida))
+        except Exception:
+            pass
+
+        def carpeta_salida():
+            try:
+                enfocado = top.focus_get()
+                dentro = enfocado is not None and str(enfocado).startswith(str(top))
+            except Exception:
+                dentro = False
+            if not dentro:
+                cerrar()
+
+        try:
+            entrada.focus_set()
+        except Exception:
+            pass
+        return None
+
+    try:
+        combo._valores_completos = list(combo.cget("values") or [])
+    except Exception:
+        combo._valores_completos = []
+    # 🚫 Sin flecha de desplegable: el buscador reemplaza a la lista nativa
+    # 🚫 Se tapa SOLO la flechita: el cuadro del campo se mantiene
+    try:
+        _lienzo = getattr(combo, "_canvas", None)
+        _draw_original = getattr(combo, "_draw", None)
+        if _lienzo is not None and callable(_draw_original):
+            def _draw_sin_flecha(*args, **kwargs):
+                _draw_original(*args, **kwargs)
+                try:
+                    try:
+                        fondo = combo._apply_appearance_mode(combo.cget("fg_color"))
+                    except Exception:
+                        fondo = "#d9d9d9"
+                    # 🚫 se borra la flechita y el recuadro de la derecha queda igual al campo
+                    _lienzo.delete("dropdown_arrow")
+                    for _etiqueta in ("inner_parts_right", "inner_rectangle_right_1",
+                                      "inner_rectangle_right_2"):
+                        try:
+                            _lienzo.itemconfig(_etiqueta, fill=fondo, outline=fondo)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            combo._draw = _draw_sin_flecha
+            try:
+                combo._draw()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for _nombre_btn in ("_button", "_arrow", "_dropdown_button", "_btn"):
+        try:
+            _boton = getattr(combo, _nombre_btn, None)
+            if _boton is None:
+                continue
+            for _quitar in ("place_forget", "pack_forget", "grid_forget"):
+                try:
+                    getattr(_boton, _quitar)()
+                except Exception:
+                    pass
+            try:
+                _boton.configure(width=0, height=0, text="")
+            except Exception:
+                pass
+        except Exception:
+            pass
+    try:
+        combo.bind("<Button-1>", abrir, add="+")
+        combo.bind("<KeyRelease>", lambda e: abrir(), add="+")
+    except Exception:
+        pass
+    return combo
 
 def _numero_peru(txt):
     """Convierte '1,340.78' / '1.340,78' / '1340.78' a float (0.0 si no se puede)."""
@@ -1096,6 +1301,29 @@ def leer_ocr_mac(ruta, dpi=250):
         return ""
 
 
+def _variantes_ocr(ruta_imagen):
+    """Copias mejoradas de una foto para el OCR (gris+contraste y x2)."""
+    salidas = []
+    try:
+        from PIL import Image, ImageOps
+    except Exception:
+        return salidas
+    try:
+        with Image.open(ruta_imagen) as original:
+            gris = original.convert("L")
+            for factor, nombre in ((1, "gris"), (2, "gris2x")):
+                img = gris if factor == 1 else gris.resize(
+                    (gris.width * factor, gris.height * factor), Image.LANCZOS)
+                img = ImageOps.autocontrast(img, cutoff=1)
+                fd, salida = tempfile.mkstemp(prefix="ocr_%s_" % nombre, suffix=".png")
+                os.close(fd)
+                img.save(salida)
+                salidas.append(salida)
+    except Exception:
+        pass
+    return salidas
+
+
 def leer_ocr_windows(ruta, idiomas="es-PE,es-MX,es-ES,en-US", dpi=250):
     """OCR del sistema: motor de Windows (WinRT) o de macOS (Vision).
 
@@ -1133,29 +1361,50 @@ def leer_ocr_windows(ruta, idiomas="es-PE,es-MX,es-ES,en-US", dpi=250):
     except Exception:
         return ""
 
-    paginas = []
-    for imagen in imagenes[:5]:
+    def _ocr_una_imagen(ruta_imagen):
         try:
             orden = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
-                     "-Ruta", imagen, "-Idiomas", idiomas]
+                     "-Ruta", ruta_imagen, "-Idiomas", idiomas]
             resultado = subprocess.run(orden, capture_output=True, text=True, encoding="utf-8",
                                        errors="ignore", timeout=180,
                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            palabras = []
-            for linea in (resultado.stdout or "").splitlines():
-                partes = linea.split("\t")
-                if len(partes) != 5:
-                    continue
-                try:
-                    x, y, alto = int(partes[0]), int(partes[1]), int(partes[3])
-                except ValueError:
-                    continue
-                palabras.append((x, y, alto, partes[4]))
-            texto = _agrupar_palabras_en_lineas(palabras)
-            if texto.strip():
-                paginas.append(texto)
         except Exception:
-            continue
+            return ""
+        palabras = []
+        for linea in (resultado.stdout or "").splitlines():
+            partes = linea.split("\t")
+            if len(partes) != 5:
+                continue
+            try:
+                x, y, alto = int(partes[0]), int(partes[1]), int(partes[3])
+            except ValueError:
+                continue
+            palabras.append((x, y, alto, partes[4]))
+        return _agrupar_palabras_en_lineas(palabras)
+
+    def _puntaje(texto):
+        if not texto or not texto.strip():
+            return -1
+        puntos = min(len(texto) // 60, 10)
+        if re.search(r"[A-Z]\s?\d{2,4}\s?[A-Z]?\s*[-\u2013]\s*\d{4,8}", texto.upper()):
+            puntos += 15
+        if len(re.findall(r"\d+[.,]\d{2}", texto)) >= 2:
+            puntos += 5
+        return puntos
+
+    paginas = []
+    for imagen in imagenes[:5]:
+        mejor = _ocr_una_imagen(imagen)
+        for variante in _variantes_ocr(imagen):
+            otro = _ocr_una_imagen(variante)
+            try:
+                os.remove(variante)
+            except Exception:
+                pass
+            if _puntaje(otro) > _puntaje(mejor):
+                mejor = otro
+        if mejor.strip():
+            paginas.append(mejor)
     try:
         shutil.rmtree(carpeta, ignore_errors=True)
     except Exception:
@@ -1350,6 +1599,158 @@ def _formatear_fecha(dia, mes, anio, formato="DD/MM/AAAA"):
     return f"{dia:02d}/{mes:02d}/{anio}"
 
 
+_NO_ES_PROVEEDOR = re.compile(
+    r"(RAZ[OÓ]N\s*SOCIAL|RAZON\s*SOCIAL|CLIENTE|SE[NÑ]OR|SE[NÑ]ORA|BLACK\s*RIDERS|"
+    r"R\.?U\.?C|DNI|DIRECCI[OÓ]N|TELEFONO|TEL[EÉ]FONO|RECIBO|FACTURA|BOLETA|"
+    r"SUNAT|TOTAL|IMPORTE|SUB\s*TOTAL|FECHA|P[AÁ]GINA|FORMAS?\\s*DE\\s*PAGO|MONEDA|CONDICI[OÓ]N|DOCUMENTO|ELECTR[OÓ]NICA|REPRESENTACI[OÓ]N|SERIE|N[UÚ]MERO)", re.IGNORECASE)
+
+_SUFIJO_EMPRESA = re.compile(
+    r"\b(S\.?\s?A\.?\s?C?|SAC|E\.?\s?I\.?\s?R\.?\s?L|EIRL|S\.?\s?R\.?\s?L|SRL|"
+    r"SOCIEDAD|EMPRESA|CORPORACI[OÓ]N|GRIFO|ESTACI[OÓ]N|SERVICIOS|COMERCIAL|INVERSIONES)\b",
+    re.I)
+
+
+def _nombre_parece_proveedor(nombre):
+    """¿El texto parece la razón social del proveedor (y no una etiqueta)?"""
+    valor = str(nombre or "").strip()
+    if len(valor) < 4 or _NO_ES_PROVEEDOR.search(valor):
+        return False
+    palabras = [p for p in re.findall(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,}", valor)]
+    if len(palabras) >= 2:
+        return True
+    return bool(_SUFIJO_EMPRESA.search(valor))
+
+
+def _distancia_uno(a, b):
+    """¿Dos cadenas difieren en un solo carácter (falta/sobra/cambia)?"""
+    a, b = str(a or ""), str(b or "")
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    largo, corto = (a, b) if len(a) > len(b) else (b, a)
+    for i in range(len(largo)):
+        if largo[:i] + largo[i + 1:] == corto:
+            return True
+    return False
+
+
+def _proveedor_por_ruc_ocr(texto, ruc_empresa=""):
+    """(ruc, nombre) buscando el RUC leído por OCR en la tabla de proveedores."""
+    propio = re.sub(r"\D", "", str(ruc_empresa or ""))
+    candidatos = []
+    for grupo in re.findall(r"\d{9,12}", str(texto or "")):
+        if propio and (grupo == propio or _distancia_uno(grupo, propio)):
+            continue
+        if grupo not in candidatos:
+            candidatos.append(grupo)
+    # 🏷️ Línea del RUC con espacios o dos puntos: "RUC 20 1:7765279" -> 2017765279
+    for linea in str(texto or "").splitlines():
+        if re.search(r"R\.?\s?U\.?\s?C", linea, re.IGNORECASE):
+            digitos = re.sub(r"\D", "", linea)
+            if 9 <= len(digitos) <= 12 and digitos not in candidatos:
+                if not (propio and (digitos == propio or _distancia_uno(digitos, propio))):
+                    candidatos.append(digitos)
+    if not candidatos:
+        return "", ""
+
+    # 1) exacto (función existente)
+    for candidato in candidatos:
+        if len(candidato) == 11:
+            nombre = buscar_proveedor_por_ruc(candidato)
+            if nombre and "BLACK RIDERS" not in str(nombre).upper():
+                return candidato, nombre
+
+    # 2) un dígito de diferencia
+    conn = obtener_conexion_segura(mostrar_aviso=False)
+    filas = []
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT ruc, nombre FROM proveedores WHERE COALESCE(ruc,'') <> ''")
+            filas = cursor.fetchall()
+        except Exception:
+            filas = []
+        finally:
+            liberar_conexion(conn)
+    for candidato in candidatos:
+        for ruc, nombre in filas:
+            limpio = re.sub(r"\D", "", str(ruc or ""))
+            if len(limpio) >= 9 and _distancia_uno(limpio, candidato):
+                if "BLACK RIDERS" in str(nombre or "").upper():
+                    continue
+                return str(ruc), nombre
+    return "", ""
+
+
+def _ruc_valido(ruc):
+    """RUC peruano con digito verificador correcto (descarta ruido del OCR)."""
+    ruc = re.sub(r"\D", "", str(ruc or ""))
+    if len(ruc) != 11 or ruc[:2] not in ("10", "15", "17", "20"):
+        return False
+    if ruc == ruc[0] * 11:
+        return False
+    pesos = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    suma = sum(int(d) * p for d, p in zip(ruc[:10], pesos))
+    resto = 11 - (suma % 11)
+    verificador = 0 if resto == 10 else (1 if resto == 11 else resto)
+    return verificador == int(ruc[10])
+
+
+def _ruc_del_proveedor(texto, ruc_empresa=""):
+    """RUC del proveedor: se descarta el de la empresa (aunque el OCR lo confunda)."""
+    propio = re.sub(r"\D", "", str(ruc_empresa or ""))
+    todos = [l for l in str(texto or "").splitlines() if l.strip()]
+    # RUC de la EMPRESA: aparece junto a su razón social (BLACK RIDERS)
+    de_la_empresa = set()
+    for posicion, linea in enumerate(todos):
+        if "BLACK RIDERS" in _texto_sin_acentos(linea).upper():
+            for vecina in todos[max(0, posicion - 3):posicion + 4]:
+                de_la_empresa.update(re.findall(r"\d{11}", vecina))
+    for candidato in re.findall(r"\d{11}", str(texto or "")):
+        if candidato == propio or candidato in de_la_empresa:
+            continue
+        if not _ruc_valido(candidato):
+            continue
+        if propio and len(candidato) == len(propio) and \
+                sum(1 for a, b in zip(candidato, propio) if a != b) <= 2:
+            continue
+        return candidato
+    return ""
+def _limpiar_nombre_proveedor(linea):
+    """Quita los símbolos que deja el OCR ('c I (lb Golf Los' -> 'Golf Los')."""
+    palabras = re.findall(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1\u00dc]{3,}", str(linea or ""))
+    return " ".join(palabras).strip()
+
+
+def _nombre_del_proveedor(texto, ruc=""):
+    """Razón social del emisor ('' si el OCR no da nada confiable)."""
+    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
+    if not lineas:
+        return ""
+    # 1) una línea con sufijo societario en la parte de arriba
+    for linea in lineas[:12]:
+        if _nombre_parece_proveedor(linea) and _SUFIJO_EMPRESA.search(linea):
+            return _limpiar_nombre_proveedor(linea) or linea
+    # 2) la línea anterior a la del RUC
+    if ruc:
+        for i, linea in enumerate(lineas):
+            if str(ruc) in re.sub(r"\D", "", linea):
+                if i > 0 and _nombre_parece_proveedor(lineas[i - 1]):
+                    return _limpiar_nombre_proveedor(lineas[i - 1]) or lineas[i - 1]
+                break
+    # 3) la primera línea aceptable de arriba
+    for linea in lineas[:8]:
+        if _nombre_parece_proveedor(linea):
+            limpio = _limpiar_nombre_proveedor(linea)
+            if len(limpio.split()) >= 2:
+                return limpio
+            return linea
+    return ""
+
+
 def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
     """Fecha del comprobante de pago leída por OCR ('' si no aparece).
 
@@ -1372,11 +1773,22 @@ def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
     #    y "Lunes, 12 OCT 2026": el "de" es opcional y se aceptan abreviaturas.
     escrito = re.compile(r"\b(\d{1,2})\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
 
+    import datetime as _dt
+    _hoy = _dt.date.today()
+
+    def _plausible(fecha):
+        """Descarta fechas imposibles (vencimientos lejanos tipo 2030)."""
+        try:
+            valor = _dt.date(int(fecha[2]), int(fecha[1]), int(fecha[0]))
+        except Exception:
+            return False
+        return _dt.date(_hoy.year - 5, 1, 1) <= valor <= _hoy + _dt.timedelta(days=200)
+
     def leer(trozo):
         encontrado = numeros.search(trozo)
         if encontrado:
             fecha = _fecha_valida(*encontrado.groups())
-            if fecha:
+            if fecha and _plausible(fecha):
                 return _formatear_fecha(*fecha, formato=formato)
         encontrado = escrito.search(trozo)
         if encontrado and encontrado.group(2) in meses:
@@ -1401,13 +1813,68 @@ def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
     # 2) La primera fecha válida del documento
     for encontrado in numeros.finditer(plano):
         fecha = _fecha_valida(*encontrado.groups())
-        if fecha:
+        if fecha and _plausible(fecha):
             return _formatear_fecha(*fecha, formato=formato)
     for encontrado in escrito.finditer(plano):
         if encontrado.group(2) in meses:
             fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
             if fecha:
                 return _formatear_fecha(*fecha, formato=formato)
+    return ""
+
+
+def _texto_del_soporte(ruta):
+    """Texto de un PDF (o de una foto) de soporte de pago."""
+    texto = ""
+    try:
+        import fitz
+        documento = fitz.open(ruta)
+        try:
+            texto = chr(10).join(pagina.get_text("text") or "" for pagina in documento)
+        finally:
+            documento.close()
+    except Exception:
+        texto = ""
+    if str(texto or "").strip():
+        return texto
+    try:
+        return leer_ocr_windows(ruta)
+    except Exception:
+        return ""
+
+
+def nombre_tercero_desde_texto(texto):
+    """Nombre de quien hizo el pago (el tercero) según su comprobante."""
+    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
+    etiquetas = ("ENVIADO POR", "ORDENANTE", "REMITENTE", "PAGADOR", "TITULAR",
+                 "NOMBRE DEL ORDENANTE", "DESDE", "BENEFICIARIO", "ENVIADO A",
+                 "A NOMBRE DE")
+
+    def _candidato(valor):
+        valor = re.sub(r"^(NOMBRE|SR|SRA|SRTA)\.?\s*[:\-]?\s*", "", str(valor or "").strip(),
+                       flags=re.I)
+        valor = re.sub(r"\s{2,}", " ", valor).strip(" :.-")
+        if len(valor) < 5:
+            return ""
+        alto = _texto_sin_acentos(valor).upper()
+        if "BLACK RIDERS" in alto or "RUC" in alto or "S/" in alto:
+            return ""
+        if re.search(r"\d{3,}", valor):
+            return ""
+        if not re.search(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,}", valor):
+            return ""
+        return valor
+
+    for posicion, linea in enumerate(lineas):
+        alto = _texto_sin_acentos(linea).upper()
+        for etiqueta in etiquetas:
+            if etiqueta in alto:
+                resto = linea[alto.find(etiqueta) + len(etiqueta):]
+                candidato = _candidato(resto)
+                if not candidato and posicion + 1 < len(lineas):
+                    candidato = _candidato(lineas[posicion + 1])
+                if candidato:
+                    return candidato
     return ""
 
 
@@ -1887,7 +2354,7 @@ class FacturasRecibidasTab:
         
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
-        self.registros_por_pagina = 50
+        self.registros_por_pagina = 55
 
         # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
         self.mes_filtro = mes_en_curso()
@@ -2411,14 +2878,20 @@ class FacturasRecibidasTab:
                 self.ent_fecha.delete(0, tk.END)
                 self.ent_fecha.insert(0, str(datos["fecha"]))
             if datos.get("proveedor"):
-                nombre = str(datos["proveedor"])
-                try:
-                    valores = [str(v) for v in (self.combo_proveedor.cget("values") or [])]
-                    if nombre not in valores:
-                        self.combo_proveedor.configure(values=[nombre] + valores)
-                except Exception:
-                    pass
-                self.combo_proveedor.set(nombre)
+                _prov = datos["proveedor"]
+                # el lector puede devolver (ruc, nombre) o "RUC NOMBRE"
+                if isinstance(_prov, (tuple, list)):
+                    _prov = _prov[1] if len(_prov) > 1 else (_prov[0] if _prov else "")
+                nombre = str(_prov or "").strip()
+                nombre = re.sub(r"^\s*\d{11}\s*[-\u2013:.|]?\s*", "", nombre).strip()
+                if nombre:
+                    try:
+                        valores = [str(v) for v in (self.combo_proveedor.cget("values") or [])]
+                        if nombre not in valores:
+                            self.combo_proveedor.configure(values=[nombre] + valores)
+                    except Exception:
+                        pass
+                    self.combo_proveedor.set(nombre)
             if datos.get("ruc"):
                 self.ent_desc.delete(0, tk.END)
                 self.ent_desc.insert(0, str(datos["ruc"]))
@@ -2565,9 +3038,13 @@ class FacturasRecibidasTab:
                 self.ent_nro_doc.delete(0, tk.END)
                 self.ent_nro_doc.insert(0, numero_leido)
             
-            fecha_match = re.search(r"Fecha de Emisi[oó]n\s*[:\-]?\s*(\d{2})[/\-.](\d{2})[/\-.](\d{4})", texto, re.IGNORECASE)
-            if not fecha_match: 
-                fecha_match = re.search(r"(\d{2})[/\-.](\d{2})[/\-.](\d{4})", texto)
+            # Lector tolerante: descarta vencimientos (2030) y entiende fechas en letras
+            fecha_tolerante = extraer_fecha_comprobante(texto)
+            fecha_match = None
+            if fecha_tolerante:
+                fecha_match = re.match(r"(\d{2})[/\-.](\d{2})[/\-.](\d{4})", fecha_tolerante)
+            if not fecha_match:
+                fecha_match = re.search(r"Fecha de Emisi[oó]n\s*[:\-]?\s*(\d{2})[/\-.](\d{2})[/\-.](\d{4})", texto, re.IGNORECASE)
                 
             if fecha_match:
                 d, m, y = fecha_match.groups()
@@ -2579,16 +3056,27 @@ class FacturasRecibidasTab:
                     self.ent_fecha.delete(0, tk.END)
                     self.ent_fecha.insert(0, f"{d}/{m}/{y}")
 
-            rucs = re.findall(r"(?:RUC|R\.U\.C\.)\s*[:\-]?\s*(\d{11})", texto, re.IGNORECASE)
-            if rucs: 
+            ruc_prov = _ruc_del_proveedor(texto, (CONFIG_REGIONAL or {}).get("ruc_empresa", ""))
+            if ruc_prov:
                 self.ent_desc.delete(0, tk.END)
-                self.ent_desc.insert(0, rucs[0])
-                
-            lineas = [line.strip() for line in texto.split('\n') if line.strip()]
-            if lineas:
-                posibles = [l for l in lineas[:7] if "R.U.C" not in l and len(l) > 4]
-                if posibles: 
-                    self.combo_proveedor.set(posibles[0])
+                self.ent_desc.insert(0, ruc_prov)
+
+            try:
+                ruc_bd, nombre_bd = _proveedor_por_ruc_ocr(
+                    texto, (CONFIG_REGIONAL or {}).get("ruc_empresa", ""))
+                if ruc_bd:
+                    self.ent_desc.delete(0, tk.END)
+                    self.ent_desc.insert(0, ruc_bd)
+                if nombre_bd:
+                    self.combo_proveedor.set(nombre_bd)
+                    nombre_prov = nombre_bd
+                else:
+                    nombre_prov = _nombre_del_proveedor(texto, ruc_bd or ruc_prov)
+            except Exception as e_bd:
+                print("Aviso - proveedor por RUC:", e_bd)
+                nombre_prov = _nombre_del_proveedor(texto, ruc_prov)
+            if nombre_prov:
+                self.combo_proveedor.set(nombre_prov)
 
             sub_m = re.search(r"(?:OP\.\s*GRAVADAS|SUB\s*TOTAL|Subtotal|Total por honorarios)[\s:S/\|]+([\d\,\.]+)", texto, re.IGNORECASE)
             tot_m = re.search(r"(?:IMPORTE\s*TOTAL|TOTAL\s*A\s*PAGAR|Total Neto Recibido)[\s:S/\|]+([\d\,\.]+)", texto, re.IGNORECASE)
@@ -2934,6 +3422,7 @@ class FacturasRecibidasTab:
 
         ctk.CTkLabel(self.f_form, text="Nombre del Proveedor:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.combo_proveedor = ctk.CTkComboBox(self.f_form, command=self.al_seleccionar_proveedor)
+        activar_busqueda_rapida(self.combo_proveedor, al_elegir=self.al_seleccionar_proveedor)
         self.combo_proveedor.pack(fill="x", padx=10, pady=(0, 8))
         self.cargar_proveedores_bd()
 
@@ -2970,27 +3459,38 @@ class FacturasRecibidasTab:
         # =====================================================================
         self.var_cruzada = tk.BooleanVar(value=False)
         self.chk_cruzada = ctk.CTkCheckBox(
-            self.f_form, text="🔁 Pagada por un tercero (factura cruzada)",
+            self.f_form, text="💸 Pagada por un tercero · le devolví el dinero",
             variable=self.var_cruzada, font=("Arial", 11, "bold"),
             checkbox_width=18, checkbox_height=18, command=self._actualizar_bloque_cruzada)
         self.chk_cruzada.pack(anchor="w", padx=10, pady=(4, 2))
 
         self.f_cruzada = ctk.CTkFrame(self.f_form, fg_color="#f4ecf7", corner_radius=6,
                                       border_width=1, border_color="#d2b4de")
-        ctk.CTkLabel(self.f_cruzada, text="🔁 Datos del pago a tercero", font=("Arial", 11, "bold"),
+        ctk.CTkLabel(self.f_cruzada, text="💸 Devolución al tercero que pagó (sale de mi cuenta)", font=("Arial", 11, "bold"),
                      text_color="#6c3483").pack(anchor="w", padx=8, pady=(6, 2))
 
-        ctk.CTkLabel(self.f_cruzada, text="Pagado por (tercero): *", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
-        self.ent_tercero = ctk.CTkEntry(self.f_cruzada, placeholder_text="Nombre de quien realizó el pago")
+        ctk.CTkLabel(self.f_cruzada, text="A quién le devuelvo (tercero): *", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        self.ent_tercero = ctk.CTkEntry(self.f_cruzada, placeholder_text="Nombre de la persona a la que se le devuelve")
         self.ent_tercero.pack(fill="x", padx=8, pady=(0, 4))
 
-        ctk.CTkLabel(self.f_cruzada, text="Cuenta / Banco con el que pagó:", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        ctk.CTkLabel(self.f_cruzada, text="🏦 Cuenta desde la que le devuelvo el dinero:", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
         self.cmb_cuenta_cruzada = ctk.CTkComboBox(self.f_cruzada, values=self._lista_cuentas_pago())
         self.cmb_cuenta_cruzada.pack(fill="x", padx=8, pady=(0, 4))
 
-        ctk.CTkLabel(self.f_cruzada, text="N° de Operación Bancaria:", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        ctk.CTkLabel(self.f_cruzada, text="N° de Operación de la devolución:", font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
         self.ent_oper_cruzada = ctk.CTkEntry(self.f_cruzada, placeholder_text="Ej.: 00123456 / constancia")
         self.ent_oper_cruzada.pack(fill="x", padx=8, pady=(0, 4))
+
+        # 📅 Fecha en que el tercero hizo el pago (va al asiento del banco)
+        ctk.CTkLabel(self.f_cruzada, text="📅 Fecha de la devolución (DD/MM/AAAA):",
+                     font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        self.ent_fecha_pago_cruz = ctk.CTkEntry(self.f_cruzada, placeholder_text="22/10/2026")
+        self.ent_fecha_pago_cruz.pack(fill="x", padx=8, pady=(0, 6))
+        try:
+            if not self.ent_fecha_pago_cruz.get():
+                self.ent_fecha_pago_cruz.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        except Exception:
+            pass
 
         f_com_cruz = ctk.CTkFrame(self.f_cruzada, fg_color="transparent")
         f_com_cruz.pack(fill="x", padx=8, pady=(0, 2))
@@ -3017,11 +3517,21 @@ class FacturasRecibidasTab:
                                               text_color="#6c3483", wraplength=290, justify="left")
         self.lbl_cruzada_total.pack(anchor="w", padx=8, pady=(2, 4))
 
+        # 🖨️ Escanear o 📂 cargar el comprobante del pago hecho por el tercero
+        _fila_soporte = ctk.CTkFrame(self.f_cruzada, fg_color="transparent")
+        _fila_soporte.pack(fill="x", padx=8, pady=(0, 8))
+
         self.btn_soporte_tercero = ctk.CTkButton(
-            self.f_cruzada, text="🖨️ Escanear comprobante de pago",
-            font=("Arial", 11, "bold"), fg_color="#7f8c8d", hover_color="#606b6b",
+            _fila_soporte, text="🖨️ Escanear", font=("Arial", 11, "bold"),
+            fg_color="#7f8c8d", hover_color="#606b6b",
             command=self.escanear_soporte_tercero)
-        self.btn_soporte_tercero.pack(fill="x", padx=8, pady=(0, 8))
+        self.btn_soporte_tercero.pack(side="left", fill="x", expand=True)
+
+        self.btn_soporte_tercero_pdf = ctk.CTkButton(
+            _fila_soporte, text="📂 Cargar PDF / foto", font=("Arial", 11, "bold"),
+            fg_color="#2980b9", hover_color="#1f618d",
+            command=self.seleccionar_soporte_tercero)
+        self.btn_soporte_tercero_pdf.pack(side="left", fill="x", expand=True, padx=(6, 0))
         self.ruta_soporte_tercero = ""
         self._soporte_pago_escaneado = ""
 
@@ -3286,6 +3796,10 @@ class FacturasRecibidasTab:
         if not hasattr(self, 'combo_proveedor'): return
         if provs:
             self.combo_proveedor.configure(values=provs)
+            try:
+                self.combo_proveedor._valores_completos = list(self.combo_proveedor.cget('values') or [])
+            except Exception:
+                pass
             if self.combo_proveedor.get() not in provs: 
                 self.combo_proveedor.set(provs[0])
             self.al_seleccionar_proveedor()
@@ -3336,6 +3850,8 @@ class FacturasRecibidasTab:
             "interbancario": bool(getattr(self, "var_interbancario", None) and self.var_interbancario.get()),
             "comision": (desformatear_numero(self.ent_comision.get())
                          if hasattr(self, "ent_comision") and self.var_interbancario.get() else 0.0),
+            "fecha": (self.ent_fecha_pago_cruz.get().strip()
+                      if getattr(self, "ent_fecha_pago_cruz", None) is not None else ""),
             "soporte": getattr(self, "ruta_soporte_tercero", ""),
         }
 
@@ -3372,6 +3888,59 @@ class FacturasRecibidasTab:
             else:
                 self.lbl_cruzada_total.configure(
                     text=f"Factura: {formatear_moneda(neto_factura)} — sin comisión interbancaria")
+        except Exception:
+            pass
+
+    def _aviso_procesando(self, mensaje):
+        """Ventana pequena "procesando..." mientras se lee el documento (OCR)."""
+        try:
+            ventana = ctk.CTkToplevel(getattr(self, "main_root", None))
+            ventana.title("Procesando")
+            ventana.geometry("380x130")
+            ventana.resizable(False, False)
+            try:
+                ventana.transient(getattr(self, "main_root", None))
+                ventana.grab_set()
+            except Exception:
+                pass
+            ctk.CTkLabel(ventana, text=mensaje, font=("Arial", 13, "bold"),
+                         wraplength=340, justify="center").pack(pady=(20, 10), padx=16)
+            barra = ctk.CTkProgressBar(ventana, mode="indeterminate", width=320)
+            barra.pack(pady=(0, 14))
+            barra.start()
+            try:
+                ventana._inicio_aviso = time.time()   # para que se vea un minimo de tiempo
+            except Exception:
+                pass
+            ventana.update_idletasks()
+            ventana.update()
+            for _accion in (ventana.lift, ventana.focus_force,
+                            lambda: ventana.attributes("-topmost", True)):
+                try:
+                    _accion()
+                except Exception:
+                    pass
+            ventana.update()
+            return ventana
+        except Exception:
+            return None
+
+    def _cerrar_aviso(self, ventana, minimo=1.2):
+        """Cierra la ventana de 'procesando...' dejandola visible al menos 'minimo' segundos."""
+        try:
+            if ventana is None:
+                return
+            try:
+                inicio = getattr(ventana, "_inicio_aviso", None)
+                if inicio:
+                    restante = float(minimo) - (time.time() - inicio)
+                    if restante > 0:
+                        ventana.update()
+                        time.sleep(min(restante, 2.0))
+            except Exception:
+                pass
+            ventana.grab_release()
+            ventana.destroy()
         except Exception:
             pass
 
@@ -3421,8 +3990,66 @@ class FacturasRecibidasTab:
             return
         self.ruta_soporte_tercero = ruta
         try:
-            self.btn_soporte_tercero.configure(text="✅ Soporte del pago listo",
-                                               fg_color="#28a745", hover_color="#218838")
+            self.btn_soporte_tercero.configure(text="🖨️ Escanear",
+                                               fg_color="#7f8c8d", hover_color="#606b6b")
+            self.btn_soporte_tercero_pdf.configure(
+                text="✅ PDF cargado",
+                fg_color="#28a745", hover_color="#218838")
+        except Exception:
+            pass
+
+        _aviso_ocr = self._aviso_procesando("⏳ Leyendo el comprobante del pago... (OCR)")
+        try:
+            _texto_sop = _texto_del_soporte(ruta)
+            if str(_texto_sop or "").strip():
+                _nom = nombre_tercero_desde_texto(_texto_sop)
+                _ope = extraer_numero_operacion(_texto_sop)
+                if _nom:
+                    self.ent_tercero.delete(0, tk.END)
+                    self.ent_tercero.insert(0, _nom)
+                if _ope:
+                    self.ent_oper_cruzada.delete(0, tk.END)
+                    self.ent_oper_cruzada.insert(0, _ope)
+                try:
+                    self._actualizar_total_cruzada()
+                except Exception:
+                    pass
+        except Exception as _e_lec:
+            print("Aviso - datos del soporte del tercero:", _e_lec)
+        finally:
+            self._cerrar_aviso(_aviso_ocr)
+
+        # 📄 Se leen del archivo el NOMBRE del tercero y el N° de operación
+        leido_nombre, leido_oper = "", ""
+        try:
+            texto_soporte = _texto_del_soporte(ruta)
+            if str(texto_soporte or "").strip():
+                leido_nombre = nombre_tercero_desde_texto(texto_soporte)
+                leido_oper = extraer_numero_operacion(texto_soporte)
+                if leido_nombre:
+                    self.ent_tercero.delete(0, tk.END)
+                    self.ent_tercero.insert(0, leido_nombre)
+                if leido_oper:
+                    self.ent_oper_cruzada.delete(0, tk.END)
+                    self.ent_oper_cruzada.insert(0, leido_oper)
+                try:
+                    self._actualizar_total_cruzada()
+                except Exception:
+                    pass
+        except Exception as e_lec:
+            print("Aviso - datos del soporte del tercero:", e_lec)
+
+        detalle = "Archivo adjunto como soporte del pago al tercero:" + chr(10) + os.path.basename(ruta)
+        if leido_nombre:
+            detalle += chr(10) + chr(10) + "Tercero leído: " + leido_nombre
+        if leido_oper:
+            detalle += chr(10) + "N° de operación leído: " + leido_oper
+        if not (leido_nombre or leido_oper):
+            detalle += (chr(10) + chr(10) +
+                        "No se pudieron leer los datos del archivo: escríbalos a mano.")
+        try:
+            messagebox.showinfo("Soporte del pago", detalle,
+                                parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception:
             pass
 
@@ -3796,6 +4423,13 @@ class FacturasRecibidasTab:
             return messagebox.showwarning("Atención", "Llene los campos obligatorios.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         # 🔁 ¿La factura la pagó un tercero? (factura cruzada)
         cruzada = self._datos_cruzada()
+        # 💸 El comprobante del tercero es la DEVOLUCIÓN del dinero: tiene que salir
+        #    de una cuenta bancaria para que el egreso llegue al Banco.
+        if cruzada["activa"] and not str(cruzada.get("cuenta") or "").strip():
+            return messagebox.showwarning(
+                "Pago de tercero",
+                "Seleccione la CUENTA BANCARIA desde la que se devolvió el dinero al tercero." + chr(10) + chr(10) +
+                "Sin cuenta bancaria el pago no se descuenta del saldo del banco.")
         if cruzada["activa"] and not cruzada["tercero"]:
             return messagebox.showwarning(
                 "Factura Cruzada",
@@ -3903,13 +4537,15 @@ class FacturasRecibidasTab:
                 comision_cruzada = cruzada["comision"] if cruzada["interbancario"] else 0.0
                 monto_pago_cruz = max(0.0, neto_cruzada) + max(0.0, comision_cruzada)
                 try:
+                    # 📅 El asiento del banco va con la FECHA DE PAGO (no la de la factura)
+                    _fecha_pago_cruz = (cruzada.get("fecha") or "").strip() or datetime.now().strftime("%d/%m/%Y")
                     cur_pago = conn.cursor()
                     cur_pago.execute("""
                         INSERT INTO pagos_comprobantes (id_factura, monto_pagado, archivo_ruta, proveedor_nombre,
                                                        fecha_pago, categoria_suministro, codigo_cotizacion,
                                                        cuenta_origen, numero_operacion)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (id_factura_nueva, monto_pago_cruz, ruta_soporte_tercero or "", prov, fecha,
+                    """, (id_factura_nueva, monto_pago_cruz, ruta_soporte_tercero or "", prov, _fecha_pago_cruz,
                           categoria, nro_doc, cruzada["cuenta"] or ("Pago de " + cruzada["tercero"]),
                           cruzada["operacion"] or "PAGO A TERCERO"))
                     conn.commit()
@@ -3937,6 +4573,15 @@ class FacturasRecibidasTab:
             self.ent_subtotal.delete(0, tk.END)
             
             self.ruta_archivo_temp = ""
+            # 🧹 Se limpia el soporte del pago al tercero para la siguiente factura
+            self.ruta_soporte_tercero = ""
+            try:
+                self.btn_soporte_tercero.configure(text="🖨️ Escanear",
+                                                   fg_color="#7f8c8d", hover_color="#606b6b")
+                self.btn_soporte_tercero_pdf.configure(text="📂 Cargar PDF / foto",
+                                                       fg_color="#2980b9", hover_color="#1f618d")
+            except Exception:
+                pass
             self.btn_archivo.configure(text="📎 Adjuntar Archivo Manual", fg_color="#7f8c8d", hover_color="#606b6b")
             
             self.cargar_datos_tabla(reset_pagina=True)
@@ -4736,8 +5381,17 @@ class FacturasRecibidasTab:
             cursor = conn.cursor()
             cursor.execute("SELECT archivo_ruta FROM facturas_recibidas WHERE id = %s", (id_doc,))
             res = cursor.fetchone()
-            if res and res[0] and os.path.exists(res[0]): 
-                abrir_documento(res[0])
+            real = ""
+            if res and res[0]:
+                try:
+                    from app_paths import resolver_ruta_archivo as _resolver
+                    real = _resolver(res[0]) or ""
+                except Exception:
+                    real = res[0]
+                if not real or not os.path.exists(real):
+                    real = res[0] if os.path.exists(str(res[0])) else ""
+            if real:
+                abrir_documento(real)
             else:
                 messagebox.showinfo("Aviso", "No se encontró el archivo adjunto.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception: 
@@ -4947,7 +5601,7 @@ class CuentasPorPagarTab:
         
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
-        self.registros_por_pagina = 50
+        self.registros_por_pagina = 55
 
         # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
         self.mes_filtro = mes_en_curso()
@@ -6711,8 +7365,14 @@ class CuentasPorPagarTab:
             liberar_conexion(conn)
             if rutas:
                 for r in rutas:
-                    if os.path.exists(r[0]): 
-                        abrir_documento(r[0])
+                    real = ""
+                    try:
+                        from app_paths import resolver_ruta_archivo as _resolver
+                        real = _resolver(r[0]) or ""
+                    except Exception:
+                        real = r[0]
+                    if real and os.path.exists(real):
+                        abrir_documento(real)
             else: messagebox.showinfo("Aviso", "No hay soportes cargados.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
         except Exception: pass
 
@@ -7079,8 +7739,6 @@ class ModuloComprasApp:
         header_frame.pack(fill="x")
         
         ctk.CTkLabel(header_frame, text="🛒 MÓDULO DE COMPRAS (LOGÍSTICA Y TESORERÍA)", font=("Arial", 18, "bold"), text_color="#1f538d").pack(side="left")
-        self.btn_pantalla = ctk.CTkButton(header_frame, text="[ + ] Pantalla Completa", font=("Arial", 12, "bold"), width=160, fg_color="#34495e", hover_color="#2c3e50", command=self.toggle_pantalla_completa)
-        self.btn_pantalla.pack(side="right")
 
         self.tabview = ctk.CTkTabview(self.frame_main, segmented_button_selected_color="#1f538d")
         self.tabview.pack(fill="both", expand=True, pady=(10, 0))
@@ -7105,11 +7763,9 @@ class ModuloComprasApp:
 
         if getattr(self, "pantalla_expandida", False):
             if sidebar: sidebar.pack(side="left", fill="y", before=self.parent_frame)
-            self.btn_pantalla.configure(text="[ + ] Pantalla Completa", fg_color="#34495e", hover_color="#2c3e50")
             self.pantalla_expandida = False
         else:
             if sidebar: sidebar.pack_forget()
-            self.btn_pantalla.configure(text="[ - ] Restaurar Vista", fg_color="#34495e", hover_color="#2c3e50")
             self.pantalla_expandida = True
 
     def al_cambiar_pestana(self):

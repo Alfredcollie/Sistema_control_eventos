@@ -94,6 +94,200 @@ if sys.platform == "win32":
             ctypes.windll.user32.ShowWindow(hwnd_cmd, 6)
     except Exception: pass
 
+def activar_busqueda_rapida(combo, titulo="Buscar proveedor", al_elegir=None):
+    """Buscador del desplegable: clic en el combo abre la lista con filtro al escribir."""
+    estado = {"abierta": False}
+
+    def _plano(t):
+        t = str(t or "")
+        try:
+            import unicodedata
+            t = "".join(c for c in unicodedata.normalize("NFD", t)
+                        if unicodedata.category(c) != "Mn")
+        except Exception:
+            pass
+        return t.casefold().strip()
+
+    def abrir(event=None):
+        if estado["abierta"]:
+            return None
+        completo = list(getattr(combo, "_valores_completos", []) or [])
+        if not completo:
+            try:
+                completo = [str(v) for v in (combo.cget("values") or [])]
+            except Exception:
+                completo = []
+        completo = [v for v in completo if str(v).strip()]
+        if not completo:
+            return None
+        try:
+            menu = getattr(combo, "_dropdown_menu", None)
+            if menu is not None and getattr(menu, "_is_open", False):
+                menu._close_menu()
+        except Exception:
+            pass
+        try:
+            ancho = max(int(combo.winfo_width()), 420)
+            x = combo.winfo_rootx()
+            y = combo.winfo_rooty() + combo.winfo_height()
+        except Exception:
+            return None
+        try:
+            top = ctk.CTkToplevel(combo)
+            top.overrideredirect(True)
+            top.geometry("%dx360+%d+%d" % (ancho, x, y))
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            cabecera = ctk.CTkLabel(top, text="\U0001f50d " + titulo + ": escriba para filtrar",
+                                    font=("Arial", 11, "bold"), anchor="w")
+            cabecera.pack(fill="x", padx=8, pady=(8, 2))
+            entrada = ctk.CTkEntry(top, placeholder_text="Escriba el nombre... (ej. coesti)")
+            entrada.pack(fill="x", padx=8, pady=(0, 4))
+            cuenta = ctk.CTkLabel(top, text="", font=("Arial", 10), text_color="gray", anchor="w")
+            cuenta.pack(fill="x", padx=10)
+            lista = tk.Listbox(top, height=9, activestyle="none", exportselection=False,
+                               selectbackground="#2c3e50", selectforeground="white",
+                               font=("Arial", 11))
+            lista.pack(fill="both", expand=True, padx=8, pady=(2, 2))
+            pie = ctk.CTkLabel(top, text="clic para elegir  Â·  â†‘â†“ mover  Â·  Enter acepta  Â·  Esc/click fuera cierra",
+                               font=("Arial", 10), text_color="gray")
+            pie.pack(fill="x", padx=8, pady=(0, 8))
+        except Exception:
+            return None
+
+        estado["abierta"] = True
+
+        def cerrar(_e=None):
+            if not estado["abierta"]:
+                return
+            estado["abierta"] = False
+            try:
+                top.destroy()
+            except Exception:
+                pass
+
+        def elegir(_e=None):
+            sel = lista.curselection()
+            if not sel:
+                return "break"
+            valor = lista.get(sel[0])
+            cerrar()
+            try:
+                combo.set(valor)
+            except Exception:
+                pass
+            # ðŸ”Ž se avisa al combo para que complete el RUC / detracciÃ³n
+            try:
+                accion = al_elegir or getattr(combo, "_al_elegir", None)
+                if callable(accion):
+                    accion()
+            except Exception as e_sel:
+                print("Aviso - al elegir proveedor:", e_sel)
+            try:
+                combo.event_generate("<<ComboboxSelected>>")
+            except Exception:
+                pass
+            return "break"
+
+        def pintar(texto=""):
+            lista.delete(0, tk.END)
+            t = _plano(texto)
+            hallados = [v for v in completo if not t or t in _plano(v)]
+            for valor in hallados:
+                lista.insert(tk.END, valor)
+            if hallados:
+                lista.selection_clear(0, tk.END)
+                lista.selection_set(0)
+                lista.activate(0)
+            cuenta.configure(text="%d resultado(s) â€” clic en uno para elegirlo" % len(hallados))
+
+        pintar()
+        entrada.bind("<KeyRelease>", lambda e: pintar(entrada.get()))
+        entrada.bind("<Return>", elegir)
+        entrada.bind("<Escape>", cerrar)
+        entrada.bind("<Down>", lambda e: (lista.focus_set(), None)[1])
+        lista.bind("<ButtonRelease-1>", elegir)     # ðŸ‘ˆ UN clic elige y cierra
+        lista.bind("<Return>", elegir)
+        lista.bind("<Escape>", cerrar)
+        try:
+            top.bind("<FocusOut>", lambda e: top.after(200, carpeta_salida))
+        except Exception:
+            pass
+
+        def carpeta_salida():
+            try:
+                enfocado = top.focus_get()
+                dentro = enfocado is not None and str(enfocado).startswith(str(top))
+            except Exception:
+                dentro = False
+            if not dentro:
+                cerrar()
+
+        try:
+            entrada.focus_set()
+        except Exception:
+            pass
+        return None
+
+    try:
+        combo._valores_completos = list(combo.cget("values") or [])
+    except Exception:
+        combo._valores_completos = []
+    # 🚫 Sin flecha de desplegable: el buscador reemplaza a la lista nativa
+    # 🚫 Se tapa SOLO la flechita: el cuadro del campo se mantiene
+    try:
+        _lienzo = getattr(combo, "_canvas", None)
+        _draw_original = getattr(combo, "_draw", None)
+        if _lienzo is not None and callable(_draw_original):
+            def _draw_sin_flecha(*args, **kwargs):
+                _draw_original(*args, **kwargs)
+                try:
+                    try:
+                        fondo = combo._apply_appearance_mode(combo.cget("fg_color"))
+                    except Exception:
+                        fondo = "#d9d9d9"
+                    # 🚫 se borra la flechita y el recuadro de la derecha queda igual al campo
+                    _lienzo.delete("dropdown_arrow")
+                    for _etiqueta in ("inner_parts_right", "inner_rectangle_right_1",
+                                      "inner_rectangle_right_2"):
+                        try:
+                            _lienzo.itemconfig(_etiqueta, fill=fondo, outline=fondo)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            combo._draw = _draw_sin_flecha
+            try:
+                combo._draw()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for _nombre_btn in ("_button", "_arrow", "_dropdown_button", "_btn"):
+        try:
+            _boton = getattr(combo, _nombre_btn, None)
+            if _boton is None:
+                continue
+            for _quitar in ("place_forget", "pack_forget", "grid_forget"):
+                try:
+                    getattr(_boton, _quitar)()
+                except Exception:
+                    pass
+            try:
+                _boton.configure(width=0, height=0, text="")
+            except Exception:
+                pass
+        except Exception:
+            pass
+    try:
+        combo.bind("<Button-1>", abrir, add="+")
+        combo.bind("<KeyRelease>", lambda e: abrir(), add="+")
+    except Exception:
+        pass
+    return combo
+
 def abrir_documento(ruta):
     try:
         if sys.platform == "win32": os.startfile(ruta)
@@ -723,7 +917,9 @@ class FacturasEmitidasTab:
         ctk.CTkLabel(self.f_form, text="Días de Crédito:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.ent_dias = ctk.CTkEntry(self.f_form); self.ent_dias.pack(fill="x", padx=10, pady=(0, 8)); self.ent_dias.insert(0, "0")
         ctk.CTkLabel(self.f_form, text="Nombre del Cliente:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
-        self.combo_cliente = ctk.CTkComboBox(self.f_form, command=self.al_seleccionar_cliente); self.combo_cliente.pack(fill="x", padx=10, pady=(0, 8))
+        self.combo_cliente = ctk.CTkComboBox(self.f_form, command=self.al_seleccionar_cliente)
+        activar_busqueda_rapida(self.combo_cliente, titulo="Buscar cliente",
+                                 al_elegir=self.al_seleccionar_cliente); self.combo_cliente.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(self.f_form, text="R.U.C. Cliente:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.ent_ruc = ctk.CTkEntry(self.f_form, placeholder_text="Se autocompleta con el cliente"); self.ent_ruc.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(self.f_form, text="Concepto / Descripción de Venta:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
@@ -881,6 +1077,10 @@ class FacturasEmitidasTab:
         if not hasattr(self, 'combo_cliente'): return
         if clis:
             lista_clis = ["--- Seleccione Cliente ---"] + clis; self.combo_cliente.configure(values=lista_clis)
+        try:
+            self.combo_cliente._valores_completos = list(lista_clis)
+        except Exception:
+            pass
             if self.combo_cliente.get() not in lista_clis: self.combo_cliente.set("--- Seleccione Cliente ---")
             self.al_seleccionar_cliente()
         else: self.combo_cliente.configure(values=["--- Seleccione Cliente ---"]); self.combo_cliente.set("--- Seleccione Cliente ---")
@@ -1971,7 +2171,6 @@ class CuentasPorCobrarTab:
                                    text_color="#1e8449")
 
         ent_monto.bind("<KeyRelease>", actualizar_calc)
-        ent_impuestos.bind("<KeyRelease>", actualizar_calc)
         lbl_calc.pack(anchor="w", pady=(2, 0))
         actualizar_calc()
 
@@ -2924,7 +3123,7 @@ class CuentasPorCobrarTab:
                 tot_deuda = 0.0
 
                 for r in c.fetchall():
-                    id_fac, fecha, cli, sub, imp, tot, det, tipo_doc, enlace_sunat, arch_ruta, est_sunat = r
+                    id_fac, fecha, cli, sub, imp, tot, det, tipo_doc, enlace_sunat, arch_ruta, est_sunat = r[:11]
                     
                     if not enlace_sunat and not arch_ruta: continue
                     if est_sunat and "Anulada" in str(est_sunat): continue

@@ -259,7 +259,20 @@ def interpretar(texto):
     if re.search(r"FACTURA ELECTR|BOLETA ELECTR", mayus):
         datos["es_comprobante"] = False
     else:
-        datos["es_comprobante"] = (señales_voucher >= 2 and señales_factura <= 1) or                                   (señales_voucher >= 1 and not datos.get("ruc"))
+        datos["es_comprobante"] = ((señales_voucher >= 2 and señales_factura <= 1) or
+                                   (señales_voucher >= 1 and not datos.get("ruc")))
+
+    # Importes sueltos del documento ("s/ 3,271.oo"): sirven para emparejar el
+    # comprobante con la factura aunque el OCR lea el total con la comisión.
+    montos = []
+    for m in re.finditer(r"s/\s*\.?\s*([\d][\d.,]*(?:oo|OO)?)", plano, re.I):
+        crudo = m.group(1).replace("oo", "00").replace("OO", "00")
+        valor = _a_numero(crudo)
+        if valor and valor > 0:
+            montos.append(round(valor, 2))
+    if datos.get("total"):
+        montos.append(round(float(datos["total"]), 2))
+    datos["montos"] = sorted(set(montos), reverse=True)
     return datos
 
 
@@ -709,12 +722,14 @@ def procesar_carpeta(tipo, progreso=None):
         datos["archivo"] = nombre
         clase = "comprobante" if datos.get("es_comprobante") else "factura"
         propuesta, confianza, estado = proponer(tipo, datos, texto)
-        # 🏦 Los cargos del banco (ITF, comisiones, mantenimiento de cuenta) NO son
-        #    una factura ni un comprobante del proveedor: no se registran aquí.
-        if propuesta.get("categoria") == "GASTOS BANCARIOS" and not datos.get("ruc"):
-            _mover(ruta, tipo, "_ignorados")
+        # 🏦 Los cargos del banco se dejan en la lista pero marcados: el usuario
+        #    decide si los registra o los descarta (NO se ignoran solos).
+        if propuesta.get("categoria") == "GASTOS BANCARIOS" and not datos.get("ruc") \
+                and not datos.get("es_comprobante"):
+            nota_banco = "Cargo del banco (ITF / comisión): normalmente no se registra."
             resumen["ignorados"] += 1
-            continue
+        else:
+            nota_banco = ""
         if not texto.strip():
             estado = "rojo"
             nota = "No se pudo leer el texto del PDF."
@@ -722,6 +737,8 @@ def procesar_carpeta(tipo, progreso=None):
             nota = "Comprobante de pago (se empareja con su factura)."
         else:
             nota = ""
+        if nota_banco:
+            nota = (nota + " " + nota_banco).strip()
         nuevo = _guardar_documento(huella, ruta, tipo, clase, estado, confianza, datos, propuesta, nota)
         if nuevo:
             resumen["nuevos"] += 1
@@ -747,9 +764,9 @@ def reanalizar(item):
         datos["archivo"] = os.path.basename(ruta_archivo)
         propuesta, confianza, estado = proponer(item.get("bandeja") or "compra", datos, texto)
         nota = item.get("nota") or ""
-        if propuesta.get("categoria") == "GASTOS BANCARIOS" and not datos.get("ruc"):
-            estado = "ignorado"
-            nota = "Cargo del banco: no se registra."
+        if (propuesta.get("categoria") == "GASTOS BANCARIOS" and not datos.get("ruc")
+                and not datos.get("es_comprobante")):
+            nota = "Cargo del banco (ITF / comisión): normalmente no se registra."
         conn = conectar_db(silencioso=True)
         if not conn:
             return False
@@ -966,6 +983,89 @@ def _buscar_factura_existente(bandeja, numero, ruc="", entidad="", total=0):
         liberar_conexion(conn)
 
 
+def _emparejar_comprobante(bandeja, datos, entidad=""):
+    """(id_factura, monto_pagado) del comprobante.
+
+    Prueba los importes del documento (incluido el 'monto enviado' sin comisión)
+    contra el TOTAL y contra el NETO de detracción: el cliente suele depositar
+    el total menos la detracción.
+    """
+    candidatos = []
+    for valor in (datos.get("montos") or []):
+        try:
+            valor = round(float(valor), 2)
+            if valor > 0:
+                candidatos.append(valor)
+        except Exception:
+            continue
+    if datos.get("total"):
+        try:
+            candidatos.append(round(float(datos["total"]), 2))
+        except Exception:
+            pass
+    candidatos = sorted(set(candidatos), reverse=True)
+    if not candidatos:
+        return 0, 0.0
+
+    tabla = "facturas_recibidas" if bandeja == "compra" else "facturas_emitidas"
+    campo = "proveedor" if bandeja == "compra" else "cliente"
+    # Rango amplio: el depósito puede ser MENOR que el total (detracción) o algo mayor
+    minimo = max(0.0, min(candidatos) * 0.85 - 1)
+    maximo = max(candidatos) * 1.20 + 1
+    conn = conectar_db(silencioso=True)
+    filas = []
+    if conn:
+        try:
+            with conn.cursor() as c:
+                c.execute(("SELECT id, COALESCE(total,0), COALESCE(det_monto,0), COALESCE(%s,'') "
+                           "FROM %s WHERE total BETWEEN %%s AND %%s ORDER BY id DESC LIMIT 80"
+                           % (campo, tabla)), (minimo, maximo))
+                filas = c.fetchall()
+        except Exception as e:
+            print("[bandeja] emparejar comprobante:", e)
+        finally:
+            liberar_conexion(conn)
+
+    texto = str(entidad or "").upper()
+
+    def _afinidad(nombre):
+        nombre = str(nombre or "").upper()
+        if not texto or not nombre:
+            return 0
+        return 2 if (texto in nombre or nombre in texto) else 0
+
+    # 1) coincidencia exacta con el total o con el neto de detracción ya registrado
+    for importe in candidatos:
+        mejores = []
+        for fid, total_f, det, nombre in filas:
+            total_f = float(total_f or 0)
+            neto = total_f - float(det or 0)
+            if abs(importe - total_f) <= 0.05 or (neto > 0 and abs(importe - neto) <= 0.05):
+                mejores.append((_afinidad(nombre), int(fid)))
+        if mejores:
+            mejores.sort(reverse=True)
+            return mejores[0][1], importe, 0.0
+
+    # 2) el cliente depositó el TOTAL menos la detracción (12%, 10%, 4%, 3%, 1.5%)
+    #    Se elige el importe MÁS CERCANO al neto esperado (no el primero que encaje).
+    mejor = None
+    for porcentaje in (12.0, 10.0, 4.0, 3.0, 1.5):
+        for fid, total_f, det, nombre in filas:
+            total_f = float(total_f or 0)
+            if total_f <= 0:
+                continue
+            esperado = total_f * (1 - porcentaje / 100.0)
+            for importe in candidatos:
+                diferencia = abs(importe - esperado)
+                if diferencia <= max(1.0, total_f * 0.005):
+                    clave = (round(diferencia, 2), -_afinidad(nombre), porcentaje)
+                    if mejor is None or clave < mejor[0]:
+                        mejor = (clave, int(fid), importe, porcentaje)
+    if mejor:
+        return mejor[1], mejor[2], mejor[3]
+    return 0, float(datos.get("total") or 0), 0.0
+
+
 def _pago_duplicado(bandeja, id_factura, total):
     """¿Esa factura ya tiene un pago por el mismo monto?"""
     tabla = "pagos_comprobantes" if bandeja == "compra" else "pagos_clientes"
@@ -1128,7 +1228,37 @@ def registrar(item_id, ajustes=None):
                                str(propuesta.get("orden_compra") or "")))
                 nuevo_id = int(c.fetchone()[0])
             else:  # comprobante de pago
-                id_factura = _buscar_factura_por_monto(item["bandeja"], total, entidad)
+                id_factura, monto_pago, detraccion = _emparejar_comprobante(
+                    item["bandeja"], datos, entidad)
+                nota_detraccion = ""
+                if monto_pago:
+                    total = float(monto_pago)
+                if id_factura and detraccion:
+                    # Depositó el total menos la detracción: se completa la detracción
+                    # de la factura para que quede cancelada.
+                    try:
+                        tabla_f = ("facturas_recibidas" if item["bandeja"] == "compra"
+                                   else "facturas_emitidas")
+                        # La detracción se calcula sobre el TOTAL DE LA FACTURA
+                        # (no sobre el depósito, que ya viene sin ella).
+                        total_factura = 0.0
+                        try:
+                            c.execute("SELECT COALESCE(total,0) FROM %s WHERE id=%%s" % tabla_f,
+                                      (id_factura,))
+                            fila_f = c.fetchone()
+                            total_factura = float(fila_f[0] or 0) if fila_f else 0.0
+                        except Exception:
+                            total_factura = 0.0
+                        if not total_factura and detraccion < 100:
+                            total_factura = float(total) / (1 - detraccion / 100.0)
+                        c.execute(("UPDATE %s SET det_porcentaje=%%s, det_monto=%%s "
+                                   "WHERE id=%%s AND COALESCE(det_monto,0)=0" % tabla_f),
+                                  (detraccion,
+                                   round(total_factura * detraccion / 100.0, 2),
+                                   id_factura))
+                        nota_detraccion = " con detracción del %g%%" % detraccion
+                    except Exception:
+                        nota_detraccion = ""
                 # 🚫 ¿Ya existe un pago igual para esa factura? (no duplicar)
                 if id_factura and _pago_duplicado(item["bandeja"], id_factura, total):
                     return (False, "Ya hay un pago de %s registrado para la factura #%s."

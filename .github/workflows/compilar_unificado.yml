@@ -1,4 +1,4 @@
-name: Compilar y publicar (Windows + macOS)
+﻿name: Compilar y publicar (Windows + macOS)
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag del release (ej. v1.5.5). Déjalo vacío si el push ya es un tag.'
+        description: 'Tag del release (ej. v1.5.5). DÃ©jalo vacÃ­o si el push ya es un tag.'
         required: false
         default: ''
 
@@ -29,7 +29,7 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Inyectar versión del tag
+    - name: Inyectar versiÃ³n del tag
       run: python injectar_version.py
 
     - name: Inyectar credenciales y config (secretos)
@@ -55,6 +55,18 @@ jobs:
         $RCLONE_BIN = (Get-ChildItem -Recurse -Filter rclone.exe | Select-Object -First 1).FullName
         Add-Content -Path $env:GITHUB_ENV -Value "RCLONE_BIN=$RCLONE_BIN"
 
+    - name: Crear config_local.json (secret o plantilla)
+      shell: pwsh
+      env:
+        CONFIG_LOCAL_JSON: ${{ secrets.CONFIG_LOCAL_JSON }}
+      run: |
+        if ($env:CONFIG_LOCAL_JSON -and $env:CONFIG_LOCAL_JSON.Length -gt 10) {
+          $env:CONFIG_LOCAL_JSON | Out-File -FilePath "config_local.json" -Encoding utf8
+        } elseif (Test-Path "config_local.ejemplo.json") {
+          Copy-Item "config_local.ejemplo.json" "config_local.json" -Force
+        } else {
+          "{}" | Out-File -FilePath "config_local.json" -Encoding utf8
+        }
     - name: Compilar con PyInstaller (Windows)
       run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py
 
@@ -99,7 +111,7 @@ jobs:
       with:
         python-version: '3.11'
 
-    - name: Inyectar versión del tag
+    - name: Inyectar versiÃ³n del tag
       run: python injectar_version.py
 
     - name: Inyectar credenciales y config (secretos)
@@ -132,6 +144,17 @@ jobs:
         chmod +x "$RCLONE_BIN"
         echo "RCLONE_BIN=$RCLONE_BIN" >> "$GITHUB_ENV"
 
+    - name: Crear config_local.json (secret o plantilla)
+      env:
+        CONFIG_LOCAL_JSON: ${{ secrets.CONFIG_LOCAL_JSON }}
+      run: |
+        if [ -n "$CONFIG_LOCAL_JSON" ]; then
+          printf '%s' "$CONFIG_LOCAL_JSON" > config_local.json
+        elif [ -f config_local.ejemplo.json ]; then
+          cp config_local.ejemplo.json config_local.json
+        else
+          echo "{}" > config_local.json
+        fi
     - name: Compilar con PyInstaller (macOS)
       run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
 
@@ -188,3 +211,4 @@ jobs:
           release-assets/*.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

@@ -1,0 +1,41 @@
+# ---- Carpetas que no van al repositorio ----
+_Archivo Programa/
+Script de prueba/
+respaldo de programas modificados/
+archivos PDF de prueba/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+.localized
+cache_offline.json
+keepalive_log.txt
+*.log
+
+# ---- Datos que no son código ----
+facturas_emitidas/
+facturas_recibidas/
+comprobantes_egresos/
+comprobantes_ingresos/
+comprobantes_impuestos/
+comprobantes_transferencias/
+soportes_pagos_terceros/
+ordenes_generadas/
+ordenes_anuladas/
+ordenes_compra_recibidas/
+cobranzas_generadas/
+Cotizaciones/
+Pautas_Eventos/
+cartas_eventos/
+formularios_proveedores/
+Inspecciones/
+Inspecciones_PDF/
+archivos_flota/
+
+# ---- Scripts de prueba: NO se suben al repositorio ----
+tests/
+test_*.py
+_test_*.py
+smoke_*.py
+*_test.py
+config_local.json

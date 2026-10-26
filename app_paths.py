@@ -89,10 +89,29 @@ def cargar_config_local():
     """Configuración local: valores por defecto (junto a la app) + los del usuario."""
     config = {}
     candidatos = [os.path.join(str(BASE_DIR), "config_local.json")]
+
+    # 🍎 macOS: el ejecutable vive en .app/Contents/MacOS y los datos pueden
+    # quedar en Contents/Frameworks, Contents/Resources o en _internal.
+    try:
+        ejecutable = Path(sys.executable).resolve()
+        contenido = ejecutable.parent.parent          # .../Contents
+        for extra in (contenido / "Frameworks" / "config_local.json",
+                      contenido / "Resources" / "config_local.json",
+                      contenido / "MacOS" / "config_local.json",
+                      ejecutable.parent / "_internal" / "config_local.json"):
+            candidatos.append(str(extra))
+    except Exception:
+        pass
+
     try:
         candidatos.append(os.path.join(sys._MEIPASS, "config_local.json"))
     except Exception:
         pass
+    try:
+        candidatos.append(os.path.join(sys._MEIPASS, "_internal", "config_local.json"))
+    except Exception:
+        pass
+    candidatos.append(os.path.join(str(BASE_DIR), "_internal", "config_local.json"))
     candidatos.append(str(CONFIG_FILE))   # el usuario tiene prioridad
     for ruta in candidatos:
         try:

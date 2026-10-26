@@ -23,13 +23,22 @@ SECRETOS = {
 }
 
 
-def main():
-    if not os.path.exists(BASE):
-        print(f"AVISO: no existe {BASE}; no se inyectaron secretos.")
-        return
+EJEMPLO = "config_local.ejemplo.json"
 
-    with open(BASE, "r", encoding="utf-8") as f:
-        config = json.load(f)
+
+def main():
+    # Si no existe config_local.json, se parte de la plantilla (o de un config vacío)
+    if not os.path.exists(BASE):
+        if os.path.exists(EJEMPLO):
+            with open(EJEMPLO, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            print("config_local.json creado desde la plantilla del repositorio")
+        else:
+            config = {}
+            print("AVISO: no hay plantilla; se crea un config vacío")
+    else:
+        with open(BASE, "r", encoding="utf-8") as f:
+            config = json.load(f)
 
     detalle = []
     for clave, env in SECRETOS.items():
@@ -45,6 +54,8 @@ def main():
         json.dump(config, f, ensure_ascii=False, indent=4)
 
     print("config_local.json generado. Detalle: " + (", ".join(detalle) if detalle else "(ninguno)"))
+    if not os.environ.get("SUPABASE_LIC_PASSWORD"):
+        print("AVISO: SUPABASE_LIC_PASSWORD vacío -> la app no podrá validar licencias")
 
 
 if __name__ == "__main__":

@@ -54,8 +54,18 @@ def main():
         json.dump(config, f, ensure_ascii=False, indent=4)
 
     print("config_local.json generado. Detalle: " + (", ".join(detalle) if detalle else "(ninguno)"))
-    if not os.environ.get("SUPABASE_LIC_PASSWORD"):
-        print("AVISO: SUPABASE_LIC_PASSWORD vacío -> la app no podrá validar licencias")
+
+    # 🚫 Sin credenciales de licencia la app no puede validar: se corta la compilación
+    faltan = [env for env in ("SUPABASE_DB_USER", "SUPABASE_DB_PASSWORD",
+                              "SUPABASE_LIC_USER", "SUPABASE_LIC_PASSWORD")
+              if not os.environ.get(env)]
+    if faltan:
+        print("ERROR: faltan secretos en GitHub Actions: " + ", ".join(faltan))
+        raise SystemExit(1)
+    if not str(config.get("supabase_lic_password") or "").strip():
+        print("ERROR: config_local.json quedó sin supabase_lic_password.")
+        raise SystemExit(1)
+    print("Credenciales de licencia y base incluidas correctamente.")
 
 
 if __name__ == "__main__":

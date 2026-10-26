@@ -98,6 +98,20 @@ def obtener_hwid():
         hwid = str(uuid.UUID(int=uuid.getnode())).upper()
     return hwid
 
+def _log_licencia(mensaje):
+    """Escribe un registro de diagnóstico (para revisar fallos en Mac)."""
+    try:
+        from datetime import datetime as _dt
+        import platform
+        carpeta = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                               "ControlEventos") if sys.platform == "darwin" else                   os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ControlEventos")
+        os.makedirs(carpeta, exist_ok=True)
+        with open(os.path.join(carpeta, "licencia_debug.log"), "a", encoding="utf-8") as f:
+            f.write("%s | %s | %s" % (_dt.now().strftime("%Y-%m-%d %H:%M:%S"), platform.platform(), mensaje) + chr(10))
+    except Exception:
+        pass
+
+
 def candidatos_credenciales_licencia():
     """Pares (usuario, contraseña) a probar, en orden.
 
@@ -146,7 +160,9 @@ def candidatos_credenciales_licencia():
 def consultar_licencia_supabase(hwid):
     """Se conecta a Supabase y verifica el estado de TODAS las licencias asociadas a este HWID y Software"""
     pares = candidatos_credenciales_licencia()
+    _log_licencia("candidatos=%d usuarios=%s" % (len(pares), [u for u, _p in pares]))
     if not pares:
+        _log_licencia("SIN credenciales: llavero/config/entorno vacíos")
         return False, "Error: credenciales de licencias no configuradas. Ejecute 'guardar_credenciales.py'."
 
     conn, ultimo_error = None, None
@@ -167,6 +183,7 @@ def consultar_licencia_supabase(hwid):
             conn = None
             continue
     if conn is None:
+        _log_licencia("FALLO al conectar: %s" % str(ultimo_error)[:300])
         return False, ("No hay conexión a Internet o el servidor de licencias no responde.\n\n"
                        f"Detalle: {str(ultimo_error)[:120]}")
 
@@ -182,6 +199,7 @@ def consultar_licencia_supabase(hwid):
         cursor.execute(query, (hwid, SOFTWARE_ASIGNADO))
         resultados = cursor.fetchall()
         conn.close()
+        _log_licencia("CONEXION OK: %d registro(s) de licencia" % len(resultados))
 
         if not resultados:
             return False, f"Este equipo no cuenta con una licencia para el software '{SOFTWARE_ASIGNADO}'.\nCopie el HWID a continuación y envíelo a soporte."

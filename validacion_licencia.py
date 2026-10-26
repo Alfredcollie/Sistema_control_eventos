@@ -99,15 +99,21 @@ def obtener_hwid():
     return hwid
 
 def _log_licencia(mensaje):
-    """Escribe un registro de diagnóstico (para revisar fallos en Mac)."""
+    """Escribe un registro de diagnóstico en la carpeta de datos real de la app."""
     try:
         from datetime import datetime as _dt
         import platform
-        carpeta = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
-                               "ControlEventos") if sys.platform == "darwin" else                   os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ControlEventos")
+        try:
+            from app_paths import DATA_DIR as _DATA_DIR
+            carpeta = str(_DATA_DIR)
+        except Exception:
+            carpeta = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                                   "BlackCube") if sys.platform == "darwin" else \
+                      os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "BlackCube")
         os.makedirs(carpeta, exist_ok=True)
         with open(os.path.join(carpeta, "licencia_debug.log"), "a", encoding="utf-8") as f:
-            f.write("%s | %s | %s" % (_dt.now().strftime("%Y-%m-%d %H:%M:%S"), platform.platform(), mensaje) + chr(10))
+            f.write("%s | %s | %s" % (_dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                      platform.platform(), mensaje) + chr(10))
     except Exception:
         pass
 

@@ -92,16 +92,15 @@ jobs:
     - name: Verificar credenciales dentro del build (Windows)
       shell: pwsh
       run: |
-        $ruta = "dist/Instalador-ControlEventos-Windows/config_local.json"
-        if (-not (Test-Path $ruta)) { Write-Error "No se encontro config_local.json en el build"; exit 1 }
-        $cfg = Get-Content $ruta -Raw | ConvertFrom-Json
-        $lic = [string]$cfg.supabase_lic_password
-        $usr = [string]$cfg.supabase_lic_user
-        if (-not $lic -or -not $usr) {
-          Write-Error "El build quedo SIN credenciales de licencia (supabase_lic_user / supabase_lic_password vacios)"
+        $ruta = Get-ChildItem -Recurse -Filter "config_local.json" "dist/Instalador-ControlEventos-Windows" | Select-Object -First 1
+        if (-not $ruta) { Write-Error "No se encontro config_local.json dentro del build"; exit 1 }
+        Write-Host ("Config encontrado en: " + $ruta.FullName)
+        $cfg = Get-Content $ruta.FullName -Raw | ConvertFrom-Json
+        if (-not [string]$cfg.supabase_lic_password -or -not [string]$cfg.supabase_lic_user) {
+          Write-Error "El build quedo SIN credenciales de licencia"
           exit 1
         }
-        Write-Host "Credenciales de licencia presentes en el build (usuario: $usr)"
+        Write-Host "Credenciales de licencia OK"
 
     - name: Comprimir en ZIP (Windows)
       run: Compress-Archive -Path "dist/Instalador-ControlEventos-Windows" -DestinationPath "dist/Instalador-ControlEventos-Windows.zip" -Force
@@ -176,16 +175,25 @@ jobs:
     - name: Compilar con PyInstaller (macOS)
       run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
 
+    - name: Asegurar config_local.json junto al ejecutable (macOS)
+      run: |
+        APP="dist/ControlEventos.app/Contents/MacOS"
+        if [ ! -f "$APP/config_local.json" ] && [ -f "config_local.json" ]; then
+          cp config_local.json "$APP/config_local.json"
+          echo "config_local.json copiado junto al ejecutable"
+        fi
+
     - name: Verificar credenciales dentro del build (macOS)
       run: |
-        RUTA="dist/ControlEventos.app/Contents/MacOS/config_local.json"
-        if [ ! -f "$RUTA" ]; then echo "No se encontro config_local.json en el .app"; exit 1; fi
-        USR=$(python -c "import json;print(json.load(open('$RUTA')).get('supabase_lic_user',''))")
-        CLAVE=$(python -c "import json;print(json.load(open('$RUTA')).get('supabase_lic_password',''))")
+        RUTA=$(find "dist/ControlEventos.app" -name config_local.json | head -1)
+        if [ -z "$RUTA" ]; then echo "No se encontro config_local.json dentro del .app"; exit 1; fi
+        echo "Config encontrado en: $RUTA"
+        USR=$(python -c "import json,sys;print(json.load(open(sys.argv[1])).get('supabase_lic_user',''))" "$RUTA")
+        CLAVE=$(python -c "import json,sys;print(json.load(open(sys.argv[1])).get('supabase_lic_password',''))" "$RUTA")
         if [ -z "$USR" ] || [ -z "$CLAVE" ]; then
           echo "El .app quedo SIN credenciales de licencia"; exit 1
         fi
-        echo "Credenciales de licencia presentes en el .app ($USR)"
+        echo "Credenciales de licencia OK"
 
     - name: Comprimir en ZIP (macOS)
       run: |

@@ -732,12 +732,19 @@ class VentanaEtapaProveedores:
                     self.cats_assigned.append(txt_cat)
         except Exception:
             pass
-        if not self.cats_assigned:
-            self.cats_assigned = ["No hay categorias disponibles"]
-            
-        self.cmb_cat_e = ctk.CTkComboBox(self.f_inputs, values=self.cats_assigned, state="readonly", width=180, command=self.filtrar_proveedores_por_categoria)
-        self.cmb_cat_e.grid(row=1, column=1, sticky="w", pady=5, padx=5)
-        self.cmb_cat_e.set(self.cats_assigned[0])
+        # 📚 TODAS las categorías del sistema (sin límite), no solo las ya asignadas
+        self.cats_todas = self._todas_las_categorias()
+        if not self.cats_todas:
+            self.cats_todas = self.cats_assigned or ["No hay categorias disponibles"]
+
+        f_cat = ctk.CTkFrame(self.f_inputs, fg_color="transparent")
+        f_cat.grid(row=1, column=1, sticky="w", pady=5, padx=5)
+        self.cmb_cat_e = ctk.CTkComboBox(f_cat, values=self.cats_todas, state="readonly", width=200, command=self.filtrar_proveedores_por_categoria)
+        self.cmb_cat_e.pack(side="left")
+        self.cmb_cat_e.set(self.cats_todas[0])
+        ctk.CTkButton(f_cat, text="🔍 Buscar", width=90, height=26, font=("Arial", 11, "bold"),
+                      fg_color="#2980b9", hover_color="#1f618d",
+                      command=self.abrir_buscador_categoria).pack(side="left", padx=(5, 0))
 
         ctk.CTkLabel(self.f_inputs, text="Proveedor asignado:", font=("Arial", 12, "bold")).grid(row=1, column=2, sticky="w", pady=5, padx=15)
         f_prov_accion = ctk.CTkFrame(self.f_inputs, fg_color="transparent")
@@ -1495,6 +1502,87 @@ class VentanaEtapaProveedores:
         elif self.callback_on_close:
             self.callback_on_close()
 
+    def _todas_las_categorias(self):
+        """Todas las categorías activas del sistema (ordenadas)."""
+        lista = []
+        try:
+            lista = [str(x).strip() for x in (getattr(cache_sistema, "categorias_generales", []) or [])
+                     if str(x).strip()]
+        except Exception:
+            lista = []
+        if not lista:
+            conn = conectar_db(silencioso=True)
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT nombre FROM categorias ORDER BY nombre ASC")
+                        lista = [str(r[0]).strip() for r in cur.fetchall() if r and str(r[0]).strip()]
+                except Exception:
+                    lista = []
+                finally:
+                    liberar_conexion(conn)
+        return lista
+
+    def abrir_buscador_categoria(self):
+        """🔍 Ventana con buscador para elegir cualquier categoría (todas, sin límite)."""
+        ventana = ctk.CTkToplevel(self.v_prov)
+        ventana.title("Buscar categoría")
+        ventana.geometry("430x480")
+        ventana.transient(self.v_prov)
+        try:
+            ventana.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(ventana, text="🔍 Escriba para filtrar la categoría",
+                     font=("Arial", 12, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+        entrada = ctk.CTkEntry(ventana, placeholder_text="Ej.: merchandising, audio, courier...")
+        entrada.pack(fill="x", padx=12)
+        entrada.focus_set()
+
+        cuenta = ctk.CTkLabel(ventana, text="", font=("Arial", 10), text_color="gray", anchor="w")
+        cuenta.pack(fill="x", padx=14)
+
+        import tkinter as _tk
+        lista_widget = _tk.Listbox(ventana, activestyle="none", exportselection=False,
+                                   selectbackground="#2c3e50", selectforeground="white",
+                                   font=("Arial", 11))
+        lista_widget.pack(fill="both", expand=True, padx=12, pady=(2, 2))
+
+        categorias = self._todas_las_categorias() or list(getattr(self, "cats_todas", []))
+
+        def pintar(filtro=""):
+            lista_widget.delete(0, "end")
+            filtro = (filtro or "").strip().lower()
+            visibles = [c for c in categorias if filtro in c.lower()] if filtro else list(categorias)
+            for c in visibles:
+                lista_widget.insert("end", c)
+            cuenta.configure(text="%d categoría(s)" % len(visibles))
+
+        def elegir(_evento=None):
+            sel = lista_widget.curselection()
+            if not sel:
+                return
+            valor = lista_widget.get(sel[0])
+            self.cmb_cat_e.set(valor)
+            try:
+                self.filtrar_proveedores_por_categoria(valor)
+            except Exception:
+                pass
+            ventana.destroy()
+
+        entrada.bind("<KeyRelease>", lambda e: pintar(entrada.get()))
+        lista_widget.bind("<Double-Button-1>", elegir)
+        lista_widget.bind("<Return>", elegir)
+        ventana.bind("<Escape>", lambda e: ventana.destroy())
+
+        ctk.CTkButton(ventana, text="✔ Elegir categoría", font=("Arial", 12, "bold"),
+                      fg_color="#27ae60", hover_color="#1e8449",
+                      command=elegir).pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkButton(ventana, text="Cancelar", fg_color="#7f8c8d", hover_color="#606b6b",
+                      command=ventana.destroy).pack(fill="x", padx=12, pady=(0, 12))
+        pintar()
+
     def refrescar_combobox_descarte(self):
         if not self.conn:
             return
@@ -1506,6 +1594,9 @@ class VentanaEtapaProveedores:
                 cat = str(r[0]).replace("('", "").replace("',)", "").replace("',", "").strip("() '\",")
                 if cat and cat not in nuevas:
                     nuevas.append(cat)
+            todas = self._todas_las_categorias()
+            if todas:
+                nuevas = todas          # 📚 siempre la lista completa
             if not nuevas:
                 nuevas = ["No hay categorias disponibles"]
             sel_actual = self.cmb_cat_e.get()

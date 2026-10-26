@@ -1122,7 +1122,7 @@ class VentanaCotizaciones:
         v_edit.grab_set()
 
         f_izq = ctk.CTkFrame(v_edit, corner_radius=10)
-        f_izq.pack(side="left", fill="both", expand=True, padx=15, pady=15)
+        f_izq.pack(fill="both", expand=True, padx=15, pady=15)
         ctk.CTkLabel(f_izq, text="Datos Generales", font=("Arial", 15, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(15, 5))
         ctk.CTkLabel(f_izq, text=f"Código: {codigo_cot}", font=("Arial", 12, "bold", "underline")).pack(anchor="w", padx=15, pady=5)
         
@@ -1159,123 +1159,6 @@ class VentanaCotizaciones:
         combo_sidebar_status = ctk.CTkComboBox(f_izq, values=["No aprobada", "En evaluación", "Aprobada", "En desarrollo"], state="readonly", font=("Arial", 12))
         combo_sidebar_status.pack(fill="x", padx=15, pady=2)
         combo_sidebar_status.set(status_reg if status_reg else "En desarrollo")
-
-        f_der = ctk.CTkFrame(v_edit, corner_radius=10)
-        f_der.pack(side="right", fill="both", expand=True, padx=15, pady=15)
-        ctk.CTkLabel(f_der, text="Asignación de Categorías", font=("Arial", 15, "bold"), text_color="#1f538d").pack(anchor="w", padx=15, pady=(15, 5))
-        f_alta_cat = ctk.CTkFrame(f_der, fg_color="transparent")
-        f_alta_cat.pack(fill="x", padx=15, pady=5)
-        ctk.CTkLabel(f_alta_cat, text="Categoría:", font=("Arial", 12, "bold")).pack(side="left", padx=(0, 5))
-        combo_cat = ctk.CTkComboBox(f_alta_cat, font=("Arial", 12), width=180)
-        combo_cat.pack(side="left", padx=5)
-
-        def actualizar_combo_categorias():
-            categorias = list(getattr(cache_sistema, "categorias_generales", []) or [])
-            if not categorias:
-                conn_cat = conectar_db(silencioso=True)
-                if conn_cat:
-                    try:
-                        c = conn_cat.cursor()
-                        c.execute("SELECT nombre FROM categorias ORDER BY nombre ASC")
-                        categorias = [str(r[0]).strip() for r in c.fetchall() if r]
-                    except Exception:
-                        pass
-                    finally:
-                        liberar_conexion(conn_cat)
-            if not categorias:
-                categorias = ["Estructuras", "Audio", "Iluminación", "Video", "Pantallas", "Mobiliario", "Personal", "Catering"]
-            combo_cat.configure(values=categorias)
-            if categorias:
-                combo_cat.set(categorias[0])
-
-        actualizar_combo_categorias()
-        ctk.CTkLabel(f_alta_cat, text="Cant:", font=("Arial", 12, "bold")).pack(side="left", padx=(15, 5))
-        spin_cant = ctk.CTkEntry(f_alta_cat, width=60, font=("Arial", 12))
-        spin_cant.insert(0, "1")
-        spin_cant.pack(side="left", padx=5)
-
-        f_tabla_cat = ctk.CTkFrame(f_der, fg_color="transparent")
-        f_tabla_cat.pack(fill="both", expand=True, padx=15, pady=5)
-        tree_cat_asis = ttk.Treeview(f_tabla_cat, columns=("id", "categoria", "cantidad"), show="headings", height=8)
-        tree_cat_asis.heading("id", text="ID")
-        tree_cat_asis.heading("categoria", text="Categoría Seleccionada")
-        tree_cat_asis.heading("cantidad", text="Cantidad")
-        tree_cat_asis.column("id", width=40, anchor="center")
-        tree_cat_asis.column("categoria", width=220, anchor="w")
-        tree_cat_asis.column("cantidad", width=80, anchor="center")
-        scroll_cat = ctk.CTkScrollbar(f_tabla_cat, command=tree_cat_asis.yview)
-        tree_cat_asis.configure(yscrollcommand=scroll_cat.set)
-        tree_cat_asis.pack(side="left", fill="both", expand=True)
-        scroll_cat.pack(side="right", fill="y")
-
-        def refrescar_tabla_categorias():
-            tree_cat_asis.delete(*tree_cat_asis.get_children())
-            c_conn = conectar_db(silencioso=True)
-            if not c_conn:
-                return
-            try:
-                c = c_conn.cursor()
-                c.execute("SELECT id, categoria_suministro, cantidad FROM cotizacion_detalles WHERE codigo_cotizacion = %s", (codigo_cot,))
-                for i, r in enumerate(c.fetchall(), start=1):
-                    tree_cat_asis.insert("", "end", values=(i, r[1], r[2], r[0]))
-            except Exception:
-                pass
-            finally:
-                liberar_conexion(c_conn)
-
-        def agregar_categoria_lista():
-            cat = combo_cat.get().strip()
-            try:
-                cant = int(spin_cant.get())
-            except ValueError:
-                messagebox.showerror("Error", "Cantidad inválida.", parent=v_edit)
-                return
-            if not cat:
-                return
-            c_conn = conectar_db()
-            if not c_conn:
-                messagebox.showwarning("Modo Lectura", "Sin conexión a internet. No se puede añadir categoría.", parent=v_edit)
-                return
-            try:
-                c = c_conn.cursor()
-                c.execute("SELECT id, cantidad FROM cotizacion_detalles WHERE codigo_cotizacion = %s AND categoria_suministro = %s", (codigo_cot, cat))
-                reg = c.fetchone()
-                if reg:
-                    c.execute("UPDATE cotizacion_detalles SET cantidad = %s WHERE id = %s", (reg[1] + cant, reg[0]))
-                else:
-                    c.execute("INSERT INTO cotizacion_detalles (codigo_cotizacion, categoria_suministro, cantidad) VALUES (%s, %s, %s)", (codigo_cot, cat, cant))
-                c_conn.commit()
-                registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Agregó/actualizó la categoría '{cat}' en la cotización {codigo_cot}")
-            except Exception as e:
-                messagebox.showerror("Error", str(e), parent=v_edit)
-            finally:
-                liberar_conexion(c_conn)
-            refrescar_tabla_categorias()
-
-        def remover_categoria_lista():
-            sel = tree_cat_asis.selection()
-            if not sel:
-                return
-            c_conn = conectar_db()
-            if not c_conn:
-                messagebox.showwarning("Modo Lectura", "Sin conexión a internet. No se puede eliminar categoría.", parent=v_edit)
-                return
-            try:
-                c = c_conn.cursor()
-                c.execute("DELETE FROM cotizacion_detalles WHERE id = %s", (tree_cat_asis.item(sel[0], "values")[3],))
-                c_conn.commit()
-                registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Removió una categoría de la cotización {codigo_cot}")
-            except Exception:
-                pass
-            finally:
-                liberar_conexion(c_conn)
-            refrescar_tabla_categorias()
-
-        btn_add_cat = ctk.CTkButton(f_alta_cat, text="Añadir", width=80, command=agregar_categoria_lista)
-        btn_add_cat.pack(side="left", padx=10)
-        btn_del_cat = ctk.CTkButton(f_der, text="[ X ] Eliminar Seleccionada", fg_color="#D32F2F", hover_color="#B71C1C", command=remover_categoria_lista)
-        btn_del_cat.pack(anchor="w", padx=15, pady=5)
-        refrescar_tabla_categorias()
 
         def ejecutar_update():
             if not ent_sidebar_empresa.get().strip() or not ent_sidebar_evento.get().strip():

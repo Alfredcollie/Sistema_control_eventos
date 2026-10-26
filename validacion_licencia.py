@@ -98,22 +98,79 @@ def obtener_hwid():
         hwid = str(uuid.UUID(int=uuid.getnode())).upper()
     return hwid
 
+def candidatos_credenciales_licencia():
+    """Pares (usuario, contraseña) a probar, en orden.
+
+    Primero el llavero y la configuración; si el llavero tiene una clave vieja,
+    se prueba también la que trae el build (config_local.json), así una entrada
+    antigua del Keychain/Credential Manager no deja la app sin licencia.
+    """
+    pares = []
+
+    # 1) llavero
+    try:
+        if keyring is not None:
+            u = keyring.get_password(SERVICE_NAME, "SUPABASE_LIC_USER")
+            p = keyring.get_password(SERVICE_NAME, "SUPABASE_LIC_PASSWORD")
+            if u and p:
+                pares.append((u, p))
+    except Exception:
+        pass
+
+    # 2) configuración empaquetada / del usuario
+    try:
+        from app_paths import cargar_config_local
+        cfg = cargar_config_local()
+        u = cfg.get("supabase_lic_user")
+        p = cfg.get("supabase_lic_password")
+        if u and p:
+            pares.append((u, p))
+    except Exception:
+        pass
+
+    # 3) variables de entorno
+    u = os.environ.get("SUPABASE_LIC_USER")
+    p = os.environ.get("SUPABASE_LIC_PASSWORD")
+    if u and p:
+        pares.append((u, p))
+
+    # sin repetidos, conservando el orden
+    vistos, salida = set(), []
+    for u, p in pares:
+        if (u, p) not in vistos:
+            vistos.add((u, p))
+            salida.append((u, p))
+    return salida
+
+
 def consultar_licencia_supabase(hwid):
     """Se conecta a Supabase y verifica el estado de TODAS las licencias asociadas a este HWID y Software"""
-    user, password = leer_credenciales_licencia()
-    if not user or not password:
+    pares = candidatos_credenciales_licencia()
+    if not pares:
         return False, "Error: credenciales de licencias no configuradas. Ejecute 'guardar_credenciales.py'."
 
+    conn, ultimo_error = None, None
+    for user, password in pares:
+        try:
+            conn = psycopg2.connect(
+                dbname=SUPABASE_DB_NAME,
+                user=user,
+                password=password,
+                host=SUPABASE_HOST,
+                port=SUPABASE_PORT,
+                sslmode="require",
+                connect_timeout=8
+            )
+            break
+        except Exception as e:
+            ultimo_error = e
+            conn = None
+            continue
+    if conn is None:
+        return False, ("No hay conexión a Internet o el servidor de licencias no responde.\n\n"
+                       f"Detalle: {str(ultimo_error)[:120]}")
+
     try:
-        conn = psycopg2.connect(
-            dbname=SUPABASE_DB_NAME,
-            user=user,
-            password=password,
-            host=SUPABASE_HOST,
-            port=SUPABASE_PORT,
-            sslmode="require",
-            connect_timeout=5
-        )
         cursor = conn.cursor()
         
         query = """

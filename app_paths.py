@@ -96,9 +96,17 @@ def cargar_config_local():
     candidatos.append(str(CONFIG_FILE))   # el usuario tiene prioridad
     for ruta in candidatos:
         try:
-            if os.path.exists(ruta):
-                with open(ruta, "r", encoding="utf-8") as f:
-                    config.update(json.load(f))
+            if not os.path.exists(ruta):
+                continue
+            with open(ruta, "r", encoding="utf-8") as f:
+                datos = json.load(f)
+            if not isinstance(datos, dict):
+                continue
+            for clave, valor in datos.items():
+                # 🚫 Un valor VACÍO del usuario NO debe borrar el que trae el build
+                if valor is None or (isinstance(valor, str) and not valor.strip()):
+                    continue
+                config[clave] = valor
         except Exception:
             continue
     return config

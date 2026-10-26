@@ -1782,6 +1782,10 @@ class ControlGeneralEventos:
         y = max(0, min(20 + posicion * 28, pantalla_h - alto - 60))
         ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
         try:
+            ventana._modulo_geometria_previa = f"{ancho}x{alto}+{x}+{y}"
+        except Exception:
+            pass
+        try:
             ventana.minsize(880, 560)
         except Exception:
             pass
@@ -1825,7 +1829,13 @@ class ControlGeneralEventos:
 
         self.ventanas_modulos[clave] = ventana
         ventana._btn_expandir = btn_expandir          # para cambiar su texto al expandir
-        ventana._modulo_maximizado = False
+        # 🖥️ Los módulos se abren MAXIMIZADOS (el botón permite restaurar)
+        ventana._modulo_maximizado = True
+        try:
+            ventana.after(120, lambda v=ventana: maximizar_ventana(v))
+            ventana.after(200, lambda b=btn_expandir: b.configure(text="🗗 Restaurar"))
+        except Exception:
+            pass
         # La X de la ventana cierra el módulo y lo quita de la lista de abiertos
         ventana.protocol("WM_DELETE_WINDOW", lambda c=clave: self.cerrar_ventana_modulo(c))
         ventana.bind("<Destroy>", lambda e, c=clave: self._al_destruir_ventana(e, c), add="+")
@@ -4107,6 +4117,13 @@ class ControlGeneralEventos:
         v_usr = ctk.CTkToplevel(self.root)
         v_usr.title("Configuración de Usuarios y Permisos")
         v_usr.geometry("1000x580")
+        # 🖥️ La ventana de usuarios también se abre maximizada
+        try:
+            v_usr._modulo_geometria_previa = "1000x580"
+            v_usr._modulo_maximizado = True
+            v_usr.after(120, lambda v=v_usr: maximizar_ventana(v))
+        except Exception:
+            pass
         # 🪟 Sin grab_set(): no debe bloquear los demás módulos abiertos.
         self.ventanas_modulos["usuarios"] = v_usr
         v_usr.bind("<Destroy>", lambda e, c="usuarios": self._al_destruir_ventana(e, c), add="+")

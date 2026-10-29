@@ -307,8 +307,34 @@ def _ejecutar_ps(script, argumentos, timeout=240):
             f.write(script)
         orden = [_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ruta_ps, ruta_json]
         orden += [str(a) for a in argumentos]
-        subprocess.run(orden, capture_output=True, text=True, timeout=timeout,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        banderas = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proceso = subprocess.Popen(orden, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, creationflags=banderas)
+        try:
+            proceso.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # ⏱️ El escáner se quedó colgado: se mata el proceso (y sus hijos) para
+            #    liberar el equipo; si no, la ventana se queda "Escaneando..." para siempre.
+            try:
+                if es_windows():
+                    # Windows: se mata también el árbol de procesos (PowerShell hijos)
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proceso.pid)],
+                                   capture_output=True, creationflags=banderas)
+                else:
+                    proceso.kill()
+            except Exception:
+                try:
+                    proceso.kill()
+                except Exception:
+                    pass
+            try:
+                proceso.communicate(timeout=5)
+            except Exception:
+                pass
+            return {"ok": False,
+                    "error": ("El escaner no respondio en %d segundos y se reinicio la conexion. "
+                              "Revise que este encendido, con papel y sin trabajos pendientes; "
+                              "luego vuelva a escanear." % int(timeout))}
         if not os.path.exists(ruta_json):
             return {"ok": False, "error": "El escaner no respondio. Revise que este encendido y conectado."}
         with open(ruta_json, "r", encoding="utf-8-sig") as f:
@@ -446,7 +472,7 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
         # El escáner a veces responde "dispositivo ocupado" (sobre todo si se acaba
         # de escanear): se reintenta un par de veces antes de rendirse.
         for intento in range(1, 4):
-            res = _ejecutar_ps(_PS_ESCANEAR, [destino, dispositivo, dpi, intent, origen_wia, paginas] + list(area if area else ['', '', '', '']), timeout=420)
+            res = _ejecutar_ps(_PS_ESCANEAR, [destino, dispositivo, dpi, intent, origen_wia, paginas] + list(area if area else ['', '', '', '']), timeout=90)
             paginas_ok = [str(p) for p in (res.get("paginas") or []) if os.path.exists(str(p))]
             aviso = res.get("aviso", "")
             error = res.get("error", "")

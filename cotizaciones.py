@@ -1173,9 +1173,17 @@ class VentanaCotizaciones:
                 c_conn.commit()
                 cache_sistema.invalidar()
                 registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Actualizó los datos generales de la cotización ID {id_cot}")
-                v_edit.destroy()
+                # ✅ La ventana se queda ABIERTA y AL FRENTE (antes se cerraba
+                #    y la ventana de trabajo se iba hacia atrás).
                 self.cargar_cotizaciones_tabla(reset_pagina=True)
-                messagebox.showinfo("Éxito", "Cambios guardados con éxito.")
+                messagebox.showinfo("Éxito", "Cambios guardados con éxito.", parent=v_edit)
+                try:
+                    v_edit.deiconify()
+                    v_edit.lift()
+                    v_edit.focus_force()
+                    v_edit.grab_set()
+                except Exception:
+                    pass
             except Exception as e:
                 messagebox.showerror("Error", str(e), parent=v_edit)
             finally:

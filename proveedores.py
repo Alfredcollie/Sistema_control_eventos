@@ -44,7 +44,21 @@ def maximizar_ventana(ventana):
         except Exception:
             pass
 
-def abrir_documento(ruta):
+def abrir_documento(ruta, titulo="Documento"):
+    """🖼️ Muestra el documento en el VISOR INTERNO del programa.
+
+    Antes se abría con el programa externo (Acrobat, Fotos…) y la ventana
+    quedaba muchas veces detrás del sistema. Ahora se ve dentro del programa.
+    """
+    try:
+        from visor_documentos import ver_documento_ventana
+        return ver_documento_ventana(ruta, titulo)
+    except Exception as e_visor:
+        print("Aviso - visor interno:", e_visor)
+    return abrir_documento_externo(ruta)
+
+
+def abrir_documento_externo(ruta):
     try:
         if sys.platform == "win32":
             os.startfile(ruta)
@@ -270,9 +284,109 @@ def consultar_ruc_en_internet(ruc, timeout=10, reintentos=3):
     return resultado
 
 
+
+
+# =========================================================
+# VENTANA DEL MÓDULO AL FRENTE + AVISOS SOBRE EL MÓDULO
+# =========================================================
+_VENTANA_MODULO = [None]
+
+
+def _traer_ventana_al_frente():
+    """Devuelve la ventana del módulo al frente (Windows suele mandarla atrás)."""
+    ventana = _VENTANA_MODULO[0]
+    if ventana is None:
+        return
+    # 🚫 Si hay una ventana modal abierta (Registrar Pago, edición…) NO se trae el
+    #    módulo al frente: la ventana de trabajo debe quedar SIEMPRE por delante.
+    try:
+        _que_tiene_grab = ventana.grab_current()
+        if _que_tiene_grab is not None and _que_tiene_grab is not ventana:
+            return
+    except Exception:
+        pass
+    try:
+        ventana.deiconify()
+        ventana.lift()
+        ventana.attributes("-topmost", True)
+        ventana.after(400, lambda: ventana.attributes("-topmost", False))
+        ventana.focus_force()
+    except Exception:
+        pass
+
+
+class _MessageBoxDelModulo:
+    """Envuelve messagebox: cada aviso sale SOBRE la ventana del módulo."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def _parent(self):
+        ventana = _VENTANA_MODULO[0]
+        try:
+            if ventana is not None and ventana.winfo_exists():
+                return ventana
+        except Exception:
+            pass
+        return None
+
+    def _ejecutar(self, nombre, *args, **kwargs):
+        # 🪟 El aviso sale sobre la ventana que lo pide (una ventana de pago, de
+        #    edición, etc.) y, al cerrarlo, se devuelve el frente a ESA ventana.
+        #    Antes se traía al frente el módulo y la ventana de trabajo quedaba
+        #    detrás (por eso "desaparecía" la ventana de cancelación).
+        padre = kwargs.get("parent") or self._parent()
+        kwargs["parent"] = padre
+        try:
+            return getattr(self._real, nombre)(*args, **kwargs)
+        finally:
+            try:
+                if padre is not None and padre.winfo_exists():
+                    padre.deiconify()
+                    padre.lift()
+                    padre.focus_force()
+                    try:
+                        padre.grab_set()
+                    except Exception:
+                        pass
+                else:
+                    _traer_ventana_al_frente()
+            except Exception:
+                _traer_ventana_al_frente()
+
+    def showinfo(self, *a, **k):
+        return self._ejecutar("showinfo", *a, **k)
+
+    def showwarning(self, *a, **k):
+        return self._ejecutar("showwarning", *a, **k)
+
+    def showerror(self, *a, **k):
+        return self._ejecutar("showerror", *a, **k)
+
+    def askyesno(self, *a, **k):
+        return self._ejecutar("askyesno", *a, **k)
+
+    def askokcancel(self, *a, **k):
+        return self._ejecutar("askokcancel", *a, **k)
+
+    def askquestion(self, *a, **k):
+        return self._ejecutar("askquestion", *a, **k)
+
+    def __getattr__(self, nombre):
+        return getattr(self._real, nombre)
+
+
+messagebox = _MessageBoxDelModulo(messagebox)
+
+
 class SistemaProveedores:
     def __init__(self, root):
         self.root = root
+        # 🪟 La ventana del módulo se registra para traerla al frente
+        try:
+            _VENTANA_MODULO[0] = root.winfo_toplevel()
+        except Exception:
+            _VENTANA_MODULO[0] = None
         self.usuario_activo = "Desconocido"
         # 🧵 Cola de interfaz: los hilos de trabajo piden los cambios de pantalla
         #    y el hilo principal los aplica (igual que en el programa de Flota).
@@ -705,6 +819,9 @@ class SistemaProveedores:
             self.frame_flash_buscar.lift()
             self.root.update_idletasks()
             self.root.after(1500, self.frame_flash_buscar.place_forget)
+
+            # ✅ Al eliminar, la ventana del módulo se queda AL FRENTE
+            _traer_ventana_al_frente()
             
         except Exception as e:
             conn.rollback()
@@ -1224,7 +1341,8 @@ class SistemaProveedores:
             messagebox.showwarning("Campos Incompletos", "El RUC de la empresa debe tener exactamente 11 dígitos numéricos.")
             return
         if not nombre:
-            messagebox.showwarning("Campos Incompletos", "Debe ingresar la Razón Social del proveedor.")
+            messagebox.showwarning("Campos Incompletos", "Debe ingresar la Razón Social del proveedor.",
+                                     parent=getattr(self, "root", None))
             return
 
         conn = conectar_db()
@@ -1250,13 +1368,26 @@ class SistemaProveedores:
             self.frame_flash.lift()
             self.root.update_idletasks()
             self.root.after(1500, self.frame_flash.place_forget)
+
+            # ✅ El módulo se queda AL FRENTE después de guardar
+            try:
+                _ventana_mod = self.root.winfo_toplevel()
+                _ventana_mod.deiconify()
+                _ventana_mod.lift()
+                _ventana_mod.attributes("-topmost", True)
+                _ventana_mod.after(400, lambda: _ventana_mod.attributes("-topmost", False))
+                _ventana_mod.focus_force()
+            except Exception:
+                pass
             
         except psycopg2.IntegrityError:
             conn.rollback()
-            messagebox.showerror("Error de Duplicidad", "Este número de RUC ya se encuentra registrado.")
+            messagebox.showerror("Error de Duplicidad", "Este número de RUC ya se encuentra registrado.",
+                                 parent=getattr(self, "root", None))
         except Exception as e:
             conn.rollback()
-            messagebox.showerror("Error SQL", f"No se pudo guardar el proveedor:\n{e}")
+            messagebox.showerror("Error SQL", f"No se pudo guardar el proveedor:\n{e}",
+                                 parent=getattr(self, "root", None))
         finally:
             liberar_conexion(conn)
 

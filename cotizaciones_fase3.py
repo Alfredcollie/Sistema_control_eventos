@@ -68,7 +68,21 @@ def maximizar_ventana(ventana):
         except Exception:
             pass
 
-def abrir_documento(ruta):
+def abrir_documento(ruta, titulo="Documento"):
+    """🖼️ Muestra el documento en el VISOR INTERNO del programa.
+
+    Antes se abría con el programa externo (Acrobat, Fotos…) y la ventana
+    quedaba muchas veces detrás del sistema. Ahora se ve dentro del programa.
+    """
+    try:
+        from visor_documentos import ver_documento_ventana
+        return ver_documento_ventana(ruta, titulo)
+    except Exception as e_visor:
+        print("Aviso - visor interno:", e_visor)
+    return abrir_documento_externo(ruta)
+
+
+def abrir_documento_externo(ruta):
     """Abre el archivo generado con el visor predeterminado según el Sistema Operativo"""
     try:
         if sys.platform == "win32":
@@ -1910,8 +1924,19 @@ class VentanaEtapaProveedores:
             self.conn.commit()
             cache_sistema.invalidar()
             registrar_auditoria(self.usuario_activo, "Cotizaciones", f"Modificó márgenes en ítem de Cotización N° {self.codigo_cot}")
-            v_m.destroy()
+            # ✅ La ventana de márgenes se queda AL FRENTE después de guardar
             self.cargar_grid_proveedores()
+            try:
+                v_m.deiconify()
+                v_m.lift()
+                v_m.focus_force()
+                v_m.grab_set()
+            except Exception:
+                pass
+            try:
+                messagebox.showinfo("Guardado", "Cambios guardados.", parent=v_m)
+            except Exception:
+                pass
 
         ctk.CTkButton(f_m, text="[ Guardar Cambios ]", command=ejecutar_update_matriz).pack(pady=15)
 

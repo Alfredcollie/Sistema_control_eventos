@@ -1,0 +1,12 @@
+{
+ "ventas_facturas": [
+  "num",
+  "fecha",
+  "nro_doc",
+  "cliente",
+  "concepto",
+  "evento",
+  "neto",
+  "estado_sunat"
+ ]
+}

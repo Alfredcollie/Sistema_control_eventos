@@ -19,6 +19,14 @@ import shutil
 import calendar
 import re
 import json
+from lector_comprobantes_venta import extraer_datos_venta
+try:  # OCR con IA (opcional)
+    from google import genai
+    from google.genai import types as genai_types
+except Exception:
+    genai = None
+    genai_types = None
+
 import subprocess 
 import threading
 import ctypes
@@ -32,6 +40,17 @@ from datetime import datetime
 
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
+
+# 🖨️ Escaneo con la multifuncional (WIA en Windows / AirScan en macOS).
+#    Disponible para TODO el módulo: antes había funciones que lo usaban sin
+#    importarlo y los botones "no hacían nada".
+try:
+    import escaner
+except Exception as _e_escaner:
+    escaner = None
+    print("Aviso - módulo del escáner:", _e_escaner)
+
+
 
 # 🏦 Cuentas bancarias del sistema (las mismas que usa el módulo de Bancos):
 # al registrar un cobro se indica en qué cuenta entró el dinero.
@@ -288,7 +307,21 @@ def activar_busqueda_rapida(combo, titulo="Buscar proveedor", al_elegir=None):
         pass
     return combo
 
-def abrir_documento(ruta):
+def abrir_documento(ruta, titulo="Documento"):
+    """🖼️ Muestra el documento en el VISOR INTERNO del programa.
+
+    Antes se abría con el programa externo (Acrobat, Fotos…) y la ventana
+    quedaba muchas veces detrás del sistema. Ahora se ve dentro del programa.
+    """
+    try:
+        from visor_documentos import ver_documento_ventana
+        return ver_documento_ventana(ruta, titulo)
+    except Exception as e_visor:
+        print("Aviso - visor interno:", e_visor)
+    return abrir_documento_externo(ruta)
+
+
+def abrir_documento_externo(ruta):
     try:
         if sys.platform == "win32": os.startfile(ruta)
         elif sys.platform == "darwin": subprocess.call(["open", ruta])
@@ -631,9 +664,130 @@ def _asegurar_columnas_impuestos(conn):
             pass
 
 
+
+
+# =========================================================
+# VENTANA AL FRENTE + AVISOS SOBRE EL MÓDULO (Ventas)
+# =========================================================
+_VENTANA_VENTAS = [None]
+
+
+def _traer_ventana_al_frente():
+    """Devuelve la ventana del módulo al frente (Windows suele mandarla atrás)."""
+    ventana = _VENTANA_VENTAS[0]
+    if ventana is None:
+        return
+    # 🚫 Si hay una ventana modal abierta (Registrar Pago, edición…) NO se trae el
+    #    módulo al frente: la ventana de trabajo debe quedar SIEMPRE por delante.
+    try:
+        _que_tiene_grab = ventana.grab_current()
+        if _que_tiene_grab is not None and _que_tiene_grab is not ventana:
+            return
+    except Exception:
+        pass
+    try:
+        ventana.deiconify()
+        ventana.lift()
+        ventana.attributes("-topmost", True)
+        ventana.after(400, lambda: ventana.attributes("-topmost", False))
+        ventana.focus_force()
+    except Exception:
+        pass
+
+
+class _MessageBoxVentas:
+    """Envuelve messagebox: cada aviso sale SOBRE el módulo y lo deja al frente."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def _parent(self):
+        ventana = _VENTANA_VENTAS[0]
+        try:
+            if ventana is not None and ventana.winfo_exists():
+                return ventana
+        except Exception:
+            pass
+        return None
+
+    def _ejecutar(self, nombre, *args, **kwargs):
+        # 🪟 El aviso sale sobre la ventana que lo pide (una ventana de pago, de
+        #    edición, etc.) y, al cerrarlo, se devuelve el frente a ESA ventana.
+        #    Antes se traía al frente el módulo y la ventana de trabajo quedaba
+        #    detrás (por eso "desaparecía" la ventana de cancelación).
+        padre = kwargs.get("parent") or self._parent()
+        kwargs["parent"] = padre
+        try:
+            return getattr(self._real, nombre)(*args, **kwargs)
+        finally:
+            try:
+                if padre is not None and padre.winfo_exists():
+                    padre.deiconify()
+                    padre.lift()
+                    padre.focus_force()
+                    try:
+                        padre.grab_set()
+                    except Exception:
+                        pass
+                else:
+                    _traer_ventana_al_frente()
+            except Exception:
+                _traer_ventana_al_frente()
+
+    def showinfo(self, *a, **k):
+        return self._ejecutar("showinfo", *a, **k)
+
+    def showwarning(self, *a, **k):
+        return self._ejecutar("showwarning", *a, **k)
+
+    def showerror(self, *a, **k):
+        return self._ejecutar("showerror", *a, **k)
+
+    def askyesno(self, *a, **k):
+        return self._ejecutar("askyesno", *a, **k)
+
+    def askokcancel(self, *a, **k):
+        return self._ejecutar("askokcancel", *a, **k)
+
+    def askquestion(self, *a, **k):
+        return self._ejecutar("askquestion", *a, **k)
+
+    def __getattr__(self, nombre):
+        return getattr(self._real, nombre)
+
+
+messagebox = _MessageBoxVentas(messagebox)
+
+
+def _abrir_ventana_alta(ventana, ancho=560):
+    """Coloca la ventana lo más arriba posible y con el alto de la pantalla.
+
+    Así el formulario de edición se ve completo sin quedar cortado abajo.
+    """
+    try:
+        ventana.update_idletasks()
+        alto_pantalla = ventana.winfo_screenheight()
+        ancho_pantalla = ventana.winfo_screenwidth()
+        alto = max(420, alto_pantalla - 120)
+        ancho = min(ancho, max(420, ancho_pantalla - 80))
+        x = max(0, int((ancho_pantalla - ancho) / 2))
+        ventana.geometry("%dx%d+%d+%d" % (ancho, alto, x, 0))
+        ventana.lift()
+        ventana.focus_force()
+        return True
+    except Exception as e:
+        print("Aviso - ubicar la ventana:", e)
+        return False
+
+
 class FacturasEmitidasTab:
     def __init__(self, tab_frame, main_root, app_padre):
         self.tab_frame, self.main_root, self.app_padre = tab_frame, main_root, app_padre
+        # 🪟 Se registra la ventana para traerla al frente tras escanear/avisar
+        try:
+            _VENTANA_VENTAS[0] = main_root.winfo_toplevel()
+        except Exception:
+            _VENTANA_VENTAS[0] = None
         self.orden_columnas, self.bloquear_autocompletado_ruc, self.ruta_archivo_temp = {}, False, ""
         self.pagina_actual, self.registros_por_pagina = 1, 50
         self._id_debounce_busqueda = None
@@ -836,6 +990,8 @@ class FacturasEmitidasTab:
                 except Exception as e:
                     messagebox.showerror("Escáner", "Se escaneó, pero no se pudo leer:\n%s" % e,
                                          parent=self._padre_mensaje())
+                # 🪟 La ventana del módulo se queda AL FRENTE tras el escaneo
+                _traer_ventana_al_frente()
 
             return self.main_root.after(0, aplicar)
         except Exception as e:
@@ -893,11 +1049,259 @@ class FacturasEmitidasTab:
             return
         self.autocompletar_desde_archivo(ruta)
 
+    def _ocr_factura_gemini(self, ruta):
+        """OCR con IA (Google Gemini) del comprobante escaneado. Devuelve dict o None."""
+        if genai is None:
+            return None
+        imagenes = []
+        try:
+            import fitz
+            documento = fitz.open(ruta)
+            for pagina in documento:
+                try:
+                    pix = pagina.get_pixmap(dpi=200)
+                    imagenes.append(pix.tobytes("png"))
+                except Exception:
+                    continue
+            documento.close()
+        except Exception:
+            imagenes = []
+        if not imagenes:
+            try:
+                with open(ruta, "rb") as f:
+                    imagenes.append(f.read())
+            except Exception:
+                return None
+
+        try:
+            clave = (os.environ.get("GEMINI_API_KEY", "").strip()
+                     or "AQ.Ab8RN6LTyHmVNUALwk6Wk7b2EMSzbZrVXVjgA")
+            cliente = genai.Client(api_key=clave)
+        except Exception:
+            return None
+
+        prompt = (
+            "Eres un lector OCR de facturas, boletas y recibos peruanos. "
+            "Lee la imagen del comprobante y devuelve SOLO un JSON valido, sin texto adicional, "
+            "con estas claves exactas:\n"
+            '- "tipo": "factura", "boleta" o "recibo".\n'
+            '- "numero_documento": serie y correlativo (ej. "F001-123"). Si no se ve, "".\n'
+            '- "fecha": fecha en DD/MM/YYYY. Si no se ve, "".\n'
+            '- "cliente": razon social o nombre del cliente. Si no se ve, "".\n'
+            '- "ruc": exactamente 11 digitos. Si no se ve o no son 11 digitos, "".\n'
+            '- "descripcion": concepto o descripcion del servicio/venta. Si no se ve, "".\n'
+            '- "subtotal": monto base sin IGV, numero decimal (ej. 22212.00). Si no se ve, 0.\n'
+            '- "igv": importe del IGV, numero decimal. Si no se ve, 0.\n'
+            '- "total": importe total, numero decimal. Si no se ve, 0.\n'
+            '- "detraccion": porcentaje de detraccion o retencion (ej. 12). Si no aplica, 0.\n'
+            "Reglas: NO inventes datos. Montos como numeros con punto decimal, sin simbolo de moneda "
+            "ni comas. Si un campo no se ve, devuelvelo vacio o 0."
+        )
+
+        try:
+            partes = []
+            if genai_types is not None:
+                for img in imagenes[:3]:
+                    partes.append(genai_types.Part.from_bytes(data=img, mime_type="image/png"))
+            if not partes:
+                return None
+            respuesta = cliente.models.generate_content(model="gemini-3.5-flash-lite",
+                                                        contents=[prompt] + partes)
+            texto_ia = (respuesta.text or "").strip()
+        except Exception as e:
+            print("Aviso - OCR Gemini:", e)
+            return None
+
+        m = re.search(r"\{.*\}", texto_ia, re.DOTALL)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+
+    def _registrar_cliente_por_ruc(self, nombre, ruc):
+        """Da de alta el cliente en el módulo de Clientes si no existe ese RUC."""
+        ruc = re.sub(r"\D", "", str(ruc or ""))
+        nombre = str(nombre or "").strip()
+        if len(ruc) != 11 or not nombre:
+            return ""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return ""
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT nombre_empresa FROM clientes "
+                            "WHERE regexp_replace(COALESCE(ruc, ''), '[^0-9]', '', 'g') = %s LIMIT 1",
+                            (ruc,))
+                fila = cur.fetchone()
+                if fila and str(fila[0] or "").strip():
+                    return str(fila[0]).strip()
+                cur.execute("INSERT INTO clientes (ruc, nombre_empresa, razon_comercial) "
+                            "VALUES (%s, %s, %s)", (ruc, nombre, nombre))
+            conn.commit()
+            try:
+                cache_sistema.invalidar()
+            except Exception:
+                pass
+            print("Cliente registrado desde Ventas:", nombre, ruc)
+            return nombre
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print("Aviso - alta del cliente:", e)
+            return ""
+        finally:
+            liberar_conexion(conn)
+
+    def _nombre_cliente_por_ruc(self, ruc):
+        """Nombre del cliente registrado en el módulo de Clientes (buscado por RUC)."""
+        ruc = re.sub(r"\D", "", str(ruc or ""))
+        if len(ruc) != 11:
+            return ""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return ""
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT nombre_empresa, COALESCE(razon_comercial, '') FROM clientes "
+                    "WHERE regexp_replace(COALESCE(ruc, ''), '[^0-9]', '', 'g') = %s LIMIT 1",
+                    (ruc,))
+                fila = cur.fetchone()
+                if fila:
+                    nombre = str(fila[0] or "").strip() or str(fila[1] or "").strip()
+                    return nombre
+        except Exception as e:
+            print("Aviso - cliente por RUC:", e)
+        finally:
+            liberar_conexion(conn)
+        return ""
+
+    def _rellenar_desde_ocr(self, datos):
+        """Rellena el formulario con lo que devolvio el OCR con IA. Devuelve True si relleno algo."""
+        relleno = False
+        try:
+            tipo = str(datos.get("tipo") or "").lower()
+            if "boleta" in tipo:
+                self.combo_tipo.set("Boleta (Sin IGV)")
+            elif "recibo" in tipo:
+                self.combo_tipo.set("Recibo por Honorarios (8% Retención)")
+            else:
+                self.combo_tipo.set("Factura (18% IGV)")
+            try:
+                self.on_tipo_change(self.combo_tipo.get())
+            except Exception:
+                pass
+
+            nro = str(datos.get("numero_documento") or "").strip()
+            if nro:
+                self.nro_desde_archivo = True
+                self.ent_nro_doc.delete(0, tk.END)
+                self.ent_nro_doc.insert(0, nro)
+                relleno = True
+
+            fecha = str(datos.get("fecha") or "").strip()
+            mf = re.search(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", fecha)
+            if mf:
+                d, mes, anio = mf.groups()
+                if len(anio) == 2:
+                    anio = "20" + anio
+                fmt = CONFIG_REGIONAL.get("formato_fecha", "DD/MM/AAAA")
+                self.ent_fecha.delete(0, tk.END)
+                if fmt == "MM/DD/AAAA":
+                    self.ent_fecha.insert(0, "%s/%s/%s" % (mes, d, anio))
+                else:
+                    self.ent_fecha.insert(0, "%s/%s/%s" % (d, mes, anio))
+                relleno = True
+
+            cliente = str(datos.get("cliente") or "").strip()
+            if cliente:
+                self.combo_cliente.set(cliente)
+                relleno = True
+
+            ruc = re.sub(r"\D", "", str(datos.get("ruc") or ""))
+            if len(ruc) == 11:
+                self.ent_ruc.configure(state="normal")
+                self.ent_ruc.delete(0, tk.END)
+                self.ent_ruc.insert(0, ruc)
+                relleno = True
+                # 🏢 El nombre sale del módulo de Clientes usando el RUC
+                try:
+                    _nombre_bd = self._nombre_cliente_por_ruc(ruc)
+                    if _nombre_bd:
+                        self.combo_cliente.set(_nombre_bd)
+                    else:
+                        # 🏢 No estaba registrado: se da de alta con el nombre leído
+                        _nombre_ocr = str(datos.get("cliente") or "").strip()
+                        _nombre_nuevo = self._registrar_cliente_por_ruc(_nombre_ocr, ruc)
+                        if _nombre_nuevo:
+                            self.combo_cliente.set(_nombre_nuevo)
+                except Exception as e_cli:
+                    print("Aviso - nombre del cliente por RUC:", e_cli)
+
+            desc = str(datos.get("descripcion") or "").strip()
+            if desc:
+                try:
+                    self.ent_desc.delete(0, tk.END)
+                    self.ent_desc.insert(0, desc)
+                except Exception:
+                    pass
+                relleno = True
+
+            def _num(valor):
+                txt = str(valor).strip().replace("S/", "").replace("s/", "").replace("$", "").replace(" ", "")
+                if "," in txt and "." in txt:
+                    if txt.rfind(",") > txt.rfind("."):
+                        txt = txt.replace(".", "").replace(",", ".")
+                    else:
+                        txt = txt.replace(",", "")
+                elif "," in txt:
+                    txt = txt.replace(",", ".")
+                try:
+                    return float(txt)
+                except Exception:
+                    return 0.0
+
+            subtotal = _num(datos.get("subtotal"))
+            total = _num(datos.get("total"))
+            monto_base = subtotal
+            if monto_base <= 0 and total > 0:
+                monto_base = total / 1.18 if "Factura" in self.combo_tipo.get() else total
+            if monto_base > 0:
+                self.ent_subtotal.delete(0, tk.END)
+                self.ent_subtotal.insert(0, "%.2f" % monto_base)
+                relleno = True
+
+            det = _num(datos.get("detraccion"))
+            if det > 0:
+                try:
+                    self.ent_detraccion.delete(0, tk.END)
+                    self.ent_detraccion.insert(0, "%g" % det)
+                except Exception:
+                    pass
+                relleno = True
+        except Exception as e:
+            print("Aviso - rellenando desde OCR:", e)
+        return relleno
+
     def autocompletar_desde_archivo(self, ruta):
         """Completa el formulario con el texto del PDF (se use el botón o el escáner)."""
         try:
             self.bloquear_autocompletado_ruc = True
             texto = self._texto_de_factura(ruta)
+
+            # 🧠 Lector LOCAL del comprobante (funciona sin internet y sin IA)
+            try:
+                _ruc_propio = (CONFIG_REGIONAL.get("ruc_empresa", "")
+                               if isinstance(CONFIG_REGIONAL, dict) else "")
+                datos_lector = extraer_datos_venta(texto, _ruc_propio)
+                if datos_lector:
+                    self._rellenar_desde_ocr(datos_lector)
+            except Exception as e_lector:
+                print("Aviso - lector del comprobante:", e_lector)
             self.nro_desde_archivo = True    # 📄 provisional: el N° saldrá del comprobante
             if not texto.strip():
                 self.bloquear_autocompletado_ruc = False
@@ -943,7 +1347,19 @@ class FacturasEmitidasTab:
                 if not det_match:
                     if re.search(r"Sujeta\s*a\s*detracci[oó]n", texto, re.IGNORECASE): self.ent_detraccion.delete(0, tk.END); self.ent_detraccion.insert(0, "12") 
                 else: self.ent_detraccion.delete(0, tk.END); self.ent_detraccion.insert(0, det_match.group(1))
-            self.ruta_archivo_temp = ruta; self.actualizar_totales(); self.al_seleccionar_cliente() 
+            # 🧠 Si el OCR de texto no completó los datos clave, se usa el OCR con IA
+            faltan = (not self.ent_nro_doc.get().strip()
+                      or not self.combo_cliente.get().strip()
+                      or not str(self.ent_ruc.get()).strip())
+            if faltan:
+                datos_ia = self._ocr_factura_gemini(ruta)
+                if datos_ia:
+                    self._rellenar_desde_ocr(datos_ia)
+            self.ruta_archivo_temp = ruta; self.actualizar_totales(); self.al_seleccionar_cliente()
+            try:
+                self._sugerir_oc_por_monto()
+            except Exception:
+                pass 
             messagebox.showinfo("Extracción Inteligente", "Datos extraídos de SUNAT.\n\nEl sistema guardará el archivo procesado al registrar.")
             self.bloquear_autocompletado_ruc = False
         except Exception as e: 
@@ -1007,7 +1423,7 @@ class FacturasEmitidasTab:
         f_tabla = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent"); f_tabla.pack(fill="both", expand=True)
         columnas = ("num", "id", "fecha", "nro_doc", "dias", "tipo", "cliente", "concepto", "evento", "subtotal", "impuesto", "total", "detraccion", "neto", "estado_sunat", "archivo")
         self.tabla = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
-        self.tabla.tag_configure("pagada", background="#d6eaf8", foreground="#1a5276")
+        self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
         self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
         self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
         self.tabla.heading("num", text="N°", anchor="center"); self.tabla.heading("id", text="ID (Oculto)"); self.tabla.heading("fecha", text="Fecha ↕", command=lambda: self.ordenar_por_columna("fecha", False))
@@ -1049,21 +1465,93 @@ class FacturasEmitidasTab:
         self.pagina_actual += 1; self.cargar_datos_tabla()
     def cargar_ordenes_compra(self, cotizacion_codigo=None):
         def tarea():
-            conn, ocs = conectar_db(silencioso=True), ["--- Sin Orden de Compra ---"]
+            conn, ocs, detalle = conectar_db(silencioso=True), ["--- Sin Orden de Compra ---"], {}
             if conn:
                 try:
                     c = conn.cursor()
-                    if cotizacion_codigo: c.execute("SELECT numero_oc FROM ordenes_compra_clientes WHERE cotizacion_asociada = %s ORDER BY id DESC", (cotizacion_codigo,))
-                    else: c.execute("SELECT numero_oc FROM ordenes_compra_clientes ORDER BY id DESC")
-                    for r in c.fetchall(): ocs.append(r[0])
+                    sql = ("SELECT numero_oc, COALESCE(cliente, ''), COALESCE(monto_total, 0), "
+                           "COALESCE(cotizacion_asociada, ''), COALESCE(descripcion, '') "
+                           "FROM ordenes_compra_clientes ")
+                    if cotizacion_codigo:
+                        c.execute(sql + "WHERE cotizacion_asociada = %s ORDER BY id DESC",
+                                  (cotizacion_codigo,))
+                    else:
+                        c.execute(sql + "ORDER BY id DESC")
+                    for r in c.fetchall():
+                        numero = str(r[0]).strip()
+                        if not numero:
+                            continue
+                        ocs.append(numero)
+                        detalle[numero] = {"cliente": str(r[1]), "monto": float(r[2] or 0),
+                                           "cotizacion": str(r[3]),
+                                           "descripcion": str(r[4] if len(r) > 4 else "")}
                 except: pass
                 finally: liberar_conexion(conn)
+            self._ocs_detalle = detalle
             self.main_root.after(0, lambda: self._aplicar_ocs(ocs))
         threading.Thread(target=tarea, daemon=True).start()
+
     def _aplicar_ocs(self, ocs):
-        if hasattr(self, 'combo_oc'):
-            self.combo_oc.configure(values=ocs)
-            if self.combo_oc.get() not in ocs: self.combo_oc.set("--- Sin Orden de Compra ---")
+        if not hasattr(self, 'combo_oc'):
+            return
+        self.combo_oc.configure(values=ocs)
+        if self.combo_oc.get() not in ocs:
+            self.combo_oc.set("--- Sin Orden de Compra ---")
+        # Si hay UNA sola OC para el evento elegido, se selecciona automáticamente
+        reales = [o for o in ocs if o != "--- Sin Orden de Compra ---"]
+        if len(reales) == 1 and self.combo_oc.get() == "--- Sin Orden de Compra ---":
+            self.combo_oc.set(reales[0])
+        self._actualizar_info_oc()
+
+    def _actualizar_info_oc(self):
+        """Muestra el detalle de la OC elegida y avisa si el monto no cuadra."""
+        try:
+            numero = self.combo_oc.get().strip()
+            detalle = getattr(self, "_ocs_detalle", {}) or {}
+            if numero == "--- Sin Orden de Compra ---" or numero not in detalle:
+                self.lbl_oc_info.configure(text="", text_color="#555555")
+                return
+            datos = detalle[numero]
+            texto = "OC %s · %s · S/ %s" % (numero, datos.get("cliente", ""),
+                                             formatear_moneda(datos.get("monto", 0)))
+            _desc_oc = str(datos.get("descripcion") or "").strip()
+            if _desc_oc:
+                texto += "   ·   " + _desc_oc[:60]
+            try:
+                total_factura = float(self.ent_subtotal.get() or 0)
+                if "Factura" in self.combo_tipo.get():
+                    total_factura = total_factura * 1.18
+            except Exception:
+                total_factura = 0.0
+            color = "#1e8449"
+            if total_factura > 0 and abs(total_factura - datos.get("monto", 0)) > 0.5:
+                texto += "   ⚠️ no coincide con el total de la factura (S/ %s)" % formatear_moneda(total_factura)
+                color = "#c0392b"
+            self.lbl_oc_info.configure(text=texto, text_color=color)
+        except Exception as e:
+            print("Aviso - info de la OC:", e)
+
+    def _sugerir_oc_por_monto(self):
+        """Elige la OC cuyo monto total coincide con la factura que se está cargando."""
+        try:
+            if self.combo_oc.get() != "--- Sin Orden de Compra ---":
+                return
+            subtotal = float(self.ent_subtotal.get() or 0)
+            if subtotal <= 0:
+                return
+            total = subtotal * 1.18 if "Factura" in self.combo_tipo.get() else subtotal
+            detalle = getattr(self, "_ocs_detalle", {}) or {}
+            candidatas = [(abs(d.get("monto", 0) - total), n) for n, d in detalle.items()]
+            if not candidatas:
+                return
+            candidatas.sort()
+            diferencia, numero = candidatas[0]
+            if diferencia <= 0.5:
+                self.combo_oc.set(numero)
+                self._actualizar_info_oc()
+                print("OC sugerida por monto:", numero)
+        except Exception as e:
+            print("Aviso - sugerir OC:", e)
     def al_seleccionar_evento(self, choice):
         if not choice or "GENERAL" in choice: self.cargar_ordenes_compra(); return
         partes = choice.split(" | ")
@@ -1115,8 +1603,17 @@ class FacturasEmitidasTab:
         if not getattr(self, 'bloquear_autocompletado_ruc', False) and ruc_db: self.ent_ruc.configure(state="normal"); self.ent_ruc.delete(0, tk.END); self.ent_ruc.insert(0, str(ruc_db))
         if hasattr(self, 'actualizar_totales'): self.actualizar_totales()
         if hasattr(self, 'combo_evento'):
-            self.combo_evento.configure(values=eventos_cliente)
-            if self.combo_evento.get() not in eventos_cliente: self.combo_evento.set("GENERAL / NO ASIGNADO")
+            # 📌 Primero los eventos de ESTE cliente y luego TODOS los aprobados:
+            #    antes se reemplazaba la lista y, si el cliente no tenía cotizaciones,
+            #    el desplegable quedaba sin los eventos aprobados.
+            aprobados = list(getattr(self, "_eventos_aprobados", []) or [])
+            lista = ["GENERAL / NO ASIGNADO"]
+            for ev in list(eventos_cliente or []) + aprobados:
+                if ev and ev != "GENERAL / NO ASIGNADO" and ev not in lista:
+                    lista.append(ev)
+            self.combo_evento.configure(values=lista)
+            if self.combo_evento.get() not in lista:
+                self.combo_evento.set("GENERAL / NO ASIGNADO")
     def cargar_clientes_bd(self):
         clis = cache_sistema.obtener('lista_clientes_combobox')
         if clis: self._aplicar_clientes(clis)
@@ -1161,7 +1658,11 @@ class FacturasEmitidasTab:
     def _aplicar_eventos(self, evs):
         if not hasattr(self, 'combo_evento'): return
         lista_evs = ["GENERAL / NO ASIGNADO"]
-        if evs: lista_limpia = [e for e in evs if "OFICINA" not in e]; lista_evs.extend(lista_limpia)
+        if evs:
+            lista_limpia = [e for e in evs if "OFICINA" not in e]
+            lista_evs.extend(lista_limpia)
+            # 📌 Se recuerdan los eventos aprobados para no perderlos al elegir cliente
+            self._eventos_aprobados = list(lista_limpia)
         self.combo_evento.configure(values=lista_evs)
         if self.combo_evento.get() not in lista_evs: self.combo_evento.set("GENERAL / NO ASIGNADO")
     def actualizar_totales(self, *args):
@@ -1476,6 +1977,99 @@ class FacturasEmitidasTab:
                 "Verifique que la carpeta sincronizada esté actualizada (Rclone).",
                 parent=getattr(self, "main_root", None))
 
+    def _oc_de_factura(self, id_factura):
+        """(número de OC, ruta del archivo) de la Orden de Compra del cliente."""
+        numero, ruta = "", ""
+        try:
+            conn = conectar_db(silencioso=True)
+            if conn:
+                try:
+                    with conn.cursor() as c:
+                        c.execute("SELECT COALESCE(orden_compra, '') FROM facturas_emitidas WHERE id = %s",
+                                  (id_factura,))
+                        fila = c.fetchone()
+                        numero = str(fila[0] or "").strip() if fila else ""
+                finally:
+                    liberar_conexion(conn)
+        except Exception as e:
+            print("Aviso - OC de la factura:", e)
+        if numero:
+            try:
+                conn = conectar_db(silencioso=True)
+                if conn:
+                    try:
+                        with conn.cursor() as c:
+                            c.execute("""SELECT COALESCE(archivo_ruta, '') FROM ordenes_compra_clientes
+                                         WHERE numero_oc = %s ORDER BY id DESC LIMIT 1""", (numero,))
+                            fila = c.fetchone()
+                            ruta = str(fila[0] or "") if fila else ""
+                    finally:
+                        liberar_conexion(conn)
+            except Exception as e:
+                print("Aviso - archivo de la OC:", e)
+        if ruta:
+            try:
+                ruta = self._primera_ruta_venta([ruta]) or ""
+            except Exception:
+                pass
+        return numero, ruta
+
+    def _ver_orden_compra_cliente(self, id_factura):
+        """Muestra la Orden de Compra del cliente asociada a la factura (visor interno)."""
+        numero_oc = ""
+        try:
+            conn = conectar_db(silencioso=True)
+            if conn:
+                try:
+                    with conn.cursor() as c:
+                        c.execute("SELECT COALESCE(orden_compra, '') FROM facturas_emitidas WHERE id = %s",
+                                  (id_factura,))
+                        fila = c.fetchone()
+                        numero_oc = str(fila[0] or "").strip() if fila else ""
+                finally:
+                    liberar_conexion(conn)
+        except Exception as e:
+            print("Aviso - OC de la factura:", e)
+
+        if not numero_oc:
+            return messagebox.showinfo(
+                "Orden de Compra",
+                "Esta factura no tiene una Orden de Compra del cliente asociada." + chr(10) + chr(10) +
+                "Se asigna al elegirla en «Orden de Compra» al registrar la venta.",
+                parent=getattr(self, "main_root", None))
+
+        ruta_oc, cliente_oc = "", ""
+        try:
+            conn = conectar_db(silencioso=True)
+            if conn:
+                try:
+                    with conn.cursor() as c:
+                        c.execute("""SELECT COALESCE(archivo_ruta, ''), COALESCE(cliente, '')
+                                     FROM ordenes_compra_clientes WHERE numero_oc = %s
+                                     ORDER BY id DESC LIMIT 1""", (numero_oc,))
+                        fila = c.fetchone()
+                        if fila:
+                            ruta_oc, cliente_oc = str(fila[0] or ""), str(fila[1] or "")
+                finally:
+                    liberar_conexion(conn)
+        except Exception as e:
+            print("Aviso - archivo de la OC:", e)
+
+        if not ruta_oc:
+            return messagebox.showwarning(
+                "Orden de Compra",
+                "La Orden de Compra N° %s no tiene el archivo adjunto." % numero_oc + chr(10) + chr(10) +
+                "Puede cargarlo en «Órdenes de Compra de Clientes».",
+                parent=getattr(self, "main_root", None))
+
+        try:
+            from visor_documentos import ver_documento_ventana
+            return ver_documento_ventana(ruta_oc, "Orden de Compra N° %s" % numero_oc,
+                                         getattr(self, "main_root", None))
+        except Exception as e:
+            print("Aviso - visor de la OC:", e)
+            return abrir_documento(ruta_oc)
+
     def _menu_contextual_factura(self, event):
         """Botón derecho: editar registro / ver factura / ver comprobante (y cobros)."""
         tabla = event.widget
@@ -1489,9 +2083,29 @@ class FacturasEmitidasTab:
             return
 
         es_cobranza = hasattr(self, "cargar_comprobante_cobro")
-        ruta_local, enlace, comprobantes = self._datos_factura_venta(id_fact)
-        ruta_factura = self._primera_ruta_venta([ruta_local])
-        ruta_comp = self._primera_ruta_venta(comprobantes)
+        # 🛡️ Cada dato se obtiene por separado: si algo falla, el menú igual aparece
+        ruta_local, enlace, comprobantes = "", "", []
+        try:
+            ruta_local, enlace, comprobantes = self._datos_factura_venta(id_fact)
+        except Exception as e_datos:
+            print("Aviso - datos de la factura para el menú:", e_datos)
+        ruta_factura = ""
+        try:
+            ruta_factura = self._primera_ruta_venta([ruta_local])
+        except Exception as e_rf:
+            print("Aviso - ruta de la factura:", e_rf)
+        ruta_comp = ""
+        try:
+            ruta_comp = self._primera_ruta_venta(comprobantes or [])
+        except Exception as e_rc:
+            print("Aviso - ruta del comprobante:", e_rc)
+
+        # 📄 Orden de Compra del cliente (inactiva si no tiene archivo)
+        oc_numero, oc_ruta = "", ""
+        try:
+            oc_numero, oc_ruta = self._oc_de_factura(id_fact)
+        except Exception as e_oc:
+            print("Aviso - orden de compra para el menú:", e_oc)
 
         menu = tk.Menu(getattr(self, "main_root", None), tearoff=0)
         if es_cobranza:
@@ -1500,6 +2114,7 @@ class FacturasEmitidasTab:
         else:
             menu.add_command(label="✏️ Editar registro", command=self.abrir_ventana_edicion)
         menu.add_separator()
+        # 📄 Documentos de la factura (inactivos cuando no existen)
         if ruta_factura:
             menu.add_command(label="📄 Ver factura",
                              command=lambda r=ruta_factura: abrir_documento(r))
@@ -1507,12 +2122,20 @@ class FacturasEmitidasTab:
             menu.add_command(label="📄 Ver factura (SUNAT)",
                              command=lambda e=enlace: webbrowser.open(e))
         else:
-            menu.add_command(label="📄 Ver factura (sin archivo)", state="disabled")
+            menu.add_command(label="📄 Ver factura  —  no tiene archivo", state="disabled")
         if ruta_comp:
             menu.add_command(label="🧾 Ver comprobante de pago",
                              command=lambda c=comprobantes: self._abrir_comprobantes_venta(c))
         else:
-            menu.add_command(label="🧾 Ver comprobante de pago (sin archivo)", state="disabled")
+            menu.add_command(label="🧾 Ver comprobante de pago  —  no tiene archivo", state="disabled")
+        if oc_numero and oc_ruta:
+            menu.add_command(label="📄 Ver Orden de Compra del cliente (OC %s)" % oc_numero,
+                             command=lambda i=id_fact: self._ver_orden_compra_cliente(i))
+        else:
+            menu.add_command(
+                label=("📄 Ver Orden de Compra (OC %s)  —  no tiene archivo" % oc_numero
+                       if oc_numero else "📄 Ver Orden de Compra  —  no asignada"),
+                state="disabled")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1554,6 +2177,10 @@ class FacturasEmitidasTab:
         ya_anulado = True if estado_sunat_db and "Anulada" in str(estado_sunat_db) else False
         v_edit = ctk.CTkToplevel(self.main_root)
         v_edit.title("Gestión de Documento Emitido"); v_edit.geometry("450x450"); v_edit.transient(self.main_root); v_edit.grab_set()
+        try:
+            _abrir_ventana_alta(v_edit, 580)
+        except Exception:
+            pass
         ctk.CTkLabel(v_edit, text=f"Gestión del Registro ID: {id_doc}", font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(15, 10))
         fecha_em = datetime.now().strftime("%Y-%m-%d")
         if reg[2]:
@@ -1614,7 +2241,12 @@ class FacturasEmitidasTab:
         def modificar_datos_registro():
             v_edit.destroy()
             v_mod = ctk.CTkToplevel(self.main_root)
-            v_mod.title(f"Modificar Registro ID: {id_doc}"); v_mod.geometry("400x720"); v_mod.transient(self.main_root); v_mod.grab_set()
+            v_mod.title(f"Modificar Registro ID: {id_doc}"); v_mod.geometry("460x720"); v_mod.transient(self.main_root); v_mod.grab_set()
+            # 🪟 Se abre PEGADA ARRIBA y con el alto de la pantalla para verla completa
+            try:
+                _abrir_ventana_alta(v_mod, 470)
+            except Exception:
+                pass
             ctk.CTkLabel(v_mod, text="Modificar Datos del Documento", font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(15, 10))
             f_cont = ctk.CTkScrollableFrame(v_mod, fg_color="transparent"); f_cont.pack(fill="both", expand=True, padx=20, pady=5)
             lbl_tit_det = ctk.CTkLabel(f_cont, text="Detracción (%):", font=("Arial", 11, "bold"))
@@ -1643,9 +2275,36 @@ class FacturasEmitidasTab:
                     col_cod = 'codigo_cotizacion' if 'codigo_cotizacion' in cols else ('codigo' if 'codigo' in cols else None)
                     col_cli = 'nombre_empresa' if 'nombre_empresa' in cols else ('cliente_nombre' if 'cliente_nombre' in cols else ('cliente' if 'cliente' in cols else None))
                     col_ev = 'nombre_evento' if 'nombre_evento' in cols else ('evento' if 'evento' in cols else None)
-                    if col_cod and col_cli and col_ev:
-                        c3.execute(f"SELECT {col_cod}, {col_ev} FROM cotizaciones WHERE TRIM(UPPER({col_cli})) = TRIM(UPPER(%s)) AND status = 'Aprobada' ORDER BY id DESC", (reg[3],))
-                        for r_ev in c3.fetchall(): eventos_lista.append(f"{r_ev[0]} | {r_ev[1]}")
+                    def _agregar_evento(codigo, evento):
+                        if evento is None:
+                            return
+                        item = "%s | %s" % (codigo, evento)
+                        if item not in eventos_lista:
+                            eventos_lista.append(item)
+
+                    if col_cod and col_ev:
+                        # 1º los eventos APROBADOS de ESTE cliente (nombre tolerante)
+                        cliente_actual = str(reg[3] or "").strip()
+                        if cliente_actual and col_cli:
+                            try:
+                                c3.execute(f"SELECT {col_cod}, {col_ev} FROM cotizaciones "
+                                           f"WHERE (TRIM(UPPER({col_cli})) = TRIM(UPPER(%s)) "
+                                           f"      OR UPPER({col_cli}) LIKE %s) "
+                                           f"AND status = 'Aprobada' AND {col_ev} IS NOT NULL "
+                                           f"ORDER BY id DESC",
+                                           (cliente_actual, "%" + cliente_actual.upper()[:18] + "%"))
+                                for r_ev in c3.fetchall():
+                                    _agregar_evento(r_ev[0], r_ev[1])
+                            except Exception:
+                                pass
+                        # 2º TODOS los eventos APROBADOS
+                        try:
+                            c3.execute(f"SELECT {col_cod}, {col_ev} FROM cotizaciones "
+                                       f"WHERE status = 'Aprobada' ORDER BY id DESC")
+                            for r_ev in c3.fetchall():
+                                _agregar_evento(r_ev[0], r_ev[1])
+                        except Exception:
+                            pass
                 except: pass
                 finally: liberar_conexion(conn3)
             if reg[5] and reg[5] not in eventos_lista: eventos_lista.append(reg[5])
@@ -1798,6 +2457,68 @@ class CuentasPorCobrarTab:
     _abrir_comprobantes_venta = FacturasEmitidasTab._abrir_comprobantes_venta
     _menu_contextual_factura = FacturasEmitidasTab._menu_contextual_factura
 
+    # =========================================================
+    # 🔃 ORDENAR LA TABLA POR CUALQUIER COLUMNA (clic en el título)
+    # =========================================================
+    def _etiquetas_columnas_cobros(self):
+        """{columna: texto del título} sin las flechas de orden."""
+        etiquetas = {}
+        for col in self.tabla["columns"]:
+            texto = str(self.tabla.heading(col, "text") or "")
+            etiquetas[col] = texto.replace(" ▲", "").replace(" ▼", "").replace(" ↕", "")
+        return etiquetas
+
+    def _clave_orden_cobros(self, columna, valor):
+        """Convierte el texto de la celda en algo ordenable (número, fecha o texto)."""
+        texto = str(valor or "").strip()
+        crudo = (texto.replace("S/", "").replace("s/", "").replace(",", "")
+                      .replace(" ", "").replace("%", ""))
+        if crudo in ("", "-", "—"):
+            return (2, 0, "")
+        try:
+            return (0, float(crudo), "")
+        except Exception:
+            pass
+        m = re.match(r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", texto)
+        if m:
+            dia, mes, anio = m.groups()
+            anio = int(anio) + (2000 if len(anio) == 2 else 0)
+            return (1, (anio, int(mes), int(dia)), "")
+        return (3, 0, texto.lower())
+
+    def _ordenar_cobros_por(self, columna):
+        """Ordena por la columna pulsada; al repetir, invierte el sentido."""
+        estado = getattr(self, "_orden_cobros", {"columna": None, "asc": True})
+        if estado.get("columna") == columna:
+            ascendente = not estado.get("asc", True)
+        else:
+            ascendente = True
+        self._orden_cobros = {"columna": columna, "asc": ascendente}
+        try:
+            filas = [(self._clave_orden_cobros(columna, self.tabla.set(iid, columna)), iid)
+                     for iid in self.tabla.get_children("")]
+            filas.sort(key=lambda par: par[0], reverse=not ascendente)
+            for posicion, (_clave, iid) in enumerate(filas):
+                self.tabla.move(iid, "", posicion)
+                # se renumera la columna "N°" para que quede 1, 2, 3…
+                try:
+                    self.tabla.set(iid, "num", posicion + 1)
+                except Exception:
+                    pass
+        except Exception as e_orden:
+            print("Aviso - ordenando los cobros:", e_orden)
+        # 🔼🔽 flecha en el título de la columna activa
+        try:
+            for col, texto in self._etiquetas_columnas_cobros().items():
+                if col == columna:
+                    texto += "  ▲" if ascendente else "  ▼"
+                else:
+                    texto += "  ↕"
+                self.tabla.heading(col, text=texto,
+                                   command=lambda c=col: self._ordenar_cobros_por(c))
+        except Exception as e_tit:
+            print("Aviso - títulos de los cobros:", e_tit)
+
     def __init__(self, tab_frame, main_root, app_padre):
         self.tab_frame, self.main_root, self.app_padre = tab_frame, main_root, app_padre
         self.orden_columnas, self._id_debounce_busqueda = {}, None
@@ -1870,13 +2591,20 @@ class CuentasPorCobrarTab:
         self.tabla.column("evento", width=120, anchor="w"); self.tabla.column("neto_facturado", width=95, anchor="e")
         self.tabla.column("cobrado", width=90, anchor="e"); self.tabla.column("saldo", width=90, anchor="e"); self.tabla.column("archivos", width=100, anchor="center")
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "cliente", "concepto", "evento", "neto_facturado", "cobrado", "saldo", "archivos"))
+        # 🔃 Clic en cualquier título para ordenar
+        for _col in self.tabla["columns"]:
+            self.tabla.heading(_col, command=lambda c=_col: self._ordenar_cobros_por(c))
+            try:
+                self.tabla.heading(_col, text=str(self.tabla.heading(_col, "text")) + "  ↕")
+            except Exception:
+                pass
         self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos)
         self.tabla.bind("<Button-3>", self._menu_contextual_factura)
         self.tabla.bind("<Button-2>", self._menu_contextual_factura)
 
         # 🎨 Colores de las filas según el vencimiento del crédito (ver leyenda abajo)
         self.tabla.tag_configure("pagado", background="#d5f5e3")     # 🟢 ya cobrada
-        self.tabla.tag_configure("pagada", background="#d6eaf8", foreground="#1a5276")
+        self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
         self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
         self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
         self.tabla.tag_configure("urgente", background="#f8d7da")    # 🔴 vence en 5 días o menos
@@ -2405,6 +3133,14 @@ class CuentasPorCobrarTab:
                 aplicar_ocr(r)
 
         def escanear_comp():
+            # 🖨️ El módulo del escáner se importa AQUÍ: no está importado a nivel de
+            #    módulo en este archivo y por eso el botón "no hacía nada".
+            try:
+                import escaner
+            except Exception as e_imp:
+                return messagebox.showerror("Escáner",
+                                            "No se pudo cargar el módulo de escaneo:\n%s" % e_imp,
+                                            parent=v)
             try:
                 _cfg = cargar_configuracion_regional()
             except Exception:
@@ -3377,6 +4113,11 @@ class CuentasPorCobrarTab:
 # =========================================================
 # 🚀 PESTAÑA 3: NOTAS DE CRÉDITO (ANULACIONES)
 # =========================================================
+# 🧾 El menú de la pestaña de Cobros usa también las funciones de la Orden de Compra
+CuentasPorCobrarTab._oc_de_factura = FacturasEmitidasTab._oc_de_factura
+CuentasPorCobrarTab._ver_orden_compra_cliente = FacturasEmitidasTab._ver_orden_compra_cliente
+
+
 class NotasCreditoTab:
     def __init__(self, tab_frame, main_root, app_padre):
         self.tab_frame = tab_frame

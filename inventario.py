@@ -47,7 +47,21 @@ _SCHEMA_INV_OK = False
 # =========================================================
 # 🚀 MOTOR DE CONFIGURACIÓN REGIONAL Y MULTIPLATAFORMA
 # =========================================================
-def abrir_documento(ruta):
+def abrir_documento(ruta, titulo="Documento"):
+    """🖼️ Muestra el documento en el VISOR INTERNO del programa.
+
+    Antes se abría con el programa externo (Acrobat, Fotos…) y la ventana
+    quedaba muchas veces detrás del sistema. Ahora se ve dentro del programa.
+    """
+    try:
+        from visor_documentos import ver_documento_ventana
+        return ver_documento_ventana(ruta, titulo)
+    except Exception as e_visor:
+        print("Aviso - visor interno:", e_visor)
+    return abrir_documento_externo(ruta)
+
+
+def abrir_documento_externo(ruta):
     try:
         if sys.platform == "win32":
             os.startfile(ruta)

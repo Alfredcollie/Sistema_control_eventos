@@ -107,9 +107,109 @@ class ToolTip:
                 pass
 
 
+
+
+# =========================================================
+# VENTANA DEL MÓDULO AL FRENTE + AVISOS SOBRE EL MÓDULO
+# =========================================================
+_VENTANA_MODULO = [None]
+
+
+def _traer_ventana_al_frente():
+    """Devuelve la ventana del módulo al frente (Windows suele mandarla atrás)."""
+    ventana = _VENTANA_MODULO[0]
+    if ventana is None:
+        return
+    # 🚫 Si hay una ventana modal abierta (Registrar Pago, edición…) NO se trae el
+    #    módulo al frente: la ventana de trabajo debe quedar SIEMPRE por delante.
+    try:
+        _que_tiene_grab = ventana.grab_current()
+        if _que_tiene_grab is not None and _que_tiene_grab is not ventana:
+            return
+    except Exception:
+        pass
+    try:
+        ventana.deiconify()
+        ventana.lift()
+        ventana.attributes("-topmost", True)
+        ventana.after(400, lambda: ventana.attributes("-topmost", False))
+        ventana.focus_force()
+    except Exception:
+        pass
+
+
+class _MessageBoxDelModulo:
+    """Envuelve messagebox: cada aviso sale SOBRE la ventana del módulo."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def _parent(self):
+        ventana = _VENTANA_MODULO[0]
+        try:
+            if ventana is not None and ventana.winfo_exists():
+                return ventana
+        except Exception:
+            pass
+        return None
+
+    def _ejecutar(self, nombre, *args, **kwargs):
+        # 🪟 El aviso sale sobre la ventana que lo pide (una ventana de pago, de
+        #    edición, etc.) y, al cerrarlo, se devuelve el frente a ESA ventana.
+        #    Antes se traía al frente el módulo y la ventana de trabajo quedaba
+        #    detrás (por eso "desaparecía" la ventana de cancelación).
+        padre = kwargs.get("parent") or self._parent()
+        kwargs["parent"] = padre
+        try:
+            return getattr(self._real, nombre)(*args, **kwargs)
+        finally:
+            try:
+                if padre is not None and padre.winfo_exists():
+                    padre.deiconify()
+                    padre.lift()
+                    padre.focus_force()
+                    try:
+                        padre.grab_set()
+                    except Exception:
+                        pass
+                else:
+                    _traer_ventana_al_frente()
+            except Exception:
+                _traer_ventana_al_frente()
+
+    def showinfo(self, *a, **k):
+        return self._ejecutar("showinfo", *a, **k)
+
+    def showwarning(self, *a, **k):
+        return self._ejecutar("showwarning", *a, **k)
+
+    def showerror(self, *a, **k):
+        return self._ejecutar("showerror", *a, **k)
+
+    def askyesno(self, *a, **k):
+        return self._ejecutar("askyesno", *a, **k)
+
+    def askokcancel(self, *a, **k):
+        return self._ejecutar("askokcancel", *a, **k)
+
+    def askquestion(self, *a, **k):
+        return self._ejecutar("askquestion", *a, **k)
+
+    def __getattr__(self, nombre):
+        return getattr(self._real, nombre)
+
+
+messagebox = _MessageBoxDelModulo(messagebox)
+
+
 class SistemaClientes:
     def __init__(self, root):
         self.root = root
+        # 🪟 Se registra la ventana para traerla al frente tras cada aviso
+        try:
+            _VENTANA_MODULO[0] = root.winfo_toplevel()
+        except Exception:
+            _VENTANA_MODULO[0] = None
         self.usuario_activo = "Desconocido"
         self.root.title("Gestión de Clientes - Control General (Turbo Edition)")
         self._esta_destruido = False
@@ -467,6 +567,9 @@ class SistemaClientes:
             self.frame_flash_buscar.lift()
             self.root.update_idletasks()
             self.root.after(1500, self.frame_flash_buscar.place_forget)
+
+            # ✅ Al eliminar, la ventana se queda AL FRENTE
+            _traer_ventana_al_frente()
             
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo eliminar: {str(e)}")
@@ -753,6 +856,9 @@ class SistemaClientes:
             self.frame_flash.lift()
             self.root.update_idletasks()
             self.root.after(1500, self.frame_flash.place_forget)
+
+            # ✅ Al guardar, la ventana se queda AL FRENTE
+            _traer_ventana_al_frente()
             
         except psycopg2.IntegrityError:
             conn.rollback()

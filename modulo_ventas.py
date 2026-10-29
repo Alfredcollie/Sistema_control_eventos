@@ -1423,9 +1423,10 @@ class FacturasEmitidasTab:
         f_tabla = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent"); f_tabla.pack(fill="both", expand=True)
         columnas = ("num", "id", "fecha", "nro_doc", "dias", "tipo", "cliente", "concepto", "evento", "subtotal", "impuesto", "total", "detraccion", "neto", "estado_sunat", "archivo")
         self.tabla = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
+        # 🎨 Estado de cobro: 🔴 sin cobrar · 🔵 cobrada en parte · 🟢 cobrada totalmente
         self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
-        self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
-        self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
+        self.tabla.tag_configure("no_pagada", background="#f9d6d5", foreground="#922b21")
+        self.tabla.tag_configure("parcial", background="#d6eaf8", foreground="#1f538d")
         self.tabla.heading("num", text="N°", anchor="center"); self.tabla.heading("id", text="ID (Oculto)"); self.tabla.heading("fecha", text="Fecha ↕", command=lambda: self.ordenar_por_columna("fecha", False))
         self.tabla.heading("nro_doc", text="N° Doc. ↕", command=lambda: self.ordenar_por_columna("nro_doc", False)); self.tabla.heading("cliente", text="Cliente ↕", command=lambda: self.ordenar_por_columna("cliente", False))
         self.tabla.heading("concepto", text="Concepto ↕", command=lambda: self.ordenar_por_columna("concepto", False)); self.tabla.heading("evento", text="Evento ↕", command=lambda: self.ordenar_por_columna("evento", False))
@@ -1444,6 +1445,23 @@ class FacturasEmitidasTab:
         scroll_y.pack(side="right", fill="y")
         self.tabla.pack(side="left", fill="both", expand=True)
         
+        # 🏷️ LEYENDA del estado de cobro (debajo de la tabla)
+        f_leyenda_fac = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="#f8f9fa", corner_radius=6,
+                                     border_width=1, border_color="#d0d0d0")
+        f_leyenda_fac.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(f_leyenda_fac, text="Leyenda:", font=("Arial", 11, "bold")).pack(
+            side="left", padx=(10, 8), pady=5)
+        for _fondo, _texto_col, _titulo in (
+            ("#f9d6d5", "#922b21", "🔴 Factura SIN cobrar"),
+            ("#d6eaf8", "#1f538d", "🔵 Cobrada EN PARTE (saldo pendiente)"),
+            ("#d5f5e3", "#1e8449", "🟢 Cobrada TOTALMENTE"),
+        ):
+            _chip = ctk.CTkFrame(f_leyenda_fac, fg_color=_fondo, corner_radius=4,
+                                 border_width=1, border_color="#d0d0d0")
+            _chip.pack(side="left", padx=4, pady=5)
+            ctk.CTkLabel(_chip, text=_titulo, font=("Arial", 10, "bold"),
+                         text_color=_texto_col).pack(padx=8, pady=2)
+
         f_btn_tabla = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent"); f_btn_tabla.pack(fill="x", pady=(10, 0))
 
         btn_cols = ctk.CTkButton(f_btn_tabla, text="⚙️ Columnas", width=90, font=("Arial", 12, "bold"), fg_color="#6c757d", hover_color="#565e64", command=lambda: menu_columnas(self.tabla, "ventas_facturas"))
@@ -2604,9 +2622,10 @@ class CuentasPorCobrarTab:
 
         # 🎨 Colores de las filas según el vencimiento del crédito (ver leyenda abajo)
         self.tabla.tag_configure("pagado", background="#d5f5e3")     # 🟢 ya cobrada
+        # 🎨 Estado de cobro: 🔴 sin cobrar · 🔵 cobrada en parte · 🟢 cobrada totalmente
         self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
-        self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
-        self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
+        self.tabla.tag_configure("no_pagada", background="#f9d6d5", foreground="#922b21")
+        self.tabla.tag_configure("parcial", background="#d6eaf8", foreground="#1f538d")
         self.tabla.tag_configure("urgente", background="#f8d7da")    # 🔴 vence en 5 días o menos
         self.tabla.tag_configure("proximo", background="#d6eaf8")    # 🔵 vence en 6 a 15 días
 
@@ -2622,10 +2641,9 @@ class CuentasPorCobrarTab:
         f_leyenda.pack(fill="x", padx=15, pady=(8, 0))
         ctk.CTkLabel(f_leyenda, text="Leyenda:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 8), pady=5)
         for color_fondo, color_texto, texto_leyenda in (
-            ("#f8d7da", "#c0392b", "🔴 Vence en 5 días o menos (o ya vencida)"),
-            ("#d6eaf8", "#1f538d", "🔵 Vence entre 6 y 15 días"),
-            ("#d5f5e3", "#1e8449", "🟢 Factura cobrada"),
-            ("#ffffff", "#7f8c8d", "⚪ Más de 15 días de plazo"),
+            ("#f9d6d5", "#922b21", "🔴 Factura SIN cobrar"),
+            ("#d6eaf8", "#1f538d", "🔵 Cobrada EN PARTE (saldo pendiente)"),
+            ("#d5f5e3", "#1e8449", "🟢 Cobrada TOTALMENTE"),
         ):
             chip = ctk.CTkFrame(f_leyenda, fg_color=color_fondo, corner_radius=4, border_width=1, border_color="#d0d0d0")
             chip.pack(side="left", padx=4, pady=5)

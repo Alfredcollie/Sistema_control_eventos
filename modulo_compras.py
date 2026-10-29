@@ -4255,9 +4255,10 @@ class FacturasRecibidasTab:
 
         columnas = ("num", "id", "fecha", "nro_doc", "dias", "tipo", "proveedor", "categoria", "evento", "desc", "subtotal", "impuesto", "total", "detraccion", "neto", "archivo")
         self.tabla = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
+        # 🎨 Estado de pago: 🔴 sin pagar · 🔵 pagada en parte · 🟢 pagada totalmente
         self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
-        self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
-        self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
+        self.tabla.tag_configure("no_pagada", background="#f9d6d5", foreground="#922b21")
+        self.tabla.tag_configure("parcial", background="#d6eaf8", foreground="#1f538d")
         
         self.tabla.heading("num", text="N°", anchor="center")
         self.tabla.heading("id", text="ID (Oculto)")
@@ -4297,6 +4298,23 @@ class FacturasRecibidasTab:
                 self.tabla.column(_c, stretch=False)
             except Exception:
                 pass
+
+        # 🏷️ LEYENDA del estado de pago (debajo de la tabla)
+        f_leyenda_fac = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="#f8f9fa", corner_radius=6,
+                                     border_width=1, border_color="#e0e0e0")
+        f_leyenda_fac.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(f_leyenda_fac, text="Leyenda:", font=("Arial", 11, "bold")).pack(
+            side="left", padx=(10, 8), pady=5)
+        for _fondo, _texto_col, _titulo in (
+            ("#f9d6d5", "#922b21", "🔴 Factura SIN pagar"),
+            ("#d6eaf8", "#1f538d", "🔵 Pagada EN PARTE (saldo pendiente)"),
+            ("#d5f5e3", "#1e8449", "🟢 Pagada TOTALMENTE"),
+        ):
+            _chip = ctk.CTkFrame(f_leyenda_fac, fg_color=_fondo, corner_radius=4,
+                                 border_width=1, border_color="#d0d0d0")
+            _chip.pack(side="left", padx=4, pady=5)
+            ctk.CTkLabel(_chip, text=_titulo, font=("Arial", 10, "bold"),
+                         text_color=_texto_col).pack(padx=8, pady=2)
 
         f_btn_tabla = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent")
         f_btn_tabla.pack(fill="x", pady=(10, 0))
@@ -6478,9 +6496,10 @@ class CuentasPorPagarTab:
 
         # 🎨 Colores de las filas según el vencimiento del crédito (ver leyenda abajo)
         self.tabla.tag_configure("pagado", background="#d5f5e3")     # 🟢 ya pagada
+        # 🎨 Estado de pago: 🔴 sin pagar · 🔵 pagada en parte · 🟢 pagada totalmente
         self.tabla.tag_configure("pagada", background="#d5f5e3", foreground="#145a32")
-        self.tabla.tag_configure("no_pagada", background="#fadbd8", foreground="#922b21")
-        self.tabla.tag_configure("parcial", background="#e8daef", foreground="#6c3483")
+        self.tabla.tag_configure("no_pagada", background="#f9d6d5", foreground="#922b21")
+        self.tabla.tag_configure("parcial", background="#d6eaf8", foreground="#1f538d")
         self.tabla.tag_configure("urgente", background="#f8d7da")    # 🔴 vence en 5 días o menos
         self.tabla.tag_configure("proximo", background="#d6eaf8")    # 🔵 vence en 6 a 15 días
 
@@ -6504,10 +6523,9 @@ class CuentasPorPagarTab:
         ctk.CTkLabel(f_leyenda, text="💡 Un clic: seleccionar   ·   Doble clic: ver el comprobante de pago   ·   Clic DERECHO: editar / datos bancarios / ver comprobanteatos bancarios",
                      font=("Arial", 10, "italic"), text_color="#1f538d").pack(side="right", padx=(0, 12), pady=5)
         for color_fondo, color_texto, texto_leyenda in (
-            ("#f8d7da", "#c0392b", "🔴 Vence en 5 días o menos (o ya vencida)"),
-            ("#d6eaf8", "#1f538d", "🔵 Vence entre 6 y 15 días"),
-            ("#d5f5e3", "#1e8449", "🟢 Factura pagada"),
-            ("#ffffff", "#7f8c8d", "⚪ Más de 15 días de plazo"),
+            ("#f9d6d5", "#922b21", "🔴 Factura SIN pagar"),
+            ("#d6eaf8", "#1f538d", "🔵 Pagada EN PARTE (saldo pendiente)"),
+            ("#d5f5e3", "#1e8449", "🟢 Pagada TOTALMENTE"),
         ):
             chip = ctk.CTkFrame(f_leyenda, fg_color=color_fondo, corner_radius=4,
                                 border_width=1, border_color="#d0d0d0")

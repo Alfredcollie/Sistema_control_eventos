@@ -534,6 +534,16 @@ class CalculoCobranzaApp:
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS precios_viaje_zona (
+                    id SERIAL PRIMARY KEY,
+                    id_cliente INTEGER NOT NULL,
+                    nombre VARCHAR(80) NOT NULL,
+                    precio_normal NUMERIC(12,2) DEFAULT 0,
+                    precio_domingo NUMERIC(12,2) DEFAULT 0,
+                    precio_feriado NUMERIC(12,2) DEFAULT 0
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS cobranza_quincena_viajes (
                     id SERIAL PRIMARY KEY,
                     id_cobranza INTEGER NOT NULL,
@@ -629,7 +639,11 @@ class CalculoCobranzaApp:
         self.btn_precios_dist = ctk.CTkButton(f_cli, text="📏 Precios por Distancia", width=190,
                                               font=(familia_fuente, 11, "bold"), fg_color="#8e44ad",
                                               hover_color="#6c3483", command=self.abrir_ventana_precios_distancia)
-        self.btn_precios_dist.grid(row=0, column=4, sticky="e", padx=(5, 15), pady=8)
+        self.btn_precios_dist.grid(row=0, column=4, sticky="e", padx=(5, 5), pady=8)
+        self.btn_zonas = ctk.CTkButton(f_cli, text="🏷️ Zonas (precios)", width=170,
+                                       font=(familia_fuente, 11, "bold"), fg_color="#16a085",
+                                       hover_color="#11806a", command=self.abrir_ventana_zonas)
+        self.btn_zonas.grid(row=0, column=5, sticky="e", padx=(5, 15), pady=8)
 
         ctk.CTkLabel(f_cli, text="🧾 Plan de Cobro:", font=(familia_fuente, 12, "bold")).grid(
             row=1, column=0, sticky="w", padx=(15, 5), pady=8)
@@ -1112,6 +1126,13 @@ class CalculoCobranzaApp:
             return
         VentanaPreciosDistancia(self.parent, self, self.cliente_id, self.cliente_nombre)
 
+    def abrir_ventana_zonas(self):
+        """🏷️ Zonas del cliente con su precio normal, domingo y feriado."""
+        if not self.cliente_id:
+            messagebox.showwarning("Sin cliente", "Seleccione un cliente primero.")
+            return
+        VentanaZonasPrecio(self.parent, self, self.cliente_id, self.cliente_nombre)
+
     def cargar_rangos_viaje(self):
         """Carga la tabla de precios por distancia del cliente."""
         self.rangos_viaje = []
@@ -1139,6 +1160,28 @@ class CalculoCobranzaApp:
                     "viajes": {"normal": 0, "domingo": 0, "feriado": 0},
                     "ded": {"normal": 0, "domingo": 0, "feriado": 0},
                 })
+            # 🏷️ ZONAS con precio: si el cliente las tiene, se cobra por zona (no por km)
+            zonas = []
+            try:
+                cursor.execute("""
+                    SELECT id, nombre, precio_normal, precio_domingo, precio_feriado
+                    FROM precios_viaje_zona WHERE id_cliente = %s ORDER BY nombre ASC
+                """, (self.cliente_id,))
+                zonas = cursor.fetchall()
+            except Exception as e_zona:
+                print("[Zonas Error]", e_zona)
+            if zonas:
+                self.rangos_viaje = []
+                for z in zonas:
+                    self.rangos_viaje.append({
+                        "id": z[0], "nombre": str(z[1] or ""), "es_zona": True,
+                        "distancia_desde": 0.0, "distancia_hasta": 0.0,
+                        "precio_normal": float(z[2] or 0), "precio_domingo": float(z[3] or 0),
+                        "precio_feriado": float(z[4] or 0),
+                        "viajes": {"normal": 0, "domingo": 0, "feriado": 0},
+                        "ded": {"normal": 0, "domingo": 0, "feriado": 0},
+                    })
+                print("[Zonas] cliente %s: %d zona(s)" % (self.cliente_id, len(zonas)))
             cursor.close()
         except Exception as e:
             print("[Rangos Viaje Error]", e)
@@ -1154,7 +1197,8 @@ class CalculoCobranzaApp:
         self.ent_viajes = []
         try:
             if hasattr(self, "combo_tipo_viaje"):
-                valores = [f"{rg['distancia_desde']:g} - {rg['distancia_hasta']:g} km" for rg in self.rangos_viaje]
+                valores = [(rg.get("nombre") or f"{rg['distancia_desde']:g} - {rg['distancia_hasta']:g} km")
+                           for rg in self.rangos_viaje]
                 self.combo_tipo_viaje.configure(values=valores or ["— Seleccione distancia —"])
                 self.combo_tipo_viaje.set("— Seleccione distancia —")
         except Exception:
@@ -1175,7 +1219,7 @@ class CalculoCobranzaApp:
         for i, rg in enumerate(self.rangos_viaje):
             row = i + 1
             ctk.CTkLabel(self.frame_viajes_grid,
-                         text=f"{rg['distancia_desde']:g} - {rg['distancia_hasta']:g} km",
+                         text=(rg.get("nombre") or f"{rg['distancia_desde']:g} - {rg['distancia_hasta']:g} km"),
                          font=(familia_fuente, 10, "bold")).grid(row=row, column=0, sticky="w", padx=3, pady=3)
             ctk.CTkLabel(self.frame_viajes_grid, text=formatear_moneda(rg['precio_normal']),
                          font=(familia_fuente, 10)).grid(row=row, column=1, padx=3)
@@ -3622,3 +3666,201 @@ if __name__ == "__main__":
     root.geometry("1000x760")
     app = CalculoCobranzaApp(root)
     root.mainloop()
+
+
+# =========================================================
+# 🏷️ VENTANA: ZONAS DEL CLIENTE CON SUS PRECIOS
+# =========================================================
+class VentanaZonasPrecio(ctk.CTkToplevel):
+    """Precios por ZONA: cada zona con precio normal, domingo y feriado."""
+
+    def __init__(self, parent, app, id_cliente, nombre_cliente):
+        super().__init__(parent)
+        self.app = app
+        self.id_cliente = id_cliente
+        self.nombre_cliente = nombre_cliente
+        familia_fuente = "Helvetica" if sys.platform == "darwin" else "Arial"
+        self.title("Zonas y precios — %s" % nombre_cliente)
+        self.geometry("780x520")
+        self.transient(parent)
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        ctk.CTkLabel(self, text="🏷️ ZONAS DEL CLIENTE  (precio normal / domingo / feriado)",
+                     font=(familia_fuente, 14, "bold"), text_color="#0e6655").pack(
+            anchor="w", padx=15, pady=(12, 2))
+        ctk.CTkLabel(self, text="Cada viaje se cobra según la ZONA de destino.",
+                     font=(familia_fuente, 10), text_color="gray").pack(anchor="w", padx=15)
+        f_tabla = ctk.CTkFrame(self, fg_color="transparent")
+        f_tabla.pack(fill="both", expand=True, padx=15, pady=8)
+        self.tabla = ttk.Treeview(f_tabla, columns=("nombre", "normal", "domingo", "feriado"),
+                                  show="headings", selectmode="browse", height=8)
+        for col, titulo, ancho in (("nombre", "Zona", 300), ("normal", "P. Normal", 130),
+                                   ("domingo", "P. Domingo", 130), ("feriado", "P. Feriado", 130)):
+            self.tabla.heading(col, text=titulo, anchor="center")
+            self.tabla.column(col, width=ancho, anchor="w" if col == "nombre" else "center")
+        self.tabla.pack(side="left", fill="both", expand=True)
+        barra = ttk.Scrollbar(f_tabla, orient="vertical", command=self.tabla.yview)
+        self.tabla.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y")
+        f_edit = ctk.CTkFrame(self, corner_radius=8)
+        f_edit.pack(fill="x", padx=15, pady=(0, 6))
+        ctk.CTkLabel(f_edit, text="Zona:", font=(familia_fuente, 11, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(10, 4), pady=8)
+        self.ent_nombre = ctk.CTkEntry(f_edit, width=210,
+                                       placeholder_text="Ej.: Centro / Sur / Aeropuerto")
+        self.ent_nombre.grid(row=0, column=1, sticky="w", padx=4, pady=8)
+        ctk.CTkLabel(f_edit, text="Normal:", font=(familia_fuente, 11, "bold")).grid(
+            row=0, column=2, sticky="w", padx=(12, 4))
+        self.ent_normal = ctk.CTkEntry(f_edit, width=85, justify="center", placeholder_text="0.00")
+        self.ent_normal.grid(row=0, column=3, sticky="w", padx=4)
+        ctk.CTkLabel(f_edit, text="Domingo:", font=(familia_fuente, 11, "bold")).grid(
+            row=0, column=4, sticky="w", padx=(12, 4))
+        self.ent_domingo = ctk.CTkEntry(f_edit, width=85, justify="center", placeholder_text="0.00")
+        self.ent_domingo.grid(row=0, column=5, sticky="w", padx=4)
+        ctk.CTkLabel(f_edit, text="Feriado:", font=(familia_fuente, 11, "bold")).grid(
+            row=0, column=6, sticky="w", padx=(12, 4))
+        self.ent_feriado = ctk.CTkEntry(f_edit, width=85, justify="center", placeholder_text="0.00")
+        self.ent_feriado.grid(row=0, column=7, sticky="w", padx=(4, 10))
+        f_btn = ctk.CTkFrame(self, fg_color="transparent")
+        f_btn.pack(fill="x", padx=15, pady=(0, 12))
+        ctk.CTkButton(f_btn, text="➕ Agregar zona", width=150, font=(familia_fuente, 11, "bold"),
+                      fg_color="#27ae60", hover_color="#1e8449",
+                      command=self.agregar).pack(side="left", padx=3)
+        ctk.CTkButton(f_btn, text="✏️ Modificar", width=130, font=(familia_fuente, 11, "bold"),
+                      fg_color="#2980b9", hover_color="#1f618d",
+                      command=self.modificar).pack(side="left", padx=3)
+        ctk.CTkButton(f_btn, text="🗑️ Eliminar", width=120, font=(familia_fuente, 11, "bold"),
+                      fg_color="#c0392b", hover_color="#922b21",
+                      command=self.eliminar).pack(side="left", padx=3)
+        ctk.CTkButton(f_btn, text="✅ Guardar y cerrar", width=190,
+                      font=(familia_fuente, 11, "bold"), fg_color="#1f538d",
+                      hover_color="#154360",
+                      command=self.guardar_cerrar).pack(side="right", padx=3)
+        self.tabla.bind("<<TreeviewSelect>>", self._al_seleccionar)
+        self.cargar()
+
+    def cargar(self):
+        for fila in self.tabla.get_children():
+            self.tabla.delete(fila)
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, nombre, precio_normal, precio_domingo, precio_feriado
+                FROM precios_viaje_zona WHERE id_cliente = %s ORDER BY nombre ASC
+            """, (self.id_cliente,))
+            for z in cursor.fetchall():
+                self.tabla.insert("", tk.END, iid=str(z[0]),
+                                  values=(z[1], "%.2f" % float(z[2] or 0),
+                                          "%.2f" % float(z[3] or 0),
+                                          "%.2f" % float(z[4] or 0)))
+            cursor.close()
+        except Exception as e:
+            messagebox.showerror("Zonas", "No se pudieron cargar las zonas:" + chr(10) + str(e),
+                                 parent=self)
+        finally:
+            liberar_conexion(conn)
+
+    def _al_seleccionar(self, _evento=None):
+        sel = self.tabla.selection()
+        if not sel:
+            return
+        valores = self.tabla.item(sel[0], "values")
+        self.ent_nombre.delete(0, "end")
+        self.ent_nombre.insert(0, valores[0])
+        for entrada, valor in ((self.ent_normal, valores[1]),
+                               (self.ent_domingo, valores[2]),
+                               (self.ent_feriado, valores[3])):
+            entrada.delete(0, "end")
+            entrada.insert(0, valor)
+
+    @staticmethod
+    def _numero(entrada):
+        try:
+            return float(str(entrada.get()).replace(",", ".").strip() or 0)
+        except Exception:
+            return 0.0
+
+    def _datos(self):
+        nombre = self.ent_nombre.get().strip()
+        if not nombre:
+            messagebox.showwarning("Zona", "Escriba el nombre de la zona.", parent=self)
+            return None
+        return (nombre, self._numero(self.ent_normal), self._numero(self.ent_domingo),
+                self._numero(self.ent_feriado))
+
+    def _guardar_fila(self, datos, id_zona=None):
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return False
+        try:
+            cursor = conn.cursor()
+            if id_zona:
+                cursor.execute("""
+                    UPDATE precios_viaje_zona
+                    SET nombre=%s, precio_normal=%s, precio_domingo=%s, precio_feriado=%s
+                    WHERE id=%s
+                """, datos + (id_zona,))
+            else:
+                cursor.execute("""
+                    INSERT INTO precios_viaje_zona
+                        (id_cliente, nombre, precio_normal, precio_domingo, precio_feriado)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (self.id_cliente,) + datos)
+            conn.commit()
+            return True
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            messagebox.showerror("Zonas", "No se pudo guardar:" + chr(10) + str(e), parent=self)
+            return False
+        finally:
+            liberar_conexion(conn)
+
+    def agregar(self):
+        datos = self._datos()
+        if datos and self._guardar_fila(datos):
+            self.cargar()
+            self.ent_nombre.delete(0, "end")
+
+    def modificar(self):
+        sel = self.tabla.selection()
+        if not sel:
+            return messagebox.showwarning("Zonas", "Elija la zona a modificar.", parent=self)
+        datos = self._datos()
+        if datos and self._guardar_fila(datos, int(sel[0])):
+            self.cargar()
+
+    def eliminar(self):
+        sel = self.tabla.selection()
+        if not sel:
+            return messagebox.showwarning("Zonas", "Elija la zona a eliminar.", parent=self)
+        nombre = self.tabla.item(sel[0], "values")[0]
+        if not messagebox.askyesno("Eliminar zona", "¿Eliminar la zona «%s»?" % nombre, parent=self):
+            return
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM precios_viaje_zona WHERE id=%s", (int(sel[0]),))
+            conn.commit()
+        except Exception as e:
+            messagebox.showerror("Zonas", "No se pudo eliminar:" + chr(10) + str(e), parent=self)
+        finally:
+            liberar_conexion(conn)
+        self.cargar()
+
+    def guardar_cerrar(self):
+        try:
+            if hasattr(self.app, "cargar_rangos_viaje"):
+                self.app.cargar_rangos_viaje()
+        except Exception:
+            pass
+        self.destroy()

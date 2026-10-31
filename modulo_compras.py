@@ -374,7 +374,10 @@ def monto_del_comprobante(texto):
 
 
 def ver_documento_en_ventana(ruta, titulo="Documento", parent=None):
-    """Visor INTERNO: muestra el PDF (pagina a pagina) o la imagen sin salir del programa."""
+    """Abre el PDF o la imagen con el programa EXTERNO del sistema.
+
+    (El visor interno se retiró: daba problemas en Windows y macOS.)
+    """
     from app_paths import resolver_ruta_archivo
     real = ""
     try:
@@ -387,100 +390,15 @@ def ver_documento_en_ventana(ruta, titulo="Documento", parent=None):
         return messagebox.showerror(
             "Documento no encontrado",
             "El archivo no esta en este equipo:" + NL + NL + str(ruta), parent=parent)
-
-    ventana = ctk.CTkToplevel(parent)
-    ventana.title(titulo + " - " + os.path.basename(real))
     try:
-        ventana.geometry("980x760")
-        ventana.transient(parent)
-    except Exception:
-        pass
-
-    barra = ctk.CTkFrame(ventana, fg_color="#1f538d", corner_radius=0)
-    barra.pack(fill="x")
-    estado = {"paginas": [], "i": 0}
-
-    def _cargar_paginas():
-        paginas = []
+        from visor_documentos import abrir_aparte
+        abrir_aparte(real)
+    except Exception as e_abrir:
+        print("Aviso - abriendo el documento:", e_abrir)
         try:
-            if str(real).lower().endswith(".pdf"):
-                import fitz
-                from PIL import Image
-                doc = fitz.open(real)
-                for i in range(doc.page_count):
-                    pix = doc[i].get_pixmap(dpi=140)
-                    paginas.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
-                doc.close()
-            else:
-                from PIL import Image
-                paginas.append(Image.open(real))
-        except Exception as e_carga:
-            print("Aviso - abriendo el documento:", e_carga)
-        return paginas
-
-    estado["paginas"] = _cargar_paginas()
-    lbl_info = ctk.CTkLabel(barra, text="", font=("Arial", 11, "bold"), text_color="white")
-    lbl_info.pack(side="left", padx=10, pady=6)
-    lienzo = ctk.CTkFrame(ventana, fg_color="#2b2b2b")
-    lienzo.pack(fill="both", expand=True)
-    lbl_imagen = tk.Label(lienzo, text="", bg="#2b2b2b", fg="white")
-    lbl_imagen.pack(fill="both", expand=True)
-    ref = {"img": None}
-
-    def pintar(_evento=None):
-        paginas = estado["paginas"]
-        if not paginas:
-            lbl_imagen.configure(text="No se pudo mostrar el documento.", fg="white")
-            lbl_info.configure(text=os.path.basename(real))
-            return
-        i = max(0, min(estado["i"], len(paginas) - 1))
-        estado["i"] = i
-        try:
-            ancho = max(400, ventana.winfo_width() - 40)
-            alto = max(300, ventana.winfo_height() - 110)
-        except Exception:
-            ancho, alto = 900, 650
-        img = paginas[i].copy()
-        factor = min(ancho / float(img.width), alto / float(img.height), 1.6)
-        if factor != 1:
-            img = img.resize((max(1, int(img.width * factor)), max(1, int(img.height * factor))))
-        from PIL import ImageTk
-        ref["img"] = ImageTk.PhotoImage(img)
-        lbl_imagen.configure(image=ref["img"], text="")
-        lbl_info.configure(text="%s   -   pagina %d de %d"
-                           % (os.path.basename(real), i + 1, len(paginas)))
-
-    def anterior():
-        if estado["i"] > 0:
-            estado["i"] -= 1
-            pintar()
-
-    def siguiente():
-        if estado["i"] < len(estado["paginas"]) - 1:
-            estado["i"] += 1
-            pintar()
-
-    def abrir_externo():
-        try:
-            abrir_documento(real)
-        except Exception as e_ab:
-            messagebox.showerror("Documento", "No se pudo abrir aparte:" + NL + str(e_ab), parent=ventana)
-
-    ctk.CTkButton(barra, text="<", width=36, fg_color="#2c3e50", command=anterior).pack(side="left", padx=2, pady=6)
-    ctk.CTkButton(barra, text=">", width=36, fg_color="#2c3e50", command=siguiente).pack(side="left", padx=2, pady=6)
-    ctk.CTkButton(barra, text="Abrir aparte", width=110, fg_color="#16a085",
-                  command=abrir_externo).pack(side="right", padx=6, pady=6)
-    ctk.CTkButton(barra, text="Cerrar", width=80, fg_color="#c0392b",
-                  command=ventana.destroy).pack(side="right", padx=6, pady=6)
-    ventana.bind("<Configure>", pintar)
-    ventana.bind("<Left>", lambda e: anterior())
-    ventana.bind("<Right>", lambda e: siguiente())
-    try:
-        ventana.after(120, pintar)
-    except Exception:
-        pintar()
-    return ventana
-
+            abrir_documento_externo(real)
+        except Exception as e2:
+            messagebox.showerror("Documento", "No se pudo abrir:" + NL + str(e2), parent=parent)
 
 _NO_ES_NOMBRE = re.compile(
     r"FACTURA|BOLETA|ELECTR[OÓ]NIC|R\.?\s?U\.?\s?C|D\.?\s?N\.?\s?I|TICKET|COMPROBANTE|COTIZACI|"

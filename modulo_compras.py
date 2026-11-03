@@ -3096,23 +3096,47 @@ class FacturasRecibidasTab:
             ventana.transient(self.main_root)
         for hijo in ventana.winfo_children():
             hijo.destroy()
-        ventana.geometry("700x640")
-        ventana.minsize(620, 520)
+        # 📐 La ventana se ajusta a la pantalla (en 768 px de alto se cortaba abajo)
+        try:
+            _sw, _sh = ventana.winfo_screenwidth(), ventana.winfo_screenheight()
+            _ancho = min(760, max(640, _sw - 80))
+            _alto = min(780, max(520, _sh - 80))
+            _x = max(0, (_sw - _ancho) // 2)
+            _y = 0 if _sh >= 800 else 2
+        except Exception:
+            _ancho, _alto, _x, _y = 740, 690, 40, 0
+        ventana.geometry("%dx%d+%d+%d" % (_ancho, _alto, _x, _y))
+        try:
+            ventana.resizable(True, True)
+        except Exception:
+            pass
 
-        ctk.CTkLabel(ventana, text="🖨️ FACTURA ESCANEADA — REVISAR ANTES DE GUARDAR",
+        # 🔻 El pie (botones) se reserva PRIMERO: así nunca queda fuera de la vista
+        f_pie = ctk.CTkFrame(ventana, fg_color="transparent")
+        f_pie.pack(side="bottom", fill="x", padx=14, pady=(2, 10))
+
+        # 📜 Todo el contenido va dentro de un marco desplazable
+        cuerpo = ctk.CTkScrollableFrame(ventana, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, padx=2, pady=0)
+        try:
+            ventana.minsize(560, 460)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(cuerpo, text="🖨️ FACTURA ESCANEADA — REVISAR ANTES DE GUARDAR",
                      font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(12, 2))
         info = (f"Páginas: {len(resultado.get('paginas') or [])}   ·   "
                 f"Escáner: {resultado.get('escaner') or 'el configurado'}")
-        ctk.CTkLabel(ventana, text=info, font=("Arial", 10), text_color="gray").pack()
+        ctk.CTkLabel(cuerpo, text=info, font=("Arial", 10), text_color="gray").pack()
         if resultado.get("aviso"):
-            ctk.CTkLabel(ventana, text="⚠️ " + str(resultado["aviso"]), font=("Arial", 10, "bold"),
+            ctk.CTkLabel(cuerpo, text="⚠️ " + str(resultado["aviso"]), font=("Arial", 10, "bold"),
                          text_color="#c0392b", wraplength=640, justify="center").pack(pady=(2, 0))
 
         # 🏢 ¿La factura está a nombre de la empresa configurada?
         colores_destino = {"ok": ("#d4edda", "#155724"), "ajeno": ("#f8d7da", "#721c24"),
                            "sin-datos": ("#fff3cd", "#856404"), "sin-configurar": ("#fff3cd", "#856404")}
         fondo_dest, color_dest = colores_destino.get(estado_destino, ("#f8f9fa", "#2c3e50"))
-        f_destino = ctk.CTkFrame(ventana, fg_color=fondo_dest, corner_radius=6)
+        f_destino = ctk.CTkFrame(cuerpo, fg_color=fondo_dest, corner_radius=6)
         f_destino.pack(fill="x", padx=14, pady=(6, 0))
         ctk.CTkLabel(f_destino, text=mensaje_destino, font=("Arial", 11, "bold"), text_color=color_dest,
                      wraplength=650, justify="left").pack(padx=10, pady=6, anchor="w")
@@ -3137,7 +3161,7 @@ class FacturasRecibidasTab:
         }
         fondo_prov, color_prov, texto_prov = textos_prov.get(estado_prov, ("#f8f9fa", "#2c3e50", ""))
         if texto_prov:
-            f_prov = ctk.CTkFrame(ventana, fg_color=fondo_prov, corner_radius=6)
+            f_prov = ctk.CTkFrame(cuerpo, fg_color=fondo_prov, corner_radius=6)
             f_prov.pack(fill="x", padx=14, pady=(6, 0))
             ctk.CTkLabel(f_prov, text=texto_prov, font=("Arial", 11, "bold"), text_color=color_prov,
                          wraplength=650, justify="left").pack(padx=10, pady=6, anchor="w")
@@ -3147,20 +3171,20 @@ class FacturasRecibidasTab:
             detalle_dup = (f"N° {duplicado.get('numero')}   ·   Proveedor: {duplicado.get('proveedor')}"
                            f"   ·   Fecha: {duplicado.get('fecha')}"
                            f"   ·   Total: {formatear_moneda(duplicado.get('total') or 0)}")
-            f_dup = ctk.CTkFrame(ventana, fg_color="#f8d7da", corner_radius=6)
+            f_dup = ctk.CTkFrame(cuerpo, fg_color="#f8d7da", corner_radius=6)
             f_dup.pack(fill="x", padx=14, pady=(6, 0))
             ctk.CTkLabel(f_dup, text="🚫 ESTE COMPROBANTE YA ESTÁ REGISTRADO — no se permite duplicarlo.\n"
                                      + detalle_dup,
                          font=("Arial", 11, "bold"), text_color="#721c24", wraplength=650,
                          justify="left").pack(padx=10, pady=6, anchor="w")
 
-        f_datos = ctk.CTkFrame(ventana, fg_color="#f8f9fa", corner_radius=8,
+        f_datos = ctk.CTkFrame(cuerpo, fg_color="#f8f9fa", corner_radius=8,
                                border_width=1, border_color="#e0e0e0")
         f_datos.pack(fill="x", padx=14, pady=8)
         ctk.CTkLabel(f_datos, text="🔎 Datos detectados por el OCR", font=("Arial", 12, "bold"),
                      text_color="#1f538d").pack(anchor="w", padx=12, pady=(8, 4))
         # Si no se pudo leer/consultar la razón social, se puede escribir aquí antes de aplicar
-        f_nombre = ctk.CTkFrame(ventana, fg_color="transparent")
+        f_nombre = ctk.CTkFrame(cuerpo, fg_color="transparent")
         f_nombre.pack(fill="x", padx=16, pady=(2, 0))
         ctk.CTkLabel(f_nombre, text="Razón social del proveedor:", font=("Arial", 11, "bold")).pack(side="left")
         ent_prov_nombre = ctk.CTkEntry(f_nombre, font=("Arial", 11))
@@ -3189,7 +3213,7 @@ class FacturasRecibidasTab:
                          text_color=("#2c3e50" if str(valor).strip() else "#c0392b")).pack(side="left")
         ctk.CTkLabel(f_datos, text="", height=4).pack()
 
-        lbl_estado = ctk.CTkLabel(ventana, text="", font=("Arial", 10, "bold"), text_color="#1e8449")
+        lbl_estado = ctk.CTkLabel(f_pie, text="", font=("Arial", 10, "bold"), text_color="#1e8449")
 
         def copiar_texto():
             try:
@@ -3265,7 +3289,7 @@ class FacturasRecibidasTab:
                     self.ent_nro_doc.focus_set()
                 except Exception:
                     pass
-            self._aviso_temporal(ventana, mensaje_final,
+            self._aviso_temporal(cuerpo, mensaje_final,
                                  titulo="Extracción Inteligente", segundos=2,
                                  al_cerrar=ventana.destroy)
 
@@ -3287,8 +3311,8 @@ class FacturasRecibidasTab:
 
         # 🔻 La barra de botones se ancla abajo: siempre visible aunque la ventana
         # sea pequeña o el texto del OCR sea muy largo.
-        f_botones = ctk.CTkFrame(ventana, fg_color="transparent")
-        f_botones.pack(side="bottom", fill="x", padx=14, pady=(2, 10))
+        f_botones = f_pie
+        # (el pie ya quedo empacado arriba)
         lbl_estado.pack(side="bottom", pady=(2, 0))
         btn_aplicar = ctk.CTkButton(f_botones, text="✅ Aplicar al formulario", height=36, font=("Arial", 12, "bold"),
                                     fg_color="#27ae60", hover_color="#1e8449", command=aplicar)

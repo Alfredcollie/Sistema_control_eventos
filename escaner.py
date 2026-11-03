@@ -18,6 +18,7 @@ import os
 import sys
 import json
 import time
+import socket
 import shutil
 import subprocess
 import tempfile
@@ -397,6 +398,142 @@ def _endurecer_error(resultado):
     return resultado
 
 
+def _cache_ruta():
+    """Archivo donde se recuerda el último escaneo que funcionó."""
+    try:
+        from app_paths import DATA_DIR
+        return os.path.join(str(DATA_DIR), "escaner_cache.json")
+    except Exception:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "escaner_cache.json")
+
+
+def _cache_leer():
+    try:
+        with open(_cache_ruta(), "r", encoding="utf-8") as archivo:
+            datos = json.load(archivo)
+        return datos if isinstance(datos, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cache_guardar(url="", modo=""):
+    """Guarda la URL del escáner y la vía que funcionó (para arrancar rápido)."""
+    try:
+        datos = _cache_leer()
+        if url:
+            datos["url"] = str(url)
+        if modo:
+            datos["modo"] = str(modo)
+        datos["actualizado"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(_cache_ruta(), "w", encoding="utf-8") as archivo:
+            json.dump(datos, archivo)
+    except Exception as e:
+        print("[Escáner] no se pudo guardar la caché:", e)
+
+
+def _hosts_multifuncional():
+    """Nombres/IPs de las multifuncionales conocidas (WIA y cola de impresión)."""
+    hosts = []
+    try:
+        for equipo in listar_escaneres():
+            nombre = str(equipo.get("nombre") or "")
+            host = nombre.split("(")[0].strip()
+            if host and " " not in host and host not in hosts:
+                hosts.append(host)
+    except Exception as e:
+        print("[Escáner] nombres WIA:", e)
+    try:
+        salida = subprocess.run(
+            [_powershell(), "-NoProfile", "-NonInteractive", "-Command",
+             "Get-Printer | Select-Object -ExpandProperty Name"],
+            capture_output=True, text=True, timeout=25)
+        for linea in (salida.stdout or "").splitlines():
+            host = linea.split("(")[0].strip()
+            if host and " " not in host and host.upper().startswith(("HP", "CANON", "EPSON")):
+                if host not in hosts:
+                    hosts.append(host)
+    except Exception as e:
+        print("[Escáner] nombres de impresoras:", e)
+    return hosts
+
+
+def _urls_escl_candidatas(solo_cache=False):
+    """URLs http://IP/eSCL a probar (primero la que ya funcionó)."""
+    urls = []
+    cache = _cache_leer()
+    guardada = str(cache.get("url") or "").strip()
+    if guardada:
+        urls.append(guardada.rstrip("/"))
+    try:
+        configurada = str(config_escaner().get("escaner_url") or "").strip()
+        if configurada:
+            if not configurada.startswith("http"):
+                configurada = "http://" + configurada
+            if not configurada.rstrip("/").endswith("eSCL"):
+                configurada = configurada.rstrip("/") + "/eSCL"
+            configurada = configurada.rstrip("/")
+            if configurada not in urls:
+                urls.append(configurada)
+    except Exception:
+        pass
+    if solo_cache:
+        return urls
+    for host in _hosts_multifuncional():
+        try:
+            ip = socket.gethostbyname(host)
+        except Exception:
+            continue
+        url = "http://%s/eSCL" % ip
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _escanear_por_red(carpeta, dpi=300, color="Escala de grises",
+                      origen="Cristal (una página a la vez)", paginas=1):
+    """Escaneo por red con eSCL/AirScan (sirve cuando el driver WIA no responde)."""
+    import urllib.request
+
+    def _urls_por_intentar():
+        """Primero la URL recordada (0 s); solo si falla se busca en la red."""
+        previas = _urls_escl_candidatas(solo_cache=True)
+        for url in previas:
+            yield url
+        for url in _urls_escl_candidatas():
+            if url not in previas:
+                yield url
+
+    for base in _urls_por_intentar():
+        try:
+            with urllib.request.urlopen(base + "/ScannerCapabilities", timeout=6) as resp:
+                resp.read(200)
+        except Exception as e:
+            print("[Escáner] eSCL no disponible en %s: %s" % (base, e))
+            continue
+        print("[Escáner] Escaneando por red (eSCL):", base)
+        try:
+            resultado = _escanear_mac(carpeta, dispositivo=base, dpi=dpi, color=color,
+                                      origen=origen, paginas=paginas, modo="")
+        except Exception as e:
+            print("[Escáner] Falló el escaneo por red:", e)
+            continue
+        if resultado.get("paginas"):
+            aviso = str(resultado.get("aviso") or "").strip()
+            resultado["aviso"] = (aviso + " Se escaneo por RED (eSCL) porque el driver WIA "
+                                          "del equipo no estaba en linea.").strip()
+            resultado["escaner"] = resultado.get("escaner") or base
+            _cache_guardar(url=base, modo="escl")     # ⚡ la próxima vez arranca directo
+            return resultado
+    return {"ok": False, "paginas": [], "escaner": "", "aviso": "",
+            "error": ("El escaner aparece instalado pero Windows no lo tiene en linea "
+                      "(WIA) y tampoco respondio por red.\n\n"
+                      "\u2022 Encienda la impresora y espere 10 segundos (a veces esta en reposo).\n"
+                      "\u2022 Cierre HP Smart / otro programa de escaneo y reintente.\n"
+                      "\u2022 Verifique que la impresora este en la MISMA red WiFi.\n"
+                      "\u2022 En Ajustes \u2192 Escaner puede escribir la URL: "
+                      "http://SU_IP/eSCL")}
+
+
 def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
              origen="Cristal (una página a la vez)", paginas=1, optimizar=True,
              modo="Automático (sin ventanas)", area=None):
@@ -453,6 +590,29 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
     destino = os.path.join(carpeta, "escaneo_" + marca)
     os.makedirs(destino, exist_ok=True)
 
+    # ⚡ Si la última vez el driver WIA no respondió y se escaneó por RED, se
+    #    empieza por la red: arranca en segundos en vez de esperar al driver.
+    _cache = _cache_leer()
+    if (str(_cache.get("modo") or "") == "escl"
+            and not str(modo).lower().startswith("con la ventana")):
+        _red = _escanear_por_red(destino, dpi=dpi, color=color, origen=origen,
+                                 paginas=paginas)
+        if _red.get("paginas"):
+            _paginas = [str(p) for p in _red.get("paginas") or [] if os.path.exists(str(p))]
+            if _paginas:
+                _convertidas = []
+                for _ruta in _paginas:
+                    _convertidas.append(_optimizar_imagen(
+                        _ruta, max_lado=2600 if optimizar else None,
+                        calidad=72 if optimizar else 92) or _ruta)
+                return _endurecer_error({
+                    "ok": True,
+                    "escaner": _red.get("escaner") or "",
+                    "paginas": _convertidas,
+                    "aviso": str(_red.get("aviso") or ""),
+                    "error": "",
+                })
+
     paginas_ok = []
     aviso = ""
     error = ""
@@ -478,12 +638,36 @@ def escanear(carpeta, dispositivo="", dpi=300, color="Escala de grises",
             error = res.get("error", "")
             escaner_usado = res.get("escaner", "")
             if paginas_ok:
+                _cache_guardar(modo="wia")
                 break
             if not _error_ocupado(error) or intento == 3:
                 break
             aviso = (aviso + " El escaner estaba ocupado; se reintento.").strip()
             time.sleep(4)
 
+        # 🔁 Si el driver WIA no responde ("El dispositivo WIA no esta en linea"),
+        #    se intenta el escaneo por RED (eSCL/AirScan), que no usa el driver.
+        if not paginas_ok:
+            _err = str(error or "").lower()
+            for _acento, _plano in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"),
+                                    ("ú", "u"), ("ü", "u"), ("ñ", "n")):
+                _err = _err.replace(_acento, _plano)
+            _sin_linea = any(pista in _err for pista in (
+                "no esta en linea", "no estan en linea", "no esta disponible",
+                "no disponible", "inexistente", "0x80210015", "no se detecto",
+                "not available", "offline"))
+            if _sin_linea:
+                print("[Escáner] WIA no responde; se intenta por red (eSCL)…")
+                res_red = _escanear_por_red(carpeta, dpi=dpi, color=color,
+                                            origen=origen, paginas=paginas)
+                if res_red.get("paginas"):
+                    paginas_ok = [str(p) for p in res_red.get("paginas") or []
+                                  if os.path.exists(str(p))]
+                    aviso = (str(aviso) + " " + str(res_red.get("aviso") or "")).strip()
+                    escaner_usado = res_red.get("escaner") or escaner_usado
+                    error = ""
+                else:
+                    error = res_red.get("error") or error
 
     convertidas = []
     for ruta in paginas_ok:
@@ -1036,29 +1220,43 @@ def _escanear_mac(carpeta, dispositivo="", dpi=300, color="Escala de grises",
     ultimo_error = ""
     variantes = _variantes_scan_settings(dpi=dpi, color=color, origen=origen)
     for indice, xml_texto in enumerate(variantes):
-        try:
-            peticion = urllib.request.Request(base + "/ScanJobs", data=xml_texto.encode("utf-8"),
-                                              headers={"Content-Type": "text/xml"})
-            with _abrir_url(base + "/ScanJobs", datos=xml_texto.encode("utf-8"),
-                            cabeceras={"Content-Type": "text/xml"}, timeout=60) as respuesta:
-                ubicacion = respuesta.headers.get("Location") or ""
-            if ubicacion:
-                break
-            ultimo_error = "El escaner acepto la orden pero no devolvio donde recoger la imagen."
-        except urllib.error.HTTPError as e:
-            detalle = ""
+        # 🔁 Si la impresora está ocupada (HTTP 503) se espera y se reintenta la
+        #    MISMA variante: es lo normal si se escanea dos veces seguidas.
+        resultado_variante = "seguir"
+        for intento_busy in range(1, 7):
             try:
-                detalle = e.read().decode("utf-8", "ignore")[:160]
-            except Exception:
-                pass
-            ultimo_error = "HTTP %s. %s" % (e.code, detalle.strip())
-            print("Aviso - escaneo eSCL variante %d: %s" % (indice + 1, ultimo_error))
-            continue
-        except Exception as e:
-            return {"ok": False, "paginas": [], "escaner": base, "aviso": aviso_capacidades,
-                    "error": ("No se pudo hablar con el escaner (%s): %s\n\n"
-                              "Revise que la impresora este en la MISMA red wifi y que el "
-                              "escaneo por red (AirScan) este activado." % (base, e))}
+                with _abrir_url(base + "/ScanJobs", datos=xml_texto.encode("utf-8"),
+                                cabeceras={"Content-Type": "text/xml"}, timeout=60) as respuesta:
+                    ubicacion = respuesta.headers.get("Location") or ""
+                if ubicacion:
+                    resultado_variante = "listo"
+                else:
+                    ultimo_error = ("El escaner acepto la orden pero no devolvio "
+                                    "donde recoger la imagen.")
+                    resultado_variante = "seguir"
+                break
+            except urllib.error.HTTPError as e:
+                detalle = ""
+                try:
+                    detalle = e.read().decode("utf-8", "ignore")[:160]
+                except Exception:
+                    pass
+                ultimo_error = "HTTP %s. %s" % (e.code, detalle.strip())
+                if e.code in (503, 409) and intento_busy < 6:
+                    print("[Escáner] La impresora esta ocupada (503); se espera y reintenta…")
+                    time.sleep(1.5)
+                    continue
+                print("Aviso - escaneo eSCL variante %d: %s" % (indice + 1, ultimo_error))
+                break
+            except Exception as e:
+                return {"ok": False, "paginas": [], "escaner": base, "aviso": aviso_capacidades,
+                        "error": ("No se pudo hablar con el escaner (%s): %s\n\n"
+                                  "Revise que la impresora este en la MISMA red wifi y que el "
+                                  "escaneo por red (AirScan) este activado." % (base, e))}
+        if resultado_variante == "listo":
+            break
+        continue
+
 
     if not ubicacion:
         return {"ok": False, "paginas": [], "escaner": base, "aviso": aviso_capacidades,

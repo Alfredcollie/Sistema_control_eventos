@@ -39,3 +39,7 @@ _test_*.py
 smoke_*.py
 *_test.py
 config_local.json
+
+# token local para lanzar la compilación (NO subir)
+github_token.txt
+.github_token

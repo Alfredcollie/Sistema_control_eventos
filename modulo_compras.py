@@ -3016,10 +3016,74 @@ class FacturasRecibidasTab:
 
         threading.Thread(target=self._worker_escanear, args=(config, v_prog), daemon=True).start()
 
-    def _worker_escanear(self, config, v_prog, paginas_previas=None):
+    def _ventana_progreso_telefono(self):
+        """Ventanita «recibiendo la foto» mientras el PC procesa."""
+        try:
+            import customtkinter as ctk
+            ventana = ctk.CTkToplevel(self.main_root)
+            ventana.title("📱 Escaneando desde el teléfono")
+            try:
+                ventana.geometry("430x150")
+                ventana.transient(self.main_root)
+                ventana.attributes("-topmost", True)
+                ventana.grab_set()
+            except Exception:
+                pass
+            ctk.CTkLabel(ventana, text="📱 Foto recibida — leyendo el documento…",
+                         font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(20, 6))
+            barra = ctk.CTkProgressBar(ventana, width=340, mode="indeterminate")
+            barra.pack(pady=6)
+            barra.start()
+            ctk.CTkLabel(ventana, text="Esto puede tardar unos segundos.",
+                         font=("Arial", 9, "italic"), text_color="gray").pack()
+            return ventana
+        except Exception:
+            return None
+
+    def escanear_desde_telefono(self):
+        """📱 Abre el servidor del teléfono (puerto 8765) y espera la foto."""
+        try:
+            import escaner_movil
+        except Exception as e:
+            padre = self._padre_mensaje() if hasattr(self, "_padre_mensaje") else None
+            return messagebox.showerror("Escáner por teléfono",
+                                        "No se pudo cargar el módulo:\n\n%s" % e, parent=padre)
+        try:
+            config = cargar_configuracion_regional()
+        except Exception:
+            config = {}
+
+        def al_recibir(rutas, tipo):
+            def lanzar():
+                v_prog = self._ventana_progreso_telefono()
+                threading.Thread(target=self._worker_escanear_telefono,
+                                 args=(config, v_prog, rutas), daemon=True).start()
+            try:
+                self.main_root.after(0, lanzar)
+            except Exception:
+                lanzar()
+
+        try:
+            return escaner_movil.escanear_desde_telefono(
+                self.main_root, config, al_recibir=al_recibir,
+                titulo_extra=self._etiqueta_telefono())
+        except Exception as e:
+            padre = self._padre_mensaje() if hasattr(self, "_padre_mensaje") else None
+            return messagebox.showerror("Escáner por teléfono",
+                                        "No se pudo abrir el servidor:\n\n%s" % e, parent=padre)
+
+    def _worker_escanear_telefono(self, config, v_prog, rutas):
+        """Procesa la foto del teléfono con el MISMO flujo del escáner."""
+        return self._worker_escanear(config, v_prog, imagenes=rutas)
+
+    def _etiqueta_telefono(self):
+        return "Compras · factura de compra"
+
+    def _worker_escanear(self, config, v_prog, paginas_previas=None, imagenes=None):
         try:
             import escaner
-            resultado = escaner.procesar_factura(config, paginas_previas=paginas_previas)
+            resultado = escaner.procesar_factura(config, paginas_previas=paginas_previas,
+                                              imagenes=imagenes)
             # 🧠 Mejor lectura: se rehace el OCR por POSICIONES (el del módulo escaner
             #    aplasta todo en una sola línea y pierde los rótulos del comprobante).
             if resultado.get("ok") and resultado.get("pdf"):
@@ -3953,6 +4017,10 @@ class FacturasRecibidasTab:
                                      font=("Arial", 12, "bold"), fg_color="#0e7490", hover_color="#155e75",
                                      command=self.escanear_factura_ocr, height=34)
         btn_escanear.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(self.f_form, text="📱 Escanear desde el teléfono",
+                      font=("Arial", 12, "bold"), fg_color="#7d3c98", hover_color="#5b2c6f",
+                      command=self.escanear_desde_telefono, height=34).pack(
+            fill="x", padx=10, pady=(0, 10))
 
         ctk.CTkLabel(self.f_form, text="Tipo de Documento:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         
@@ -7195,6 +7263,23 @@ class CuentasPorPagarTab:
             aplicar_ocr(_pdf)
             messagebox.showinfo("Comprobante", "Comprobante escaneado:\n" + os.path.basename(_pdf), parent=v)
 
+        def escanear_desde_telefono():
+            """📱 Escanear este comprobante con el teléfono."""
+            try:
+                import escaner_movil as _movil
+                _movil.escanear_reusando_flujo(
+                    parent=v,
+                    config=cargar_configuracion_regional(),
+                    funcion=escanear_comp,
+                    etiqueta="Compras · pago de varias facturas")
+            except Exception as e:
+                messagebox.showerror("Escáner por teléfono", str(e))
+
+        ctk.CTkButton(f_comp, text="📱 Teléfono", height=30,
+                      font=("Arial", 11, "bold"), fg_color="#8e44ad",
+                      hover_color="#6c3483",
+                      command=escanear_desde_telefono
+                      ).pack(side="left", padx=(6, 0))
         ctk.CTkButton(f_comp, text="🖨️ Escanear comprobante", height=30, font=("Arial", 11, "bold"),
                       fg_color="#0e7490", hover_color="#155e75",
                       command=escanear_comp).pack(side="left", fill="x", expand=True, padx=(6, 0))
@@ -8038,6 +8123,23 @@ class CuentasPorPagarTab:
         ctk.CTkButton(f_comp_btns, text="📎 Cargar archivo", font=("Arial", 11, "bold"),
                       fg_color="#16a085", hover_color="#11806a", command=cargar_soporte
                       ).pack(side="left", fill="x", expand=True)
+        def escanear_desde_telefono():
+            """📱 Escanear este comprobante con el teléfono."""
+            try:
+                import escaner_movil as _movil
+                _movil.escanear_reusando_flujo(
+                    parent=v_pago,
+                    config=cargar_configuracion_regional(),
+                    funcion=escanear_soporte,
+                    etiqueta="Compras · comprobante de pago")
+            except Exception as e:
+                messagebox.showerror("Escáner por teléfono", str(e))
+
+        ctk.CTkButton(f_comp_btns, text="📱 Teléfono", height=30,
+                      font=("Arial", 11, "bold"), fg_color="#8e44ad",
+                      hover_color="#6c3483",
+                      command=escanear_desde_telefono
+                      ).pack(side="left", padx=(6, 0))
         ctk.CTkButton(f_comp_btns, text="🖨️ Escanear comprobante", font=("Arial", 11, "bold"),
                       fg_color="#0e7490", hover_color="#155e75", command=escanear_soporte
                       ).pack(side="left", fill="x", expand=True, padx=(6, 0))
@@ -8061,14 +8163,20 @@ class CuentasPorPagarTab:
         if getattr(self, "_escanear_soporte_pendiente", False):
             self._escanear_soporte_pendiente = False
 
-            # 🖨️ Ya se preguntó al registrar la factura: se escanea DIRECTAMENTE
-            #    (antes volvía a preguntar "¿Desea escanear ahora el comprobante?").
-            def escanear_directo():
+            # ❓ Se preguntó al registrar la factura: se deja ELEGIR por dónde
+            #    adjuntar el comprobante (multifuncional / teléfono / archivo).
+            def elegir_origen():
                 try:
-                    escanear_soporte()
+                    import escaner_movil as _mov
+                    _mov.elegir_como_adjuntar(v_pago, escanear_soporte,
+                                              escanear_desde_telefono, cargar_soporte)
                 except Exception as e_pre:
-                    print("Aviso - escaneo del comprobante de pago:", e_pre)
-            v_pago.after(700, escanear_directo)
+                    print("Aviso - elección del comprobante:", e_pre)
+                    try:
+                        escanear_soporte()
+                    except Exception:
+                        pass
+            v_pago.after(700, elegir_origen)
 
     def _menu_contextual_factura(self, event):
         """Botón derecho en Control de Pagos: el MISMO menú que la pestaña de facturas."""

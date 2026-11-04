@@ -1573,11 +1573,24 @@ def procesar_paginas(paginas, config=None, aviso=""):
     return resultado
 
 
-def procesar_factura(config=None, paginas=None, paginas_previas=None):
+def procesar_factura(config=None, paginas=None, paginas_previas=None, imagenes=None):
     """Escanea, arma el PDF y hace el OCR. Devuelve un diccionario con el resultado.
 
     'paginas_previas' permite agregar páginas a un escaneo ya hecho (cristal).
+    'imagenes' permite procesar fotos que llegan del TELÉFONO (app Escáner
+    Software Collie): en ese caso NO se usa el escáner de la impresora.
     """
+    if imagenes:
+        # 📱 Escaneo desde el teléfono: sólo se procesan esas fotos
+        todas = [str(p) for p in (paginas_previas or []) if os.path.exists(str(p))]
+        todas += [str(p) for p in imagenes if os.path.exists(str(p))]
+        if not todas:
+            return {"ok": False, "paginas": [], "pdf": "", "texto": "", "ocr": {},
+                    "error": "Las fotos del teléfono no se encontraron."}
+        resultado = procesar_paginas(todas, config, aviso="Recibido desde el teléfono")
+        resultado["escaner"] = "Teléfono (Escáner Software Collie)"
+        return resultado
+
     datos = config_escaner(config)
     carpeta = carpeta_escaneos(config)
     cuantas = int(str(paginas or datos.get("escaner_paginas") or 1).strip() or 1)

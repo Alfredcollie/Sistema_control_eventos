@@ -32,6 +32,7 @@ import shutil
 import time
 import sys
 import datetime
+import io
 import re
 
 REPO = os.path.dirname(os.path.abspath(__file__))
@@ -134,6 +135,25 @@ def _token_github():
     return ""
 
 
+def _flujo_compila_con_rama(flujo):
+    """¿El flujo compila cuando se sube la RAMA (no la etiqueta)?"""
+    if not flujo:
+        return False
+    ruta = os.path.join(REPO, ".github", "workflows", flujo)
+    if not os.path.isfile(ruta):
+        return False
+    try:
+        texto = io.open(ruta, encoding="utf-8").read()
+    except Exception:
+        return False
+    # se busca el bloque 'push:' y si dentro declara 'branches:'
+    marcador = texto.find("push:")
+    if marcador == -1:
+        return False
+    trozo = texto[marcador:marcador + 400]
+    return "branches:" in trozo
+
+
 def _flujo_dispara_con_push(flujo):
     """¿El flujo se ejecuta solo con el push? (para no lanzarlo dos veces)."""
     if not flujo:
@@ -206,7 +226,7 @@ def compilar_y_publicar(rama, forzar=False):
     # 1) ¿Hace falta lanzarlo? El push ya lo dispara en los dos programas
     ya_lo_dispara = _flujo_dispara_con_push(flujo)
     if ya_lo_dispara and not forzar:
-        print("   ℹ️  El push ya dispara la compilación (flujo con 'on: push').")
+        print("   ℹ️  La compilación la dispara la etiqueta de versión.")
         print("       (use --compilar si quiere lanzar una ejecución extra)")
 
     lanzado = False
@@ -541,14 +561,22 @@ def main():
     elif version_tag:
         print(" (--no-compilar: no se publicó el release)")
 
-    # 🚀 Después de subir: compilar y publicar (Windows + macOS)
-    if "--no-compilar" not in argumentos:
+    # 🚀 Compilación: ahora la dispara la ETIQUETA de versión (una sola vez)
+    if "--no-compilar" in argumentos:
+        print(" (--no-compilar: no se compiló nada)")
+    elif release_ok:
+        print("")
+        print(" ℹ️  La etiqueta V%s ya lanzó la compilación y el release." % version_tag)
+        print("     (una sola compilación por versión)")
+    elif "--compilar" in argumentos:
         try:
-            compilar_y_publicar(rama, forzar="--compilar" in argumentos)
+            compilar_y_publicar(rama, forzar=True)
         except Exception as e_comp:
             print("   ⚠️  No se pudo lanzar la compilación: %s" % e_comp)
     else:
-        print(" (--no-compilar: no se lanzó la compilación)")
+        print("")
+        print(" ℹ️  No se compiló: las compilaciones salen con una versión nueva.")
+        print("     Para forzar una compilación de prueba use:  --compilar")
 
     if release_ok:
         usuario, repositorio = _remoto_github()

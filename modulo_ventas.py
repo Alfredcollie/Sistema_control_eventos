@@ -943,7 +943,70 @@ class FacturasEmitidasTab:
         threading.Thread(target=self._worker_escanear_venta, args=(config, v_prog), daemon=True).start()
         return v_prog
 
-    def _worker_escanear_venta(self, config, v_prog):
+    def _ventana_progreso_telefono(self):
+        """Ventanita «recibiendo la foto» mientras el PC procesa."""
+        try:
+            import customtkinter as ctk
+            ventana = ctk.CTkToplevel(self.main_root)
+            ventana.title("📱 Escaneando desde el teléfono")
+            try:
+                ventana.geometry("430x150")
+                ventana.transient(self.main_root)
+                ventana.attributes("-topmost", True)
+                ventana.grab_set()
+            except Exception:
+                pass
+            ctk.CTkLabel(ventana, text="📱 Foto recibida — leyendo el documento…",
+                         font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(20, 6))
+            barra = ctk.CTkProgressBar(ventana, width=340, mode="indeterminate")
+            barra.pack(pady=6)
+            barra.start()
+            ctk.CTkLabel(ventana, text="Esto puede tardar unos segundos.",
+                         font=("Arial", 9, "italic"), text_color="gray").pack()
+            return ventana
+        except Exception:
+            return None
+
+    def escanear_desde_telefono(self):
+        """📱 Abre el servidor del teléfono (puerto 8765) y espera la foto."""
+        try:
+            import escaner_movil
+        except Exception as e:
+            padre = self._padre_mensaje() if hasattr(self, "_padre_mensaje") else None
+            return messagebox.showerror("Escáner por teléfono",
+                                        "No se pudo cargar el módulo:\n\n%s" % e, parent=padre)
+        try:
+            config = cargar_configuracion_regional()
+        except Exception:
+            config = {}
+
+        def al_recibir(rutas, tipo):
+            def lanzar():
+                v_prog = self._ventana_progreso_telefono()
+                threading.Thread(target=self._worker_escanear_telefono,
+                                 args=(config, v_prog, rutas), daemon=True).start()
+            try:
+                self.main_root.after(0, lanzar)
+            except Exception:
+                lanzar()
+
+        try:
+            return escaner_movil.escanear_desde_telefono(
+                self.main_root, config, al_recibir=al_recibir,
+                titulo_extra=self._etiqueta_telefono())
+        except Exception as e:
+            padre = self._padre_mensaje() if hasattr(self, "_padre_mensaje") else None
+            return messagebox.showerror("Escáner por teléfono",
+                                        "No se pudo abrir el servidor:\n\n%s" % e, parent=padre)
+
+    def _worker_escanear_telefono(self, config, v_prog, rutas):
+        """Procesa la foto del teléfono con el MISMO flujo del escáner."""
+        return self._worker_escanear_venta(config, v_prog, imagenes=rutas)
+
+    def _etiqueta_telefono(self):
+        return "Ventas · factura de venta"
+
+    def _worker_escanear_venta(self, config, v_prog, imagenes=None):
         """Escanea en segundo plano, arma el PDF y lo aplica al formulario."""
         try:
             import escaner
@@ -953,7 +1016,8 @@ class FacturasEmitidasTab:
                 paginas_pedidas = int(str(datos.get("escaner_paginas") or 1))
             except Exception:
                 paginas_pedidas = 1
-            escaneo = escaner.escanear(
+            escaneo = ({"ok": True, "paginas": [str(p) for p in imagenes]}
+                       if imagenes else escaner.escanear(
                 carpeta,
                 dispositivo=datos.get("escaner_dispositivo", ""),
                 dpi=datos.get("escaner_dpi", "300"),
@@ -961,7 +1025,7 @@ class FacturasEmitidasTab:
                 origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
                 paginas=paginas_pedidas,
                 optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
-                modo=datos.get("escaner_modo", "Automático (sin ventanas)"))
+                modo=datos.get("escaner_modo", "Automático (sin ventanas)")))
             if not escaneo.get("ok"):
                 error = str(escaneo.get("error") or "No se pudo escanear.")
                 return self.main_root.after(0, lambda: (
@@ -1372,6 +1436,9 @@ class FacturasEmitidasTab:
         ctk.CTkButton(self.f_form, text="🖨️ Escanear con la Multifuncional", fg_color="#8e44ad",
                       hover_color="#703688", font=("Arial", 12, "bold"),
                       command=self.escanear_factura_multifuncional).pack(fill="x", padx=10, pady=(10, 5))
+        ctk.CTkButton(self.f_form, text="📱 Escanear desde el teléfono",
+                      font=("Arial", 12, "bold"), fg_color="#7d3c98", hover_color="#5b2c6f",
+                      command=self.escanear_desde_telefono).pack(fill="x", padx=10, pady=(0, 10))
 
         ctk.CTkButton(self.f_form, text="📂 Cargar PDF y Autocompletar (OCR)",
                       fg_color="#16a085", hover_color="#117a65", font=("Arial", 12, "bold"),

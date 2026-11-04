@@ -17,17 +17,49 @@ CARPETA_VERSIONES = "versiones"
 MAX_VERSIONES = 30
 
 
-def carpeta_base():
-    """Carpeta de la nube donde viven los planos (igual que el resto de documentos)."""
+_AVISO_CARPETA = [False]
+
+
+def carpeta_local_configurada():
+    """📁 La «carpeta local» de Configuración General (la que sincroniza rclone).
+
+    Se lee SIEMPRE del archivo de configuración, así si se cambia la carpeta
+    en Configuración General los planos pasan a guardarse en la nueva sin
+    reiniciar el programa.
+    """
     base = (ruta_drive_configurada() or "").strip()
     if not base:
         try:
-            from app_paths import CONFIG_DIR
-            base = str(CONFIG_DIR)
+            from app_paths import cargar_config_local
+            datos = cargar_config_local() or {}
+            base = str(datos.get("ruta_drive") or "").strip()
         except Exception:
-            base = os.path.join(os.path.expanduser("~"), "BlackCube_Planos")
+            base = ""
+    if not base:
+        return ""
+    return os.path.abspath(os.path.expanduser(base))
+
+
+def carpeta_base():
+    """Carpeta donde viven los planos: <carpeta local>/Planos (sincronizada)."""
+    base = carpeta_local_configurada()
+    if not base:
+        # Igual que el resto del programa: se usa la carpeta de datos del usuario,
+        # pero se avisa porque NO se sincroniza con Google Drive.
+        if not _AVISO_CARPETA[0]:
+            _AVISO_CARPETA[0] = True
+            try:
+                from app_paths import DATA_DIR
+                base = str(DATA_DIR)
+            except Exception:
+                base = os.path.join(os.path.expanduser("~"), "BlackCube")
+            print("[Planos] ⚠️  No hay «carpeta local» configurada en Configuración "
+                  "General: los planos se guardan en %s (sin sincronizar)." % base)
     destino = os.path.join(base, SUBCARPETA)
-    os.makedirs(destino, exist_ok=True)
+    try:
+        os.makedirs(destino, exist_ok=True)
+    except Exception as e:
+        print("[Planos] ⚠️  No se pudo crear la carpeta %s: %s" % (destino, e))
     return destino
 
 

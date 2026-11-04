@@ -118,9 +118,21 @@ class ModuloPlanosEvento:
                       fg_color="#c0392b", hover_color="#922b21",
                       command=self.eliminar_plano).pack(side="left", padx=6)
 
-        self.lbl_pie = ctk.CTkLabel(self.contenedor, text="", font=(FAMILIA, 10),
-                                    text_color="#7f8c8d")
-        self.lbl_pie.pack(anchor="w", padx=14, pady=(0, 6))
+        pie = ctk.CTkFrame(self.contenedor, fg_color="transparent")
+        pie.pack(fill="x", padx=14, pady=(0, 6))
+        self.lbl_pie = ctk.CTkLabel(pie, text="", font=(FAMILIA, 10), text_color="#7f8c8d")
+        self.lbl_pie.pack(side="left")
+        # 📁 Carpeta real (la «carpeta local» de Configuración General → sincroniza con Drive)
+        try:
+            carpeta = almacen.carpeta_base()
+            configurada = bool(almacen.carpeta_local_configurada())
+            texto_carpeta = ("📁 Planos en:  %s   (se sincroniza con Google Drive)"
+                             if configurada else
+                             "⚠️ Planos en:  %s   (¡sin sincronizar! configure la carpeta local)")
+            ctk.CTkLabel(pie, text=texto_carpeta % carpeta, font=(FAMILIA, 9),
+                         text_color=("#7f8c8d" if configurada else "#c0392b")).pack(side="right")
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- datos
     def cargar_eventos(self):

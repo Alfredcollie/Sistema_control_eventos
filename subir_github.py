@@ -19,6 +19,8 @@ Opciones:
     --mensaje T usa ese texto como mensaje del commit
     --compilar  fuerza el lanzamiento de «Compilar y publicar»
     --no-compilar  sube sin lanzar la compilación
+    --version X.Y.Z   publica esa versión sin preguntar
+    --no-release      sube sin crear etiqueta ni release
 
 PROGRAMA: EVENTOS
 REPOSITORIO: https://github.com/Alfredcollie/Sistema_control_eventos
@@ -30,9 +32,11 @@ import shutil
 import time
 import sys
 import datetime
+import re
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 RAMA_PREFERIDA = "main"
+PROGRAMA = "EVENTOS"
 
 
 def ejecutar(args, silencioso=False):
@@ -255,9 +259,181 @@ def compilar_y_publicar(rama, forzar=False):
     print("   Seguir el avance: " + url_acciones)
 
 
+# =========================================================
+# 🏷️ VERSIÓN DEL RELEASE
+# =========================================================
+def _leer_version_codigo(programa):
+    """Versión que dice el código (si el programa la tiene)."""
+    candidatos = []
+    if programa == "EVENTOS":
+        candidatos = ["control_general.py"]
+    elif programa == "FLOTA":
+        candidatos = ["control_general.py", "version.py", "versiones.py"]
+    for nombre in candidatos:
+        ruta = os.path.join(REPO, nombre)
+        if not os.path.isfile(ruta):
+            continue
+        try:
+            with open(ruta, "r", encoding="utf-8", errors="ignore") as archivo:
+                for linea in archivo:
+                    if "VERSION_ACTUAL" in linea and "=" in linea:
+                        texto = linea.split("=", 1)[1].strip().strip('"').strip("'")
+                        if texto:
+                            return texto
+        except Exception:
+            pass
+    return ""
+
+
+def ultima_etiqueta():
+    """Última etiqueta (tag) de versión del repositorio."""
+    r = ejecutar(["tag", "--sort=-v:refname"], silencioso=True)
+    for linea in (r.stdout or "").splitlines():
+        etiqueta = linea.strip()
+        if re.match(r"^[vV]\d", etiqueta):
+            return etiqueta
+    return ""
+
+
+def _numeros(texto):
+    limpio = re.sub(r"[^0-9.]", "", str(texto or ""))
+    partes = [int(p) for p in limpio.split(".") if p.isdigit()]
+    while len(partes) < 3:
+        partes.append(0)
+    return tuple(partes[:4])
+
+
+def _version_limpia(texto):
+    """'v1.5.7' / 'V1.5.7' / '1.5.7' -> '1.5.7' (o '' si no sirve)."""
+    limpio = str(texto or "").strip().lstrip("vV").strip()
+    if not re.match(r"^\d+(\.\d+){1,3}$", limpio):
+        return ""
+    return limpio
+
+
+def preguntar_version(actual_tag):
+    """Pregunta la versión: Enter = la misma · escribir otro número = cambiarla."""
+    actual = _version_limpia(actual_tag) or "1.0.0"
+    print("")
+    print("--- Versión del release ------------------------------------------")
+    print("   Última versión publicada : V%s" % actual)
+    codigo = _leer_version_codigo(PROGRAMA)
+    if codigo:
+        print("   Versión en el código     : %s" % codigo)
+    print("")
+    print("   ENTER  = mantener la versión V%s" % actual)
+    print("   Escribir otro número (ej. %s) + ENTER = versión nueva"
+          % _siguiente_version(actual))
+    try:
+        respuesta = input("   Versión [V%s]: " % actual).strip()
+    except (EOFError, KeyboardInterrupt):
+        respuesta = ""
+    if not respuesta:
+        return actual
+    nueva = _version_limpia(respuesta)
+    if not nueva:
+        print("   ⚠️  «%s» no parece un número de versión. Se usará V%s."
+              % (respuesta, actual))
+        return actual
+    if _numeros(nueva) < _numeros(actual):
+        print("   ⚠️  V%s es MENOR que la actual (V%s)." % (nueva, actual))
+        try:
+            if input("       ¿Continuar igual? (s/N): ").strip().lower() not in ("s", "si", "sí", "y"):
+                return actual
+        except (EOFError, KeyboardInterrupt):
+            return actual
+    return nueva
+
+
+def _siguiente_version(actual):
+    partes = list(_numeros(actual))
+    partes[2] = partes[2] + 1
+    return ".".join(str(p) for p in partes[:3])
+
+
+def actualizar_version_en_codigo(nueva):
+    """Escribe la versión nueva en el código (solo si el programa la tiene)."""
+    nombre = "control_general.py" if PROGRAMA == "EVENTOS" else ""
+    if not nombre:
+        return False
+    ruta = os.path.join(REPO, nombre)
+    if not os.path.isfile(ruta):
+        return False
+    try:
+        with open(ruta, "r", encoding="utf-8") as archivo:
+            lineas = archivo.readlines()
+        cambiado = False
+        for i, linea in enumerate(lineas):
+            if "VERSION_ACTUAL" in linea and "=" in linea:
+                antes = linea.split("=", 1)[0]
+                lineas[i] = antes + '= "v%s"\n' % nueva
+                cambiado = True
+        if cambiado:
+            with open(ruta, "w", encoding="utf-8") as archivo:
+                archivo.writelines(lineas)
+        return cambiado
+    except Exception as e:
+        print("   ⚠️  No se pudo escribir la versión en el código: %s" % e)
+        return False
+
+
+def publicar_release(version, rama, forzar=False):
+    """Crea (o mueve) la etiqueta Vx.y.z y la sube: eso publica el RELEASE."""
+    if not version:
+        return False
+    etiqueta = "V" + version
+    usuario, repositorio = _remoto_github()
+    token = _token_github()
+    print("")
+    print("--- Liberación (release) -----------------------------------------")
+    print("   Etiqueta: %s" % etiqueta)
+
+    existentes = ejecutar(["tag"], silencioso=True).stdout or ""
+    ya_existe = etiqueta in [l.strip() for l in existentes.splitlines()]
+
+    if ya_existe and not forzar:
+        print("   ℹ️  La etiqueta %s ya existe en este equipo." % etiqueta)
+        try:
+            if input("       ¿Volver a publicar V%s? (s/N): " % version).strip().lower() not in ("s", "si", "sí", "y"):
+                print("   (no se publicó nada nuevo)")
+                return False
+        except (EOFError, KeyboardInterrupt):
+            return False
+        forzar = True
+
+    argumentos_tag = ["tag", "-f", etiqueta] if ya_existe else ["tag", etiqueta]
+    if ejecutar(argumentos_tag).returncode != 0:
+        print("   ⚠️  No se pudo crear la etiqueta %s." % etiqueta)
+        return False
+    print("   ✔ Etiqueta creada: %s" % etiqueta)
+
+    orden_push = ["push", "origin", etiqueta]
+    if ya_existe:                      # sólo se fuerza si la etiqueta ya estaba
+        orden_push.insert(1, "--force")
+    if ejecutar(orden_push).returncode != 0:
+        print("   ⚠️  No se pudo subir la etiqueta.")
+        print("       Pruebe:  git push %sorigin %s" % ("--force " if forzar else "", etiqueta))
+        return False
+    print("   ✔ Etiqueta subida: la compilación publicará el release.")
+
+    if usuario and repositorio:
+        url = "https://github.com/%s/%s/releases/tag/%s" % (usuario, repositorio, etiqueta)
+        print("   🔗 Release: " + url)
+        if token:
+            print("   ⏳ El release aparecerá cuando termine la compilación (2-6 min).")
+    return True
+
+
 def main():
     argumentos = sys.argv[1:]
     solo_estado = "--estado" in argumentos or "--dry-run" in argumentos
+    sin_release = "--no-release" in argumentos or "--sin-release" in argumentos
+    version_fijada = ""
+    if "--version" in argumentos:
+        try:
+            version_fijada = _version_limpia(argumentos[argumentos.index("--version") + 1])
+        except IndexError:
+            version_fijada = ""
     mensaje = ""
     if "--mensaje" in argumentos:
         try:
@@ -282,10 +458,40 @@ def main():
     print(" Repositorio: " + ((remoto.stdout or "").strip() or "(sin remoto)"))
     print("")
 
+    # 🏷️ Versión del release (Enter = la misma · número nuevo = cambiarla)
+    version_tag = ""
+    version_nueva = False
+    if not sin_release:
+        actual = ultima_etiqueta() or _leer_version_codigo(PROGRAMA)
+        if version_fijada:
+            version_tag = version_fijada
+            print("")
+            print("--- Versión del release ------------------------------------------")
+            print("   Versión indicada: V%s" % version_tag)
+        else:
+            version_tag = preguntar_version(actual)
+        version_nueva = (_numeros(version_tag) != _numeros(actual)) or (not actual)
+        if version_nueva and actualizar_version_en_codigo(version_tag):
+            print("   ✔ Versión escrita en el código: v%s" % version_tag)
+        print("   → Se publicará la versión V%s" % version_tag)
+
     print("--- Archivos con cambios ------------------------------------------")
     estado = ejecutar(["status", "--porcelain"], silencioso=True).stdout or ""
     if not estado.strip():
         print("   (ninguno)  ✔ Nada nuevo para subir.")
+        if sin_release or not version_tag:
+            return 0
+        print("")
+        print("   No hay archivos nuevos, pero se puede publicar el release igual.")
+        try:
+            if input("   ¿Publicar la versión V%s ahora? (s/N): " % version_tag).strip().lower() not in ("s", "si", "sí", "y"):
+                print("   (no se publicó nada)")
+                return 0
+        except (EOFError, KeyboardInterrupt):
+            return 0
+        if publicar_release(version_tag, rama):
+            print("")
+            print(" ✅ Release V%s publicado." % version_tag)
         return 0
     for linea in estado.strip().splitlines():
         print("   " + linea)
@@ -306,6 +512,8 @@ def main():
         cuantos = len([l for l in estado.strip().splitlines() if l.strip()])
         mensaje = ("Actualización %s (%d archivos)"
                    % (datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), cuantos))
+        if version_tag:
+            mensaje = "v%s — %s" % (version_tag, mensaje)
     print(" Mensaje del commit: " + mensaje)
     if ejecutar(["commit", "-m", mensaje]).returncode != 0:
         print(" ⚠️  No se pudo crear el commit (¿faltan datos de usuario de git?).")
@@ -326,6 +534,13 @@ def main():
     print("")
     print(" ✅ Listo: los archivos modificados ya están en GitHub.")
 
+    # 🏷️ Liberación: se crea y sube la etiqueta Vx.y.z
+    release_ok = False
+    if version_tag and "--no-compilar" not in argumentos:
+        release_ok = publicar_release(version_tag, rama, forzar=version_nueva)
+    elif version_tag:
+        print(" (--no-compilar: no se publicó el release)")
+
     # 🚀 Después de subir: compilar y publicar (Windows + macOS)
     if "--no-compilar" not in argumentos:
         try:
@@ -334,6 +549,14 @@ def main():
             print("   ⚠️  No se pudo lanzar la compilación: %s" % e_comp)
     else:
         print(" (--no-compilar: no se lanzó la compilación)")
+
+    if release_ok:
+        usuario, repositorio = _remoto_github()
+        print("")
+        print(" ✅ RELEASE V%s en camino." % version_tag)
+        print("    " + "https://github.com/%s/%s/releases/tag/V%s"
+              % (usuario, repositorio, version_tag))
+        print("    (los archivos .exe / .dmg aparecen cuando termine la compilación)")
     return 0
 
 

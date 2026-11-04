@@ -892,6 +892,42 @@ def formatear_numero_entrada(texto):
     return ent_fmt
 
 
+_TABLA_DIFERENCIALES_LISTA = [False]
+
+
+def _asegurar_tabla_diferenciales():
+    """Crea la tabla de diferenciales si falta (una vez por ejecución)."""
+    if _TABLA_DIFERENCIALES_LISTA[0]:
+        return True
+    conn = conectar_db(silencioso=True)
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as c:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS conciliacion_diferenciales (
+                    id SERIAL PRIMARY KEY,
+                    banco VARCHAR(255),
+                    cuenta VARCHAR(120) DEFAULT '',
+                    fecha VARCHAR(20) DEFAULT '',
+                    descripcion TEXT,
+                    monto NUMERIC DEFAULT 0,
+                    origen VARCHAR(20) DEFAULT '',
+                    descripcion_guardada TEXT DEFAULT '',
+                    incluido BOOLEAN DEFAULT FALSE,
+                    creado VARCHAR(30) DEFAULT ''
+                )
+            """)
+        conn.commit()
+        _TABLA_DIFERENCIALES_LISTA[0] = True
+        return True
+    except Exception as e:
+        print("[Diferenciales] no se pudo crear la tabla:", e)
+        return False
+    finally:
+        liberar_conexion(conn)
+
+
 def normalizar_monto(v):
     """Convierte cualquier texto de monto a float, aceptando ambos formatos
     (1,234.56 y 1.234,56) y simbolos de moneda."""
@@ -1537,6 +1573,284 @@ def _escanear_con_progreso(parent, etiqueta, mod_escaner, *args, **kwargs):
                 prog.destroy()
             except Exception:
                 pass
+
+
+class VentanaDiferenciales(ctk.CTkToplevel):
+    """🧾 Diferenciales entre el estado de cuenta y el sistema.
+
+    Permite elegir cuáles incluir, escribirles una descripción y exportarlos a Excel.
+    """
+
+    def __init__(self, app, banco, faltantes, pendientes):
+        super().__init__(app.parent_frame)
+        self.app = app
+        self.banco = banco or {}
+        self.title("🧾 Diferenciales — %s" % construir_etiqueta_banco(self.banco))
+        try:
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry("%dx%d+%d+%d" % (min(1050, sw - 60), min(700, sh - 80),
+                                           max(0, (sw - min(1050, sw - 60)) // 2),
+                                           2 if sh < 800 else 40))
+        except Exception:
+            self.geometry("1000x680")
+        try:
+            self.transient(app.parent_frame.winfo_toplevel())
+            self.grab_set()
+        except Exception:
+            pass
+
+        self.filas = []
+        for f in (faltantes or []):
+            self.filas.append({"fila": f, "origen": "Estado de cuenta"})
+        for f in (pendientes or []):
+            self.filas.append({"fila": f, "origen": "Sistema"})
+
+        f_top = ctk.CTkFrame(self, fg_color="transparent")
+        f_top.pack(fill="x", padx=14, pady=(12, 4))
+        ctk.CTkLabel(f_top, text="🧾 Diferenciales encontrados (%d)" % len(self.filas),
+                     font=("Arial", 15, "bold"), text_color="#1f538d").pack(side="left")
+        ctk.CTkLabel(f_top, text="   Banco: " + construir_etiqueta_banco(self.banco),
+                     font=("Arial", 11), text_color="#555555").pack(side="left")
+        ctk.CTkLabel(self, text="Marcá los que querés incluir y escribí la descripción. "
+                                "Los del «Sistema» se marcan como conciliados.",
+                     font=("Arial", 10), text_color="#7f8c8d").pack(anchor="w", padx=16)
+
+        # encabezado de columnas
+        f_cab = ctk.CTkFrame(self, fg_color="#eaf2f8", corner_radius=4)
+        f_cab.pack(fill="x", padx=14, pady=(6, 0))
+        for texto, ancho in (("Incluir", 70), ("Fecha", 95), ("Origen", 120),
+                             ("Descripción del banco/sistema", 330),
+                             ("Descripción a guardar", 250), ("Monto", 110)):
+            ctk.CTkLabel(f_cab, text=texto, font=("Arial", 11, "bold"), width=ancho,
+                         anchor="w").pack(side="left", padx=4, pady=4)
+
+        self.f_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", height=420)
+        self.f_scroll.pack(fill="both", expand=True, padx=14, pady=(2, 6))
+
+        self.widgets = []
+        for posicion, item in enumerate(self.filas):
+            fila = item["fila"]
+            monto = float(fila.get("monto") or 0)
+            f_fila = ctk.CTkFrame(self.f_scroll, fg_color=("#ffffff" if posicion % 2 == 0
+                                                           else "#f7f9fa"), corner_radius=3)
+            f_fila.pack(fill="x", pady=1)
+            var = tk.BooleanVar(value=(item["origen"] == "Estado de cuenta"))
+            ctk.CTkCheckBox(f_fila, text="", variable=var, width=70, checkbox_width=18,
+                            checkbox_height=18).pack(side="left", padx=(6, 0))
+            ctk.CTkLabel(f_fila, text=fecha_para_mostrar(fila.get("fecha", "")), width=95,
+                         anchor="w", font=("Arial", 10)).pack(side="left", padx=4)
+            color_origen = "#b9770e" if item["origen"] == "Estado de cuenta" else "#1f538d"
+            ctk.CTkLabel(f_fila, text=item["origen"], width=120, anchor="w",
+                         font=("Arial", 10, "bold"), text_color=color_origen).pack(side="left", padx=4)
+            ctk.CTkLabel(f_fila, text=str(fila.get("descripcion") or "")[:60], width=330,
+                         anchor="w", font=("Arial", 10)).pack(side="left", padx=4)
+            entrada = ctk.CTkEntry(f_fila, width=250, font=("Arial", 10),
+                                   placeholder_text="descripción…")
+            entrada.insert(0, str(fila.get("descripcion") or ""))
+            entrada.pack(side="left", padx=4)
+            color_monto = "#1e8449" if monto >= 0 else "#c0392b"
+            ctk.CTkLabel(f_fila, text=formatear_monto(monto), width=110, anchor="e",
+                         font=("Arial", 10, "bold"), text_color=color_monto).pack(side="left", padx=6)
+            self.widgets.append({"item": item, "var": var, "entrada": entrada})
+
+        # pie con acciones
+        f_pie = ctk.CTkFrame(self, fg_color="transparent")
+        f_pie.pack(fill="x", padx=14, pady=(4, 12))
+        ctk.CTkButton(f_pie, text="☑ Todos", width=90, font=("Arial", 11, "bold"),
+                      fg_color="#5d6d7e", hover_color="#4a5967",
+                      command=lambda: self.marcar(True)).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(f_pie, text="☐ Ninguno", width=100, font=("Arial", 11, "bold"),
+                      fg_color="#5d6d7e", hover_color="#4a5967",
+                      command=lambda: self.marcar(False)).pack(side="left", padx=6)
+        ctk.CTkButton(f_pie, text="📊 Exportar a Excel", width=170, font=("Arial", 11, "bold"),
+                      fg_color="#1e8449", hover_color="#196f3d",
+                      command=self.exportar).pack(side="left", padx=6)
+        ctk.CTkButton(f_pie, text="❌ Cerrar", width=110, font=("Arial", 11, "bold"),
+                      fg_color="#7f8c8d", hover_color="#606b6b",
+                      command=self.destroy).pack(side="right")
+        ctk.CTkButton(f_pie, text="➕ Incluir seleccionados", width=200,
+                      font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
+                      command=self.incluir).pack(side="right", padx=6)
+
+    # ---------------------------------------------------------------- acciones
+    def marcar(self, valor):
+        for w in self.widgets:
+            w["var"].set(bool(valor))
+
+    def seleccionados(self):
+        return [w for w in self.widgets if w["var"].get()]
+
+    def incluir(self):
+        elegidos = self.seleccionados()
+        if not elegidos:
+            return messagebox.showinfo("Diferenciales",
+                                       "Marcá al menos un diferencial para incluirlo.",
+                                       parent=self)
+        if not messagebox.askyesno(
+                "Incluir diferenciales",
+                "Se incluirán %d diferencial(es) en el banco." % len(elegidos) + chr(10) + chr(10) +
+                "• Los del estado de cuenta se crean como movimiento MANUAL." + chr(10) +
+                "• Los del sistema quedan marcados como CONCILIADOS." + chr(10) + chr(10) +
+                "¿Desea continuar?", parent=self):
+            return
+        incluidos, errores = 0, []
+        for w in elegidos:
+            try:
+                if self.app.incluir_diferencial(w["item"]["fila"], w["entrada"].get()):
+                    incluidos += 1
+                else:
+                    errores.append(str(w["item"]["fila"].get("descripcion") or "")[:40])
+            except Exception as e:
+                errores.append(str(e)[:40])
+        try:
+            self.app.generar_reporte()
+        except Exception:
+            pass
+        mensaje = "Se incluyeron %d diferencial(es)." % incluidos
+        if errores:
+            mensaje += chr(10) + chr(10) + "No se pudieron incluir:" + chr(10) + chr(10).join(errores[:5])
+        messagebox.showinfo("Diferenciales", mensaje, parent=self)
+        if incluidos:
+            self.destroy()
+
+    # ---------------------------------------------------------------- exportar
+    def exportar(self):
+        """Pregunta qué exportar y genera el Excel."""
+        respuesta = messagebox.askyesnocancel(
+            "Exportar a Excel",
+            "¿Exportar SOLO los diferenciales de esta ventana?" + chr(10) + chr(10) +
+            "Sí  = este banco / este mes (lo que ves en la ventana)" + chr(10) +
+            "No  = TODO el historial (todos los bancos y meses)" + chr(10) +
+            "Cancelar = no exportar nada",
+            parent=self)
+        if respuesta is None:
+            return
+        if respuesta:
+            filas = [(self.banco.get("banco", ""), self.banco.get("cuenta", ""),
+                      fecha_para_mostrar(w["item"]["fila"].get("fecha", "")),
+                      w["item"]["origen"],
+                      str(w["item"]["fila"].get("descripcion") or ""),
+                      w["entrada"].get(),
+                      float(w["item"]["fila"].get("monto") or 0))
+                     for w in self.widgets]
+            self.guardar_excel(filas, "Diferenciales_%s" % datetime.now().strftime("%Y%m%d_%H%M"))
+        else:
+            self.guardar_excel(VentanaDiferenciales.historial(), "Diferenciales_historial_%s"
+                               % datetime.now().strftime("%Y%m%d_%H%M"))
+
+    @classmethod
+    def exportar_desde_modulo(cls, app):
+        """📊 Exportar desde el botón del módulo (sin abrir la ventana)."""
+        respuesta = messagebox.askyesnocancel(
+            "Exportar diferenciales a Excel",
+            "¿Exportar SOLO los diferenciales del banco/mes actual?" + chr(10) + chr(10) +
+            "Sí = de este banco y mes" + chr(10) +
+            "No = TODO el historial (todos los bancos y meses)" + chr(10) +
+            "Cancelar = no exportar nada",
+            parent=app.parent_frame)
+        if respuesta is None:
+            return
+        if respuesta:
+            banco = app.banco_seleccionado() or {}
+            faltantes = list(getattr(app, "_faltantes_estado_cuenta", None) or [])
+            pendientes = list(getattr(app, "_pendientes_sistema", None) or [])
+            filas = [(banco.get("banco", ""), banco.get("cuenta", ""),
+                      fecha_para_mostrar(f.get("fecha", "")),
+                      "Estado de cuenta" if f in faltantes else "Sistema",
+                      str(f.get("descripcion") or ""), str(f.get("descripcion") or ""),
+                      float(f.get("monto") or 0))
+                     for f in (faltantes + pendientes)]
+            if not filas:
+                return messagebox.showinfo("Exportar", "No hay diferenciales en este banco/mes.",
+                                           parent=app.parent_frame)
+            cls.guardar_excel_estatico(filas, "Diferenciales_%s"
+                                       % datetime.now().strftime("%Y%m%d_%H%M"), app)
+        else:
+            cls.guardar_excel_estatico(cls.historial(), "Diferenciales_historial_%s"
+                                       % datetime.now().strftime("%Y%m%d_%H%M"), app)
+
+    @staticmethod
+    def historial():
+        """Diferenciales de TODOS los bancos y meses (guardados al subir cada PDF)."""
+        filas = []
+        _asegurar_tabla_diferenciales()
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return filas
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT banco, cuenta, fecha, origen, descripcion, monto
+                             FROM conciliacion_diferenciales
+                             ORDER BY banco, fecha""")
+                guardados = c.fetchall()
+        except Exception as e:
+            print("[Diferenciales] historial:", e)
+            guardados = []
+        finally:
+            liberar_conexion(conn)
+        for banco_d, cuenta_d, fecha_d, origen_d, desc_d, monto_d in guardados:
+            etiqueta = ("Estado de cuenta" if str(origen_d or "") == "estado_cuenta"
+                        else "Sistema")
+            filas.append((str(banco_d or ""), str(cuenta_d or ""),
+                          fecha_para_mostrar(fecha_d), etiqueta,
+                          str(desc_d or ""), "", float(monto_d or 0)))
+        return filas
+
+    def guardar_excel(self, filas, nombre_base):
+        VentanaDiferenciales.guardar_excel_estatico(filas, nombre_base, self)
+
+    @staticmethod
+    def guardar_excel_estatico(filas, nombre_base, parent=None):
+        """Genera el .xlsx con los diferenciales y avisa dónde quedó."""
+        if not filas:
+            return messagebox.showinfo("Exportar", "No hay diferenciales para exportar.",
+                                       parent=parent)
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment
+        except Exception:
+            return messagebox.showerror("Exportar",
+                                        "Falta la librería openpyxl." + chr(10) +
+                                        "Instálela con: pip install openpyxl", parent=parent)
+        ruta = guardar_archivo_dialogo(titulo="Guardar diferenciales en Excel",
+                                       nombre_sugerido=nombre_base + ".xlsx",
+                                       extensiones=[("Excel", "*.xlsx")])
+        if not ruta:
+            return
+        if not str(ruta).lower().endswith(".xlsx"):
+            ruta = str(ruta) + ".xlsx"
+        libro = Workbook()
+        hoja = libro.active
+        hoja.title = "Diferenciales"
+        encabezados = ["Banco", "Cuenta", "Fecha", "Origen", "Descripción (banco/sistema)",
+                       "Descripción a guardar", "Monto"]
+        hoja.append(encabezados)
+        for celda in hoja[1]:
+            celda.font = Font(bold=True, color="FFFFFF")
+            celda.fill = PatternFill("solid", fgColor="1F538D")
+            celda.alignment = Alignment(horizontal="center")
+        for fila in filas:
+            hoja.append(list(fila))
+        anchos = (26, 18, 13, 18, 55, 40, 14)
+        for i, ancho in enumerate(anchos, start=1):
+            hoja.column_dimensions[chr(64 + i)].width = ancho
+        for numero_fila in range(2, hoja.max_row + 1):
+            hoja.cell(row=numero_fila, column=7).number_format = '#,##0.00'
+        hoja.freeze_panes = "A2"
+        total = sum(float(f[6] or 0) for f in filas)
+        hoja.append([])
+        hoja.append(["", "", "", "", "TOTAL", "", total])
+        hoja.cell(row=hoja.max_row, column=6).font = Font(bold=True)
+        hoja.cell(row=hoja.max_row, column=7).font = Font(bold=True)
+        hoja.cell(row=hoja.max_row, column=7).number_format = '#,##0.00'
+        try:
+            libro.save(ruta)
+        except Exception as e:
+            return messagebox.showerror("Exportar", "No se pudo guardar el Excel:" + chr(10) + str(e),
+                                        parent=parent)
+        messagebox.showinfo("Exportar",
+                            "Se exportaron %d diferencial(es) a:" % len(filas) + chr(10) + chr(10) +
+                            str(ruta), parent=parent)
 
 
 class ModuloBancoApp:
@@ -3371,11 +3685,18 @@ class ModuloBancoApp:
         self.lbl_faltantes = ctk.CTkLabel(self.f_faltantes, text="", font=("Arial", 12, "bold"),
                                           text_color="#a04000", justify="left")
         self.lbl_faltantes.pack(side="left", padx=12, pady=8)
+        # 🧾 Se abre la ventana para ELEGIR, DESCRIBIR e incluir los diferenciales
         self.btn_faltantes = ctk.CTkButton(
-            self.f_faltantes, text="➕ Agregar faltantes al sistema", width=230,
+            self.f_faltantes, text="🧾 Ver diferenciales…", width=190,
             font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
-            command=self.agregar_faltantes_al_sistema)
-        self.btn_faltantes.pack(side="right", padx=12, pady=8)
+            command=self.abrir_diferenciales)
+        self.btn_faltantes.pack(side="right", padx=(6, 12), pady=8)
+        # 📊 Exportar los diferenciales a Excel (ventana actual o historial completo)
+        self.btn_exportar_dif = ctk.CTkButton(
+            self.f_faltantes, text="📊 Exportar a Excel", width=160,
+            font=("Arial", 11, "bold"), fg_color="#1e8449", hover_color="#196f3d",
+            command=lambda: VentanaDiferenciales.exportar_desde_modulo(self))
+        self.btn_exportar_dif.pack(side="right", padx=6, pady=8)
 
         f_buscar = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
         f_buscar.pack(fill="x", padx=5, pady=(0, 4))
@@ -3966,6 +4287,8 @@ class ModuloBancoApp:
         #    cobran al mes siguiente (el banco los postea con retraso).
         pendientes_sis = [f for f in filas if f.get("origen") == "sistema"
                           and f.get("estado") != "conciliado"]
+        self._pendientes_sistema = pendientes_sis
+        self._guardar_diferenciales(faltantes, pendientes_sis, banco)
         self._actualizar_aviso_faltantes(faltantes, pendientes_sis)
 
         saldo_inicial = normalizar_monto(banco.get("saldo_inicial", ""))
@@ -4197,6 +4520,131 @@ class ModuloBancoApp:
             self.btn_faltantes.configure(state="normal" if n else "disabled")
         except Exception:
             pass
+
+    def _guardar_diferenciales(self, faltantes, pendientes, banco):
+        """Guarda en la base los diferenciales detectados (para el historial)."""
+        _asegurar_tabla_diferenciales()
+        banco = banco or {}
+        nombre_banco = str(banco.get("banco") or "")
+        cuenta = str(banco.get("cuenta") or "")
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return
+        try:
+            with conn.cursor() as c:
+                for f, origen in ([(x, "estado_cuenta") for x in (faltantes or [])] +
+                                  [(x, "sistema") for x in (pendientes or [])]):
+                    try:
+                        monto = float(f.get("monto") or 0)
+                        fecha = normalizar_fecha(f.get("fecha", ""))
+                        descripcion = str(f.get("descripcion") or "")
+                        c.execute("""SELECT id FROM conciliacion_diferenciales
+                                     WHERE banco=%s AND fecha=%s AND origen=%s
+                                       AND ABS(monto - %s) <= 0.02""",
+                                  (nombre_banco, fecha, origen, monto))
+                        if c.fetchone():
+                            continue        # ya estaba registrado
+                        c.execute("""INSERT INTO conciliacion_diferenciales
+                                     (banco, cuenta, fecha, descripcion, monto, origen, creado)
+                                     VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                                  (nombre_banco, cuenta, fecha, descripcion, monto, origen,
+                                   datetime.now().strftime("%d/%m/%Y %H:%M")))
+                    except Exception as e:
+                        print("[Diferenciales] no se pudo guardar:", e)
+            conn.commit()
+        finally:
+            liberar_conexion(conn)
+
+    def _marcar_diferencial_incluido(self, fila, descripcion, banco):
+        """Deja anotado que el diferencial ya fue incluido (con su descripción)."""
+        _asegurar_tabla_diferenciales()
+        banco = banco or {}
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return
+        try:
+            with conn.cursor() as c:
+                origen_dif = str(fila.get("origen") or "")
+                if origen_dif not in ("estado_cuenta", "sistema"):
+                    origen_dif = "estado_cuenta"
+                c.execute("""UPDATE conciliacion_diferenciales
+                             SET incluido = TRUE, descripcion_guardada = %s
+                             WHERE banco=%s AND fecha=%s
+                               AND ABS(monto - %s) <= 0.02
+                               AND COALESCE(origen,'') = %s""",
+                          (str(descripcion or "")[:400], str(banco.get("banco") or ""),
+                           normalizar_fecha(fila.get("fecha", "")),
+                           float(fila.get("monto") or 0), origen_dif))
+            conn.commit()
+        except Exception as e:
+            print("[Diferenciales] no se pudo marcar incluido:", e)
+        finally:
+            liberar_conexion(conn)
+
+    def abrir_diferenciales(self):
+        """🧾 Abre la ventana con los diferenciales (elegir, describir, incluir)."""
+        banco = self.banco_seleccionado()
+        if not banco:
+            return messagebox.showinfo("Diferenciales",
+                                       "Primero elija el banco y la cuenta.",
+                                       parent=self.parent_frame)
+        faltantes = list(getattr(self, "_faltantes_estado_cuenta", None) or [])
+        pendientes = list(getattr(self, "_pendientes_sistema", None) or [])
+        if not faltantes and not pendientes:
+            return messagebox.showinfo(
+                "Diferenciales",
+                "No hay diferenciales pendientes para este banco." + chr(10) + chr(10) +
+                "Subí el PDF del estado de cuenta o elegí otro mes.",
+                parent=self.parent_frame)
+        VentanaDiferenciales(self, banco, faltantes, pendientes)
+
+    def incluir_diferencial(self, fila, descripcion):
+        """Incluye UN diferencial: crea el movimiento manual o lo marca conciliado."""
+        banco = self.banco_seleccionado()
+        if not banco:
+            return False
+        texto = str(descripcion or "").strip() or str(fila.get("descripcion") or "")
+        origen = str(fila.get("origen") or "")
+        if origen == "estado_cuenta":
+            # línea del banco que no estaba en el sistema -> movimiento MANUAL conciliado
+            conn = conectar_db(silencioso=True)
+            if not conn:
+                return False
+            try:
+                monto = float(fila.get("monto") or 0)
+                with conn.cursor() as c:
+                    c.execute("""INSERT INTO conciliacion_bancaria
+                        (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento,
+                         estado, fecha_conciliacion)
+                        VALUES (%s,%s,%s,%s,%s,%s,'manual',0,'conciliado',%s)""",
+                        (banco.get("banco", ""), banco.get("cuenta", ""),
+                         fecha_para_mostrar(fila.get("fecha", "")), texto, monto,
+                         "ingreso" if monto >= 0 else "egreso",
+                         datetime.now().strftime("%d/%m/%Y")))
+                conn.commit()
+            except Exception as e:
+                print("[Diferenciales] no se pudo incluir:", e)
+                return False
+            finally:
+                liberar_conexion(conn)
+        else:
+            # movimiento del sistema que el banco no registró -> se marca conciliado
+            fila["descripcion"] = texto
+            try:
+                return bool(self._persistir_conciliado(fila, banco))
+            except Exception as e:
+                print("[Diferenciales] no se pudo conciliar:", e)
+                return False
+        try:
+            self._marcar_diferencial_incluido(fila, texto, banco)
+        except Exception:
+            pass
+        try:
+            registrar_auditoria(self.usuario_activo, "Banco",
+                                "Incluyó un diferencial: %s (%s)" % (texto[:40], fila.get("fecha", "")))
+        except Exception:
+            pass
+        return True
 
     def agregar_faltantes_al_sistema(self):
         """➕ Agrega al sistema (como manuales) los movimientos del estado de cuenta que faltan."""

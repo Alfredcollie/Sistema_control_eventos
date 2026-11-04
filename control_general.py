@@ -1085,7 +1085,7 @@ def cargar_configuracion_general():
         "escaner_ocr": "Sí", "escaner_idioma_ocr": "Automático", "escaner_optimizar": "Sí",
         "escaner_modo": "Automático (sin ventanas)", "escaner_carpeta": "",
         "cuentas_bancarias": [],
-        "orden_operativos": ["clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"],
+        "orden_operativos": ["clientes", "cotizaciones", "planos", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"],
         "orden_finanzas": ["ventas", "compras", "bancos", "libro_diario", "libro_mayor", "impuestos", "dashboard"],
         "orden_ajustes": ["configuracion", "usuarios", "bitacora"]
     }
@@ -1383,7 +1383,7 @@ def inicializar_seguridad_db():
             cursor.execute("SELECT COUNT(*) FROM usuarios")
             if cursor.fetchone()[0] == 0:
                 todos_permisos = json.dumps({k: True for k in (
-                    "clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores",
+                    "clientes", "cotizaciones", "planos", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores",
                     "inventario", "locaciones", "bandeja", "ventas", "compras", "bancos",
                     "libro_diario", "libro_mayor",
                     "impuestos", "dashboard", "configuracion", "usuarios", "bitacora", "solicitud_proveedor")})
@@ -1429,6 +1429,7 @@ class ControlGeneralEventos:
         self.modulos_sistema = {
             "clientes": "👥 Gestión de Clientes",
             "cotizaciones": "🧾 Generador de Cotizaciones",
+            "planos": "📐 Croquis / Plano de Evento",
             "pautas": "🕒 Pautas de Evento",
             "ordenes_cliente": "📥 Órdenes de Cliente",
             "cronograma": "📅 Cronograma (Gantt)",
@@ -1456,6 +1457,7 @@ class ControlGeneralEventos:
         self.funciones_modulos = {
             "clientes": self._crear_modulo_clientes,
             "cotizaciones": self._crear_modulo_cotizaciones,
+            "planos": self._crear_modulo_planos,
             "pautas": self._crear_modulo_pautas,
             "ordenes_cliente": self._crear_modulo_ordenes_cliente,
             "cronograma": self._crear_modulo_cronograma,
@@ -1487,7 +1489,13 @@ class ControlGeneralEventos:
     def tiene_permiso(self, modulo_key):
         if self.rol_activo == "Super Administrador":
             return True
-        return self.permisos_activos.get(modulo_key, False)
+        if modulo_key in self.permisos_activos:
+            return bool(self.permisos_activos.get(modulo_key))
+        # 📐 El módulo de planos hereda el permiso de Cotizaciones: misma seguridad
+        #    y privilegios que ya tiene el sistema, sin tener que reasignarlos.
+        if modulo_key == "planos":
+            return bool(self.permisos_activos.get("cotizaciones", False))
+        return False
 
     def abrir_ventana_login(self):
         self.v_login = ctk.CTkToplevel(self.root)
@@ -1624,7 +1632,7 @@ class ControlGeneralEventos:
         c_texto = config.get("color_menu_texto", "white")
         fondo_seguro = c_fondo if str(c_fondo).startswith("#") else "#1a252c"
         default_fin = ["ventas", "compras", "bancos", "libro_diario", "libro_mayor", "impuestos", "dashboard"]
-        orden_ops = config.get("orden_operativos", ["clientes", "cotizaciones", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"])
+        orden_ops = config.get("orden_operativos", ["clientes", "cotizaciones", "planos", "pautas", "ordenes_cliente", "cronograma", "ordenes", "proveedores", "inventario", "locaciones"])
         orden_fin = config.get("orden_finanzas", list(default_fin))
         orden_aju = config.get("orden_ajustes", ["configuracion", "usuarios", "bitacora"])
         todas_las_ordenes = orden_ops + orden_fin + orden_aju
@@ -2626,6 +2634,15 @@ class ControlGeneralEventos:
             app = cotizaciones.VentanaCotizaciones(contenedor)
             app.usuario_activo = self.usuario_activo
         except Exception as e: messagebox.showerror("Error", str(e))
+        return locals().get("app")          # 🪟 instancia del módulo (None si falló)
+
+    def _crear_modulo_planos(self, contenedor):
+        """📐 CROQUIS / PLANO DE EVENTO: planos de los eventos de Cotización."""
+        try:
+            from planos_evento.selector import ModuloPlanosEvento
+            app = ModuloPlanosEvento(contenedor, self.usuario_activo)
+        except Exception as e:
+            messagebox.showerror("Planos", "No se pudo abrir el módulo de planos:\n%s" % e)
         return locals().get("app")          # 🪟 instancia del módulo (None si falló)
 
     def _crear_modulo_cronograma(self, contenedor):

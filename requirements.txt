@@ -28,3 +28,6 @@ pandas>=2.1.0
 # macOS (M1/M2): OCR con el motor nativo del sistema (Vision)
 pyobjc-framework-Vision ; sys_platform == "darwin"
 pyobjc-framework-Quartz ; sys_platform == "darwin"
+
+# --- Lectura de PDF para el módulo de planos (Windows + macOS)
+PyMuPDF==1.28.0

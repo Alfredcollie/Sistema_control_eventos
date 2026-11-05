@@ -13,6 +13,7 @@ import os
 import re
 import json
 import threading
+from tareas_seguras import ejecutar_en_hilo
 import importlib
 
 from reportlab.pdfgen import canvas
@@ -847,7 +848,7 @@ class VentanaCotizaciones:
             self._actualizar_combo_empresas(empresas_cache)
         else:
             self.combo_empresa.set("Cargando...")
-            def tarea():
+            def tarea(estado):
                 empresas = []
                 conn = conectar_db(silencioso=True)
                 if conn:
@@ -864,9 +865,12 @@ class VentanaCotizaciones:
                     finally:
                         liberar_conexion(conn)
 
-                self.root.after(0, lambda: self._actualizar_combo_empresas(empresas))
+                estado["empresas"] = empresas
 
-            threading.Thread(target=tarea, daemon=True).start()
+            # 🧵 Se usa el patrón seguro: el hilo NO toca la interfaz
+            ejecutar_en_hilo(self.root, tarea,
+                             al_terminar=lambda estado: self._actualizar_combo_empresas(
+                                 estado.get("empresas") or []))
 
     def _actualizar_combo_empresas(self, empresas):
         if empresas:
@@ -906,7 +910,7 @@ class VentanaCotizaciones:
         else:
             self.tree_cot.insert("", tk.END, values=("", "", "", "Cargando datos...", "", "", ""))
             
-            def tarea_descarga():
+            def tarea_descarga(estado):
                 conn = conectar_db(silencioso=True)
                 rows = [] 
                 if conn:
@@ -925,9 +929,12 @@ class VentanaCotizaciones:
                     finally:
                         liberar_conexion(conn)
 
-                self.root.after(0, lambda: self._pintar_tabla_cotizaciones(rows))
+                estado["rows"] = rows
 
-            threading.Thread(target=tarea_descarga, daemon=True).start()
+            # 🧵 Patrón seguro (en macOS era lo que congelaba al abrir varias)
+            ejecutar_en_hilo(self.root, tarea_descarga,
+                             al_terminar=lambda estado: self._pintar_tabla_cotizaciones(
+                                 estado.get("rows") or []))
 
     def _pintar_tabla_cotizaciones(self, rows):
         self.tree_cot.delete(*self.tree_cot.get_children())
@@ -1116,10 +1123,55 @@ class VentanaCotizaciones:
         finally:
             liberar_conexion(conn)
 
+        # 🪟 UNA SOLA ventana de edición: si ya hay una abierta se cierra antes
+        #    (antes se apilaban ventanas maximizadas con bloqueo y la app se pegaba)
+        anterior = getattr(self, "_v_edit_actual", None)
+        if anterior is not None:
+            try:
+                if anterior.winfo_exists():
+                    anterior.grab_release()
+                    anterior.destroy()
+            except Exception:
+                pass
+            self._v_edit_actual = None
+
         v_edit = ctk.CTkToplevel(self.root.winfo_toplevel())
+        self._v_edit_actual = v_edit
         v_edit.title(f"Configuración de Cotización - {codigo_cot}")
         v_edit.after(100, lambda: maximizar_ventana(v_edit))
-        v_edit.grab_set()
+        try:
+            v_edit.grab_set()
+        except Exception:
+            pass
+
+        cerrada = {"hecho": False}
+
+        def _cerrar_edicion(_evento=None):
+            """Suelta el bloqueo modal y cierra la ventana (una sola vez)."""
+            if cerrada["hecho"]:
+                return
+            cerrada["hecho"] = True
+            try:
+                v_edit.grab_release()
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_v_edit_actual", None) is v_edit:
+                    self._v_edit_actual = None
+            except Exception:
+                pass
+            try:
+                v_edit.destroy()
+            except Exception:
+                pass
+
+        try:
+            v_edit.protocol("WM_DELETE_WINDOW", _cerrar_edicion)
+            v_edit.bind("<Destroy>", lambda e: (_cerrar_edicion()
+                                                if getattr(e, "widget", None) is v_edit else None),
+                        add="+")
+        except Exception:
+            pass
 
         f_izq = ctk.CTkFrame(v_edit, corner_radius=10)
         f_izq.pack(fill="both", expand=True, padx=15, pady=15)

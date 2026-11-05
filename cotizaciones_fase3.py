@@ -13,6 +13,7 @@ import subprocess
 import os
 import re
 import json
+from tareas_seguras import ejecutar_en_hilo
 import threading
 try:
     from configuracion_regional import cargar_configuracion_regional
@@ -1251,23 +1252,23 @@ class VentanaEtapaProveedores:
                 return None
 
     def _cargar_tipo_cambio_en_vivo(self):
-        def tarea():
-            tc = self.obtener_tipo_cambio_en_vivo()
+        def tarea(estado):
+            estado["tc"] = self.obtener_tipo_cambio_en_vivo()
 
-            def aplicar():
-                try:
-                    if not self.v_prov.winfo_exists():
-                        return
-                except Exception:
+        def aplicar(estado):
+            try:
+                if not self.v_prov.winfo_exists():
                     return
-                if tc:
-                    self.ent_tc.delete(0, tk.END)
-                    self.ent_tc.insert(0, f"{tc:.3f}")
-                self.guardar_ajustes_globales_db()
+            except Exception:
+                return
+            tc = estado.get("tc")
+            if tc:
+                self.ent_tc.delete(0, tk.END)
+                self.ent_tc.insert(0, f"{tc:.3f}")
+            self.guardar_ajustes_globales_db()
 
-            self.root.after(0, aplicar)
-
-        threading.Thread(target=tarea, daemon=True).start()
+        # 🧵 hilo seguro: la interfaz se toca solo en el hilo principal
+        ejecutar_en_hilo(self.root, tarea, al_terminar=aplicar)
 
     # =======================================================
     # AJUSTES GLOBALES (TC Y FORMA DE PAGO)
@@ -1355,7 +1356,7 @@ class VentanaEtapaProveedores:
             tc = 3.75
         codigo = self.codigo_cot
 
-        def tarea():
+        def tarea(estado):
             subtotal = 0.0
             costo_total = 0.0
             conn = conectar_db(silencioso=True)
@@ -1376,9 +1377,13 @@ class VentanaEtapaProveedores:
                     costo_total = 0.0
                 finally:
                     liberar_conexion(conn)
-            self.root.after(0, lambda s=subtotal, t=tc, ct=costo_total: self._pintar_totales(s, t, ct))
+            estado["subtotal"] = subtotal
+            estado["tc"] = tc
+            estado["costo"] = costo_total
 
-        threading.Thread(target=tarea, daemon=True).start()
+        ejecutar_en_hilo(self.root, tarea,
+                         al_terminar=lambda e: self._pintar_totales(
+                             e.get("subtotal", 0.0), e.get("tc", tc), e.get("costo", 0.0)))
 
     def _porcentaje_financiamiento_valor(self):
         """Devuelve el % de financiamiento digitado por el usuario (0.0 si es inválido)."""
@@ -1626,7 +1631,7 @@ class VentanaEtapaProveedores:
         cat_sel = str(self.cmb_cat_e.get()).strip()
         self.cmb_p_list.set("Cargando...")
         
-        def proceso_pesado():
+        def proceso_pesado(estado):
             clave_cache = "lista_proveedores_texto_completo_v2"
             lista = cache_sistema.obtener(clave_cache)
             
@@ -1675,10 +1680,11 @@ class VentanaEtapaProveedores:
             else:
                 lista_final = ["--- Seleccione (No hay del rubro) ---"] + [n for n, c in lista]
 
-            if hasattr(self, 'root') and self.v_prov.winfo_exists():
-                self.root.after(0, lambda: self._actualizar_ui_combo(lista_final))
+            estado["lista"] = lista_final
 
-        threading.Thread(target=proceso_pesado, daemon=True).start()
+        ejecutar_en_hilo(self.root, proceso_pesado,
+                         al_terminar=lambda e: self._actualizar_ui_combo(
+                             e.get("lista") or []))
 
     def _actualizar_ui_combo(self, lista_final):
         if not getattr(self, 'v_prov', None) or not self.v_prov.winfo_exists(): return

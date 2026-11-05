@@ -1293,12 +1293,59 @@ def _normalizar_nombre_empresa(texto):
     return " ".join(limpio.split())
 
 
-def validar_destinatario(datos, config=None):
-    """Comprueba que la factura esté a nombre de la empresa configurada en el sistema.
+def _parecido_empresa(nombre_leido, nombre_empresa):
+    """Cuán parecidos son dos nombres de empresa (0.0 a 1.0).
+
+    Tolera los errores típicos del OCR: se comparan sin acentos, sin signos y
+    palabra por palabra, además de la similitud global del texto.
+    """
+    import difflib
+    import unicodedata
+
+    def limpiar(texto):
+        texto = unicodedata.normalize("NFKD", str(texto or ""))
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        texto = re.sub(r"[^A-Za-z0-9 ]+", " ", texto.upper())
+        return " ".join(texto.split())
+
+    a, b = limpiar(nombre_leido), limpiar(nombre_empresa)
+    if not a or not b:
+        return 0.0
+
+    parecido_texto = difflib.SequenceMatcher(None, a, b).ratio()
+
+    # palabras significativas de la empresa (se ignoran las de relleno)
+    relleno = {"DE", "DEL", "LA", "LAS", "LOS", "EL", "Y", "E", "S", "A", "SA",
+               "SAC", "SRL", "EIRL", "EMPRESA", "SOCIEDAD", "INVERSIONES", "PERU"}
+    palabras = [p for p in b.split() if len(p) >= 4 and p not in relleno]
+    if not palabras:
+        return parecido_texto
+    # cada palabra de la empresa se busca dentro del texto leído (tolerando fallos)
+    encontradas = 0.0
+    for palabra in palabras:
+        if palabra in a:
+            encontradas += 1.0
+        else:
+            trozos = [p for p in a.split() if len(p) >= 3]
+            mejor = 0.0
+            for trozo in trozos:
+                proporcion = difflib.SequenceMatcher(None, palabra, trozo).ratio()
+                if proporcion > mejor:
+                    mejor = proporcion
+            if mejor >= 0.7:
+                encontradas += 0.8
+            elif mejor >= 0.55:
+                encontradas += 0.4
+    parecido_palabras = encontradas / len(palabras)
+    return max(parecido_texto, parecido_palabras)
+
+def validar_destinatario(datos, config=None, texto=""):
+    """Comprueba que la factura esté a nombre de la empresa configurada.
 
     Devuelve (estado, mensaje):
       'ok'             -> la factura es de la empresa configurada
-      'ajeno'          -> es de OTRA empresa (hay que rechazarla)
+      'dudoso'         -> no se pudo confirmar (el OCR leyó mal); el usuario decide
+      'ajeno'          -> es de OTRA empresa (se puede rechazar)
       'sin-configurar' -> falta el RUC/Razón Social en Configuración General
       'sin-datos'      -> no se pudo leer el destinatario en la factura
     """
@@ -1312,986 +1359,54 @@ def validar_destinatario(datos, config=None):
     datos = datos or {}
     cliente_ruc = re.sub(r"\D", "", str(datos.get("cliente_ruc") or ""))
     cliente_nombre = str(datos.get("cliente_nombre") or "").strip()
+    digitos_del_texto = re.sub(r"\D", "", str(texto or ""))
 
+    # 1) El RUC de la empresa aparece en CUALQUIER parte del texto leído
+    if ruc_empresa and ruc_empresa in digitos_del_texto:
+        return "ok", (f"✅ El RUC {ruc_empresa} de la empresa aparece en el comprobante.")
+
+    # 2) RUC del destinatario leído por el OCR
     if ruc_empresa and cliente_ruc:
         if cliente_ruc == ruc_empresa:
             return "ok", f"✅ Factura a nombre de la empresa (RUC {cliente_ruc})."
         detalle = f"RUC {cliente_ruc}" + (f" — {cliente_nombre}" if cliente_nombre else "")
+        # Solo se da por 'dudoso' cuando hay texto del OCR (pudo leer mal los dígitos);
+        # si el RUC se leyó de un PDF o de un archivo, se mantiene el rechazo.
+        if texto and ruc_empresa not in digitos_del_texto:
+            return "dudoso", (f"⚠️ El OCR leyó «{detalle}», pero puede haberse equivocado en algún "
+                              f"dígito.\nLa empresa configurada es RUC {ruc_empresa}"
+                              + (f" — {nombre_empresa}" if nombre_empresa else "")
+                              + ".\nConfirme que la factura esté a nombre de la empresa antes de guardarla.")
         return "ajeno", (f"❌ Esta factura está a nombre de OTRA empresa: {detalle}.\n"
                          f"La empresa configurada es RUC {ruc_empresa}"
                          + (f" — {nombre_empresa}" if nombre_empresa else "") + ".")
 
+    # 3) Nombre del destinatario (con tolerancia a los errores del OCR)
     if nombre_empresa and cliente_nombre:
-        a, b = _normalizar_nombre_empresa(cliente_nombre), _normalizar_nombre_empresa(nombre_empresa)
-        if a and b and (a in b or b in a):
-            return "ok", f"✅ El destinatario '{cliente_nombre}' coincide con la empresa configurada."
-        return "ajeno", (f"❌ Esta factura está a nombre de '{cliente_nombre}', pero la empresa configurada "
-                         f"es '{nombre_empresa}'.")
+        # 🏢 Si el "destinatario" que leyó el OCR es en realidad el PROVEEDOR
+        #    (la factura no trae el bloque del cliente o se leyó mal), no se
+        #    puede afirmar que sea de otra empresa: se avisa como dudoso.
+        nombre_proveedor = str(datos.get("proveedor") or "").strip()
+        if nombre_proveedor and _parecido_empresa(cliente_nombre, nombre_proveedor) >= 0.6:
+            return "dudoso", (f"⚠️ No se pudo distinguir el destinatario del proveedor en el "
+                              f"comprobante (el OCR leyó «{cliente_nombre}»).\n"
+                              f"La empresa configurada es «{nombre_empresa}».\n"
+                              "Revise el comprobante y confirme que esté a nombre de la empresa.")
+
+        parecido = _parecido_empresa(cliente_nombre, nombre_empresa)
+        if parecido >= 0.55:
+            return "ok", (f"✅ El destinatario «{cliente_nombre}» coincide con la empresa "
+                          f"(parecido {int(parecido * 100)}%).")
+        if parecido >= 0.22:
+            return "dudoso", (f"⚠️ El OCR leyó el destinatario como «{cliente_nombre}» "
+                              f"(parecido {int(parecido * 100)}% con «{nombre_empresa}»).\n"
+                              "Puede ser un error de lectura. Confirme que la factura esté a "
+                              "nombre de la empresa antes de guardarla.")
+        return "ajeno", (f"❌ Esta factura está a nombre de «{cliente_nombre}», pero la empresa "
+                         f"configurada es «{nombre_empresa}».")
 
     return "sin-datos", ("⚠️ No se pudo leer el destinatario (RUC o razón social) en la factura. "
                          "Verifique que esté a nombre de la empresa antes de guardarla.")
-
-
-def datos_proveedor_desde_ruc(ruc, timeout=10):
-    """Datos completos del proveedor traídos de SUNAT por internet (o None)."""
-    try:
-        from proveedores import consultar_ruc_en_internet
-    except Exception:
-        return None
-    return consultar_ruc_en_internet(ruc, timeout=timeout)
-
-
-def asegurar_proveedor(nombre, ruc, usar_internet=True, timeout=10):
-    """Deja registrado al proveedor (creándolo si hace falta) y devuelve sus datos.
-
-      1. Si ya existe (por RUC o nombre) se usa el de la base de datos; si le
-         faltan dirección/ubicación y hay internet, se completan con SUNAT.
-      2. Si no existe, se consulta el RUC en internet (SUNAT) y se guarda con
-         TODA la información de la empresa (razón social, dirección, ubicación).
-      3. Si no hay internet, se guarda con lo leído en el comprobante.
-
-    Devuelve (estado, datos) con estado en: 'existe' | 'completado' | 'creado'
-    | 'creado_sin_sunat' | 'sin-datos' | 'sin-conexion' | 'error'
-    """
-    nombre = " ".join(str(nombre or "").split()).strip()
-    ruc = re.sub(r"\D", "", str(ruc or ""))
-    datos = {"ruc": ruc, "nombre": nombre, "direccion_fiscal": "", "ubicacion": ""}
-    if not nombre and not ruc:
-        return "sin-datos", datos
-
-    conn = obtener_conexion_segura(mostrar_aviso=False)
-    if not conn:
-        return "sin-conexion", datos
-    try:
-        cursor = conn.cursor()
-        existente = None
-        if ruc:
-            cursor.execute("SELECT id, COALESCE(ruc,''), COALESCE(nombre,''), "
-                           "COALESCE(direccion_fiscal,''), COALESCE(ubicacion,'') "
-                           "FROM proveedores WHERE ruc = %s LIMIT 1", (ruc,))
-            existente = cursor.fetchone()
-        if not existente and nombre:
-            cursor.execute("SELECT id, COALESCE(ruc,''), COALESCE(nombre,''), "
-                           "COALESCE(direccion_fiscal,''), COALESCE(ubicacion,'') "
-                           "FROM proveedores WHERE TRIM(UPPER(nombre)) = TRIM(UPPER(%s)) LIMIT 1",
-                           (nombre,))
-            existente = cursor.fetchone()
-
-        de_sunat = None
-        if existente:
-            id_prov, ruc_db, nombre_db, direccion_db, ubicacion_db = existente
-            datos.update({"ruc": ruc_db or ruc, "nombre": nombre_db or nombre,
-                          "direccion_fiscal": direccion_db, "ubicacion": ubicacion_db})
-            falta_algo = not (direccion_db and ubicacion_db)
-            if usar_internet and ruc and falta_algo:
-                de_sunat = datos_proveedor_desde_ruc(ruc, timeout=timeout)
-            cambios = {}
-            if de_sunat:
-                if not direccion_db and de_sunat.get("direccion_fiscal"):
-                    cambios["direccion_fiscal"] = de_sunat["direccion_fiscal"]
-                    datos["direccion_fiscal"] = de_sunat["direccion_fiscal"]
-                if not ubicacion_db and de_sunat.get("ubicacion"):
-                    cambios["ubicacion"] = de_sunat["ubicacion"]
-                    datos["ubicacion"] = de_sunat["ubicacion"]
-                if not nombre_db and de_sunat.get("nombre"):
-                    cambios["nombre"] = de_sunat["nombre"]
-                    datos["nombre"] = de_sunat["nombre"]
-            if cambios:
-                columnas = ", ".join(f"{c} = %s" for c in cambios)
-                cursor.execute(f"UPDATE proveedores SET {columnas} WHERE id = %s",
-                               tuple(cambios.values()) + (id_prov,))
-                conn.commit()
-                cache_sistema.invalidar()
-                return "completado", datos
-            return "existe", datos
-
-        if de_sunat is None and usar_internet and ruc:
-            de_sunat = datos_proveedor_desde_ruc(ruc, timeout=timeout)
-        if de_sunat and (de_sunat.get("nombre") or nombre):
-            datos.update({"nombre": de_sunat.get("nombre") or nombre,
-                          "direccion_fiscal": de_sunat.get("direccion_fiscal", ""),
-                          "ubicacion": de_sunat.get("ubicacion", "")})
-            estado = "creado"
-        elif nombre:
-            datos["nombre"] = nombre
-            estado = "creado_sin_sunat"
-        else:
-            # Sin razón social (ni del comprobante ni de SUNAT) NO se crea un proveedor
-            # con el número de RUC como nombre: se le pide al usuario que lo escriba.
-            return "sin-datos", datos
-
-        cursor.execute("""
-            INSERT INTO proveedores (ruc, nombre, direccion_fiscal, categoria, ubicacion, descripcion)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (datos["ruc"], datos["nombre"], datos.get("direccion_fiscal", ""),
-              "No seleccionada", datos.get("ubicacion", ""),
-              "Agregado automáticamente al escanear un comprobante"))
-        conn.commit()
-        cache_sistema.invalidar()
-        return estado, datos
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return "error", datos
-    finally:
-        liberar_conexion(conn)
-
-
-def crear_proveedor_si_no_existe(nombre, ruc, usar_internet=True):
-    """Compatibilidad: agrega el proveedor si no está y devuelve solo el estado."""
-    estado, _datos = asegurar_proveedor(nombre, ruc, usar_internet=usar_internet)
-    return estado
-
-
-def numero_comprobante_desde_texto(texto):
-    """N° de documento (F001-123, E001-45...) leído del comprobante.
-
-    El OCR suele leerlo SIN guion ("F581 08283480"), así que se acepta cualquier
-    separador (guion, dos puntos, espacio) o incluso ninguno.
-    """
-    texto = str(texto or "")
-    encontrado = re.search(r"\b([EFB][0-9A-Z]{3})\s*[-:\u2013\u2014]?\s*(\d{1,8})", texto)
-    if encontrado:
-        return "%s-%s" % (encontrado.group(1).upper(), encontrado.group(2))
-    return ""
-
-
-def _mismo_proveedor(nombre_a, nombre_b):
-    """¿Los dos nombres son del mismo proveedor? (tolera S.A.C., tildes, espacios)."""
-    def normalizar(nombre):
-        texto = str(nombre or "").upper()
-        for relleno in ("S.A.C.", "S.A.C", "SAC", "E.I.R.L.", "E.I.R.L", "EIRL",
-                        "S.R.L.", "S.R.L", "SRL", "S.A.", "S.A", "SAA", "E.I.R.L",
-                        "-", ".", ",", "  "):
-            texto = texto.replace(relleno, " ")
-        texto = " ".join(texto.split())
-        for con_tilde, sin_tilde in (("Á","A"), ("É","E"), ("Í","I"), ("Ó","O"), ("Ú","U"), ("Ñ","N")):
-            texto = texto.replace(con_tilde, sin_tilde)
-        return texto
-    a, b = normalizar(nombre_a), normalizar(nombre_b)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    # uno contenido en el otro (p. ej. "COESTI" y "COESTI E/S ORRANTIA")
-    return a.startswith(b) or b.startswith(a)
-
-
-def buscar_comprobante_duplicado(numero_documento):
-    """Comprobante ya registrado con ese N° de documento (o None)."""
-    nro = re.sub(r"\s+", "", str(numero_documento or "")).upper()
-    if not nro:
-        return None
-    conn = obtener_conexion_segura(mostrar_aviso=False)
-    if not conn:
-        return None
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT proveedor, fecha, COALESCE(total, 0), COALESCE(archivo_ruta, '')
-            FROM facturas_recibidas
-            WHERE REGEXP_REPLACE(REGEXP_REPLACE(UPPER(COALESCE(numero_documento, '')), '[^A-Z0-9]', '', 'g'),
-                                 '^([A-Z]+)0+', '\1')
-                  = REGEXP_REPLACE(REGEXP_REPLACE(%s, '[^A-Z0-9]', '', 'g'), '^([A-Z]+)0+', '\1')
-            ORDER BY id DESC LIMIT 1
-        """, (nro,))
-        fila = cursor.fetchone()
-        if not fila:
-            return None
-        return {"numero": nro, "proveedor": fila[0], "fecha": fila[1],
-                "total": fila[2], "archivo": fila[3]}
-    except Exception:
-        return None
-    finally:
-        liberar_conexion(conn)
-
-
-# Script de PowerShell que usa el motor OCR que ya incluye Windows.
-# Devuelve una línea por palabra:  X <TAB> Y <TAB> ancho <TAB> alto <TAB> texto
-_SCRIPT_OCR_WINDOWS = r'''
-param([string]$Ruta, [string]$Idiomas = "es-PE,es-MX,es-ES,en-US")
-$ErrorActionPreference = "Stop"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
-$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
-    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
-function Await($op, $tipo) {
-    $m = $asTaskGeneric.MakeGenericMethod($tipo)
-    $t = $m.Invoke($null, @($op))
-    $t.Wait(-1) | Out-Null
-    $t.Result
-}
-[Windows.Storage.StorageFile,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
-[Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
-[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
-[Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime] | Out-Null
-
-$engine = $null
-foreach ($tag in $Idiomas.Split(",")) {
-    $tag = $tag.Trim()
-    if (-not $tag) { continue }
-    try {
-        $idioma = [Windows.Globalization.Language]::new($tag)
-        $posible = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($idioma)
-        if ($null -ne $posible) { $engine = $posible; break }
-    } catch { }
-}
-if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
-if ($null -eq $engine) { return }
-
-$archivo = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Ruta)) ([Windows.Storage.StorageFile])
-$stream  = Await ($archivo.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
-$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap  = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-$resultado = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-foreach ($linea in $resultado.Lines) {
-  foreach ($p in $linea.Words) {
-    $r = $p.BoundingRect
-    Write-Output ([string][int]$r.X + [char]9 + [string][int]$r.Y + [char]9 + [string][int]$r.Width + [char]9 + [string][int]$r.Height + [char]9 + $p.Text)
-  }
-}
-'''
-
-
-def _normalizar_etiqueta(texto):
-    """Deja solo letras en mayúscula: sirve para reconocer rótulos aunque el OCR falle."""
-    return re.sub(r"[^A-ZÑ]", "", str(texto or "").upper())
-
-
-def _parecido(texto, candidato):
-    return difflib.SequenceMatcher(None, texto, candidato).ratio()
-
-
-def _etiqueta_reconocida(etiqueta, grupo, umbral=0.78):
-    """¿La etiqueta de la fila corresponde a base / IGV / recargo / total?"""
-    return any(_parecido(etiqueta, candidato) >= umbral
-               for candidato in _ETIQUETAS_MONTOS.get(grupo, []))
-
-
-def _agrupar_palabras_en_lineas(palabras, tolerancia_rel=0.6):
-    """Reconstruye las filas del documento a partir de palabras con posición.
-
-    'palabras' es una lista de (x, y, alto, texto). El OCR suele devolver el
-    rótulo y el importe en líneas distintas, pero conservando su Y: agrupando
-    por Y se recupera la fila real ("OP. GRAVADAS  S/  187.04").
-    """
-    if not palabras:
-        return ""
-    palabras = sorted(palabras, key=lambda p: (p[1], p[0]))
-    alturas = [p[2] for p in palabras if p[2]]
-    tolerancia = max(8.0, (sum(alturas) / len(alturas)) * tolerancia_rel) if alturas else 12.0
-    filas, actual, y_fila = [], [], None
-    for x, y, _alto, texto in palabras:
-        if y_fila is None or abs(y - y_fila) <= tolerancia:
-            actual.append((x, texto))
-            if y_fila is None:
-                y_fila = y
-        else:
-            filas.append(actual)
-            actual, y_fila = [(x, texto)], y
-    if actual:
-        filas.append(actual)
-    return "\n".join(" ".join(t for _x, t in sorted(fila, key=lambda p: p[0])) for fila in filas)
-
-
-def leer_ocr_mac(ruta, dpi=250):
-    """OCR en macOS con el motor nativo (Apple Vision, vía PyObjC).
-
-    Se convierte el PDF (o la foto) en imágenes y se leen con el OCR del sistema;
-    el texto vuelve reconstruido por filas, igual que en Windows. Si el módulo
-    escaner o PyMuPDF no están disponibles devuelve "" (se completa a mano).
-    """
-    try:
-        import escaner
-    except Exception:
-        return ""
-    if not getattr(escaner, "es_mac", lambda: False)():
-        return ""
-    try:
-        import fitz   # PyMuPDF: convierte el PDF (o la foto) en imágenes
-    except Exception:
-        return ""
-    try:
-        carpeta = tempfile.mkdtemp(prefix="ocr_mac_")
-        imagenes = []
-        documento = fitz.open(ruta)
-        for numero, pagina in enumerate(documento):
-            destino = os.path.join(carpeta, "pagina_%d.png" % (numero + 1))
-            pagina.get_pixmap(dpi=dpi).save(destino)
-            imagenes.append(destino)
-        documento.close()
-    except Exception:
-        return ""
-    if not imagenes:
-        return ""
-    try:
-        return escaner.texto_de_resultados(escaner.ocr_paginas(imagenes))
-    except Exception:
-        return ""
-
-
-def _variantes_ocr(ruta_imagen):
-    """Copias mejoradas de una foto para el OCR (gris+contraste y x2)."""
-    salidas = []
-    try:
-        from PIL import Image, ImageOps
-    except Exception:
-        return salidas
-    try:
-        with Image.open(ruta_imagen) as original:
-            gris = original.convert("L")
-            for factor, nombre in ((1, "gris"), (2, "gris2x")):
-                img = gris if factor == 1 else gris.resize(
-                    (gris.width * factor, gris.height * factor), Image.LANCZOS)
-                img = ImageOps.autocontrast(img, cutoff=1)
-                fd, salida = tempfile.mkstemp(prefix="ocr_%s_" % nombre, suffix=".png")
-                os.close(fd)
-                img.save(salida)
-                salidas.append(salida)
-    except Exception:
-        pass
-    return salidas
-
-
-def leer_ocr_windows(ruta, idiomas="es-PE,es-MX,es-ES,en-US", dpi=250):
-    """OCR del sistema: motor de Windows (WinRT) o de macOS (Vision).
-
-    Devuelve el texto reconstruido por filas (o "" si no se pudo leer).
-
-    No requiere instalar nada ni conexión a internet. En otros sistemas
-    operativos devuelve "" (el usuario puede digitar los montos a mano).
-    """
-    if sys.platform == "darwin":
-        return leer_ocr_mac(ruta, dpi=dpi)
-    if sys.platform != "win32":
-        return ""
-    try:
-        import fitz   # PyMuPDF: convierte el PDF (o la foto) en imágenes
-    except Exception:
-        return ""
-    try:
-        carpeta = tempfile.mkdtemp(prefix="ocr_compras_")
-        imagenes = []
-        documento = fitz.open(ruta)
-        for numero, pagina in enumerate(documento):
-            destino = os.path.join(carpeta, "pagina_%d.png" % (numero + 1))
-            pagina.get_pixmap(dpi=dpi).save(destino)
-            imagenes.append(destino)
-        documento.close()
-    except Exception:
-        return ""
-    if not imagenes:
-        return ""
-
-    script = os.path.join(carpeta, "ocr_windows.ps1")
-    try:
-        with open(script, "w", encoding="utf-8-sig") as archivo_ps:
-            archivo_ps.write(_SCRIPT_OCR_WINDOWS)
-    except Exception:
-        return ""
-
-    def _ocr_una_imagen(ruta_imagen):
-        try:
-            orden = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
-                     "-Ruta", ruta_imagen, "-Idiomas", idiomas]
-            resultado = subprocess.run(orden, capture_output=True, text=True, encoding="utf-8",
-                                       errors="ignore", timeout=180,
-                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except Exception:
-            return ""
-        palabras = []
-        for linea in (resultado.stdout or "").splitlines():
-            partes = linea.split("\t")
-            if len(partes) != 5:
-                continue
-            try:
-                x, y, alto = int(partes[0]), int(partes[1]), int(partes[3])
-            except ValueError:
-                continue
-            palabras.append((x, y, alto, partes[4]))
-        return _agrupar_palabras_en_lineas(palabras)
-
-    def _puntaje(texto):
-        if not texto or not texto.strip():
-            return -1
-        puntos = min(len(texto) // 60, 10)
-        if re.search(r"[A-Z]\s?\d{2,4}\s?[A-Z]?\s*[-\u2013]\s*\d{4,8}", texto.upper()):
-            puntos += 15
-        if len(re.findall(r"\d+[.,]\d{2}", texto)) >= 2:
-            puntos += 5
-        return puntos
-
-    paginas = []
-    for imagen in imagenes[:5]:
-        mejor = _ocr_una_imagen(imagen)
-        for variante in _variantes_ocr(imagen):
-            otro = _ocr_una_imagen(variante)
-            try:
-                os.remove(variante)
-            except Exception:
-                pass
-            if _puntaje(otro) > _puntaje(mejor):
-                mejor = otro
-        if mejor.strip():
-            paginas.append(mejor)
-    try:
-        shutil.rmtree(carpeta, ignore_errors=True)
-    except Exception:
-        pass
-    return "\n".join(paginas)
-
-
-def _importes_del_texto(texto):
-    """Todos los importes con decimales del texto (corrige los 'oo' del OCR)."""
-    limpio = str(texto or "").replace("oo", "00").replace("OO", "00")
-    valores = []
-    for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", limpio):
-        valor = _a_numero(encontrado)
-        if valor and valor not in valores:
-            valores.append(round(float(valor), 2))
-    return valores
-
-
-_PALABRAS_NUMERO = {
-    "CERO": 0, "UN": 1, "UNO": 1, "UNA": 1, "DOS": 2, "TRES": 3, "CUATRO": 4, "CINCO": 5, "SEIS": 6,
-    "SIETE": 7, "OCHO": 8, "NUEVE": 9, "DIEZ": 10, "ONCE": 11, "DOCE": 12, "TRECE": 13, "CATORCE": 14,
-    "QUINCE": 15, "DIECISEIS": 16, "DIECISIETE": 17, "DIECIOCHO": 18, "DIECINUEVE": 19, "VEINTE": 20,
-    "VEINTIUNO": 21, "VEINTIDOS": 22, "VEINTITRES": 23, "VEINTICUATRO": 24, "VEINTICINCO": 25,
-    "VEINTISEIS": 26, "VEINTISIETE": 27, "VEINTIOCHO": 28, "VEINTINUEVE": 29, "TREINTA": 30,
-    "CUARENTA": 40, "CINCUENTA": 50, "SESENTA": 60, "SETENTA": 70, "OCHENTA": 80, "NOVENTA": 90,
-    "CIEN": 100, "CIENTO": 100, "DOSCIENTOS": 200, "TRESCIENTOS": 300, "CUATROCIENTOS": 400,
-    "QUINIENTOS": 500, "SEISCIENTOS": 600, "SETECIENTOS": 700, "OCHOCIENTOS": 800, "NOVECIENTOS": 900,
-}
-
-
-def _texto_sin_acentos(texto):
-    """Texto en mayúsculas y sin tildes (para comparar rótulos). Multiplataforma."""
-    import unicodedata
-    base = unicodedata.normalize("NFKD", str(texto or ""))
-    return "".join(c for c in base if not unicodedata.combining(c)).upper()
-
-
-def monto_en_palabras(texto):
-    """Lee el importe en letras ('SON: CIENTO SETENTA Y SIETE CON 0/100 SOLES')."""
-    limpio = _texto_sin_acentos(texto)
-    posicion = limpio.find("SON")
-    if posicion == -1:
-        return 0.0
-    resto = limpio[posicion + 3:].split(chr(10))[0]
-    centimos = 0
-    if " CON " in resto:
-        antes, despues = resto.split(" CON ", 1)
-        resto = antes
-        try:
-            centimos = int(re.findall(r"\d{1,2}", despues)[0])
-        except Exception:
-            centimos = 0
-    palabras = [p for p in re.split(r"[^A-Z]+", resto) if p]
-    total, parcial = 0, 0
-    for palabra in palabras:
-        if palabra in ("Y", "CON", "SOLES", "SOL", "DOLARES", "SON", "DE", "SEUO"):
-            continue
-        if palabra in ("MIL", "MILES"):
-            total += (parcial or 1) * 1000
-            parcial = 0
-            continue
-        if palabra in ("MILLON", "MILLONES"):
-            total += (parcial or 1) * 1000000
-            parcial = 0
-            continue
-        if palabra in _PALABRAS_NUMERO:
-            parcial += _PALABRAS_NUMERO[palabra]
-            continue
-        if parcial or total:
-            break
-    total += parcial
-    if total <= 0:
-        return 0.0
-    return round(total + centimos / 100.0, 2)
-
-
-def montos_en_columnas(texto):
-    """(base, igv, total) cuando los rótulos y los importes van en líneas distintas.
-
-    Es el caso de RIMAC, AFP y servicios: la línea de rótulos
-    ("OP- GRAVADA ... I.G.V. IMPORTE TOTAL") y la de valores ("S/ 150,00 S/ 27.00 S/ 177.0").
-    Se toma el último importe como total y el mayor de los demás como base.
-    """
-    lineas = str(texto or "").splitlines()
-    for indice in range(1, len(lineas)):
-        etiquetas = _texto_sin_acentos(lineas[indice - 1])
-        # Solo un encabezado inequívoco (IGV / IMPORTE TOTAL / TOTAL A PAGAR) y que esa
-        # línea NO traiga importes: así las facturas normales no entran por aquí.
-        if not re.search(r"(IMPORTE\s*TOTAL|TOTAL\s*A\s*PAGAR|I\.?\s*G\.?\s*V|\bIGV\b)", etiquetas):
-            continue
-        if re.search(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}", etiquetas):
-            continue
-        fila = lineas[indice].replace("S/.", " ").replace("S/", " ")
-        valores = []
-        for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", fila):
-            try:
-                valor = _a_numero(encontrado)
-            except Exception:
-                valor = 0
-            if valor and valor > 0:
-                valores.append(round(float(valor), 2))
-        if len(valores) >= 2:
-            total = valores[-1]
-            base = max(valores[:-1])
-            igv = round(total - base, 2)
-            if 0 < igv <= total * 0.5:
-                return base, igv, total
-    return 0.0, 0.0, 0.0
-
-
-def deducir_montos_por_suma(texto, tipo=""):
-    """Deduce (base, IGV, total) buscando 'base + IGV = total' entre los importes.
-
-    Sirve cuando el OCR separa los rótulos de los números o confunde las
-    etiquetas: se recogen todos los importes y se busca el par que cumple la
-    relación del IGV (18% o 10.5%). Devuelve (0, 0, 0) si no hay combinación válida.
-    """
-    # 📊 Primero el caso de tablas en columnas (rótulos en una línea, importes en la otra)
-    por_columnas = montos_en_columnas(texto)
-    if por_columnas[2] > 0:
-        return por_columnas
-
-    valores = _importes_del_texto(texto)
-
-    # 💬 El importe en letras manda: la base es el mayor importe menor que el total
-    letras = monto_en_palabras(texto)
-    if letras:
-        candidatos = [v for v in valores if 0 < v < letras]
-        if candidatos:
-            base = max(candidatos)
-            igv = round(letras - base, 2)
-            if 0 < igv <= letras * 0.5:
-                return base, igv, letras
-        # Si no hay con qué comparar, se asume el IGV general (18%)
-        return round(letras / 1.18, 2), round(letras - letras / 1.18, 2), letras
-
-    if len(valores) < 3:
-        return 0.0, 0.0, 0.0
-    tasas = [0.105] if "10.5" in str(tipo) else [0.18]
-    mejor = None
-    for base in valores:
-        for igv in valores:
-            if base <= 0 or igv <= 0 or igv == base:
-                continue
-            if not any(abs(igv / base - tasa) < 0.02 for tasa in tasas):
-                continue
-            total = round(base + igv, 2)
-            if any(abs(v - total) <= 0.05 for v in valores):
-                if mejor is None or total > mejor[2]:
-                    mejor = (base, igv, total)
-    return mejor or (0.0, 0.0, 0.0)
-
-
-def _limpiar_numero_operacion(token):
-    """Deja el N° de operación legible (corrige O->0, I->1... si es numérico)."""
-    token = str(token or "").strip(" .,:;#-")
-    digitos = re.sub(r"\D", "", token)
-    if token and len(digitos) >= max(4, len(token) - 2):
-        tabla = str.maketrans({"O": "0", "o": "0", "Q": "0", "D": "0", "I": "1", "l": "1", "|": "1",
-                               "S": "5", "s": "5", "Z": "2", "B": "8", "G": "6", "A": "4", "T": "7"})
-        token = token.translate(tabla)
-    return token.upper()
-
-
-def _fecha_valida(dia, mes, anio):
-    """Devuelve (dd, mm, aaaa) si es una fecha real del calendario, o None."""
-    try:
-        dia, mes, anio = int(dia), int(mes), int(anio)
-    except Exception:
-        return None
-    if anio < 100:
-        anio += 2000
-    if not (2000 <= anio <= 2100):
-        return None
-    for d, m in ((dia, mes), (mes, dia)):      # se acepta DD/MM y, si no, MM/DD
-        try:
-            datetime(anio, m, d)
-            return d, m, anio
-        except Exception:
-            continue
-    return None
-
-
-def _formatear_fecha(dia, mes, anio, formato="DD/MM/AAAA"):
-    """Arma la fecha en el formato configurado en el sistema."""
-    try:
-        formato = str((CONFIG_REGIONAL or {}).get("formato_fecha", formato) or formato)
-    except Exception:
-        pass
-    if str(formato).upper().startswith("MM"):
-        return f"{mes:02d}/{dia:02d}/{anio}"
-    return f"{dia:02d}/{mes:02d}/{anio}"
-
-
-_NO_ES_PROVEEDOR = re.compile(
-    r"(RAZ[OÓ]N\s*SOCIAL|RAZON\s*SOCIAL|CLIENTE|SE[NÑ]OR|SE[NÑ]ORA|BLACK\s*RIDERS|"
-    r"R\.?U\.?C|DNI|DIRECCI[OÓ]N|TELEFONO|TEL[EÉ]FONO|RECIBO|FACTURA|BOLETA|"
-    r"SUNAT|TOTAL|IMPORTE|SUB\s*TOTAL|FECHA|P[AÁ]GINA|FORMAS?\\s*DE\\s*PAGO|MONEDA|CONDICI[OÓ]N|DOCUMENTO|ELECTR[OÓ]NICA|REPRESENTACI[OÓ]N|SERIE|N[UÚ]MERO)", re.IGNORECASE)
-
-_SUFIJO_EMPRESA = re.compile(
-    r"\b(S\.?\s?A\.?\s?C?|SAC|E\.?\s?I\.?\s?R\.?\s?L|EIRL|S\.?\s?R\.?\s?L|SRL|"
-    r"SOCIEDAD|EMPRESA|CORPORACI[OÓ]N|GRIFO|ESTACI[OÓ]N|SERVICIOS|COMERCIAL|INVERSIONES)\b",
-    re.I)
-
-
-def _nombre_parece_proveedor(nombre):
-    """¿El texto parece la razón social del proveedor (y no una etiqueta)?"""
-    valor = str(nombre or "").strip()
-    if len(valor) < 4 or _NO_ES_PROVEEDOR.search(valor):
-        return False
-    palabras = [p for p in re.findall(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,}", valor)]
-    if len(palabras) >= 2:
-        return True
-    return bool(_SUFIJO_EMPRESA.search(valor))
-
-
-def _distancia_uno(a, b):
-    """¿Dos cadenas difieren en un solo carácter (falta/sobra/cambia)?"""
-    a, b = str(a or ""), str(b or "")
-    if a == b:
-        return True
-    if abs(len(a) - len(b)) > 1:
-        return False
-    if len(a) == len(b):
-        return sum(1 for x, y in zip(a, b) if x != y) == 1
-    largo, corto = (a, b) if len(a) > len(b) else (b, a)
-    for i in range(len(largo)):
-        if largo[:i] + largo[i + 1:] == corto:
-            return True
-    return False
-
-
-def _proveedor_por_ruc_ocr(texto, ruc_empresa=""):
-    """(ruc, nombre) buscando el RUC leído por OCR en la tabla de proveedores."""
-    propio = re.sub(r"\D", "", str(ruc_empresa or ""))
-    candidatos = []
-    for grupo in re.findall(r"\d{9,12}", str(texto or "")):
-        if propio and (grupo == propio or _distancia_uno(grupo, propio)):
-            continue
-        if grupo not in candidatos:
-            candidatos.append(grupo)
-    # 🏷️ Línea del RUC con espacios o dos puntos: "RUC 20 1:7765279" -> 2017765279
-    for linea in str(texto or "").splitlines():
-        if re.search(r"R\.?\s?U\.?\s?C", linea, re.IGNORECASE):
-            digitos = re.sub(r"\D", "", linea)
-            if 9 <= len(digitos) <= 12 and digitos not in candidatos:
-                if not (propio and (digitos == propio or _distancia_uno(digitos, propio))):
-                    candidatos.append(digitos)
-    if not candidatos:
-        return "", ""
-
-    # 1) exacto (función existente)
-    for candidato in candidatos:
-        if len(candidato) == 11:
-            nombre = buscar_proveedor_por_ruc(candidato)
-            if nombre and "BLACK RIDERS" not in str(nombre).upper():
-                return candidato, nombre
-
-    # 2) un dígito de diferencia
-    conn = obtener_conexion_segura(mostrar_aviso=False)
-    filas = []
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT ruc, nombre FROM proveedores WHERE COALESCE(ruc,'') <> ''")
-            filas = cursor.fetchall()
-        except Exception:
-            filas = []
-        finally:
-            liberar_conexion(conn)
-    for candidato in candidatos:
-        for ruc, nombre in filas:
-            limpio = re.sub(r"\D", "", str(ruc or ""))
-            if len(limpio) >= 9 and _distancia_uno(limpio, candidato):
-                if "BLACK RIDERS" in str(nombre or "").upper():
-                    continue
-                return str(ruc), nombre
-    return "", ""
-
-
-def _ruc_valido(ruc):
-    """RUC peruano con digito verificador correcto (descarta ruido del OCR)."""
-    ruc = re.sub(r"\D", "", str(ruc or ""))
-    if len(ruc) != 11 or ruc[:2] not in ("10", "15", "17", "20"):
-        return False
-    if ruc == ruc[0] * 11:
-        return False
-    pesos = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
-    suma = sum(int(d) * p for d, p in zip(ruc[:10], pesos))
-    resto = 11 - (suma % 11)
-    verificador = 0 if resto == 10 else (1 if resto == 11 else resto)
-    return verificador == int(ruc[10])
-
-
-def _ruc_del_proveedor(texto, ruc_empresa=""):
-    """RUC del proveedor: se descarta el de la empresa (aunque el OCR lo confunda)."""
-    propio = re.sub(r"\D", "", str(ruc_empresa or ""))
-    todos = [l for l in str(texto or "").splitlines() if l.strip()]
-    # RUC de la EMPRESA: aparece junto a su razón social (BLACK RIDERS)
-    de_la_empresa = set()
-    for posicion, linea in enumerate(todos):
-        if "BLACK RIDERS" in _texto_sin_acentos(linea).upper():
-            for vecina in todos[max(0, posicion - 3):posicion + 4]:
-                de_la_empresa.update(re.findall(r"\d{11}", vecina))
-    for candidato in re.findall(r"\d{11}", str(texto or "")):
-        if candidato == propio or candidato in de_la_empresa:
-            continue
-        if not _ruc_valido(candidato):
-            continue
-        if propio and len(candidato) == len(propio) and \
-                sum(1 for a, b in zip(candidato, propio) if a != b) <= 2:
-            continue
-        return candidato
-    return ""
-def _limpiar_nombre_proveedor(linea):
-    """Quita los símbolos que deja el OCR ('c I (lb Golf Los' -> 'Golf Los')."""
-    palabras = re.findall(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1\u00dc]{3,}", str(linea or ""))
-    return " ".join(palabras).strip()
-
-
-def _nombre_del_proveedor(texto, ruc=""):
-    """Razón social del emisor ('' si el OCR no da nada confiable)."""
-    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
-    if not lineas:
-        return ""
-    # 1) una línea con sufijo societario en la parte de arriba
-    for linea in lineas[:12]:
-        if _nombre_parece_proveedor(linea) and _SUFIJO_EMPRESA.search(linea):
-            return _limpiar_nombre_proveedor(linea) or linea
-    # 2) la línea anterior a la del RUC
-    if ruc:
-        for i, linea in enumerate(lineas):
-            if str(ruc) in re.sub(r"\D", "", linea):
-                if i > 0 and _nombre_parece_proveedor(lineas[i - 1]):
-                    return _limpiar_nombre_proveedor(lineas[i - 1]) or lineas[i - 1]
-                break
-    # 3) la primera línea aceptable de arriba
-    for linea in lineas[:8]:
-        if _nombre_parece_proveedor(linea):
-            limpio = _limpiar_nombre_proveedor(linea)
-            if len(limpio.split()) >= 2:
-                return limpio
-            return linea
-    return ""
-
-
-def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
-    """Fecha del comprobante de pago leída por OCR ('' si no aparece).
-
-    Se buscan primero las fechas con rótulo ("Fecha de pago", "Fecha de
-    operación", "Fecha de transferencia", "Fecha"... ) y, si no hay, la primera
-    fecha válida del documento. Acepta 12/10/2026, 12-10-26 y "12 de octubre
-    del 2026". Devuelve la fecha en el formato configurado en el sistema.
-    """
-    if not str(texto or "").strip():
-        return ""
-    plano = " ".join(str(texto).upper().split())
-    # 💰 Los importes ("S/ 803.23") confunden la lectura de la fecha: se quitan.
-    plano = re.sub(r"(?:S/|S/\.|PEN|USD|US\$|\$)\s*[\d.,]+", " ", plano)
-    plano = " ".join(plano.split())
-    meses = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
-             "JULIO": 7, "AGOSTO": 8, "SETIEMBRE": 9, "SEPTIEMBRE": 9, "OCTUBRE": 10,
-             "NOVIEMBRE": 11, "DICIEMBRE": 12,
-             # Abreviaturas que usan los vouchers del banco ("12 OCT 2026")
-             "ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6, "JUL": 7,
-             "AGO": 8, "SET": 9, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12}
-    numeros = re.compile(r"\b(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2,4})\b")
-    # 📅 "12 de Octubre del 2026", "12 Octubre 2026" (vouchers del banco)
-    #    y "Lunes, 12 OCT 2026": el "de" es opcional y se aceptan abreviaturas.
-    escrito = re.compile(r"\b(\d{1,2})\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
-
-    import datetime as _dt
-    _hoy = _dt.date.today()
-
-    def _plausible(fecha):
-        """Descarta fechas imposibles (vencimientos lejanos tipo 2030)."""
-        try:
-            valor = _dt.date(int(fecha[2]), int(fecha[1]), int(fecha[0]))
-        except Exception:
-            return False
-        return _dt.date(_hoy.year - 5, 1, 1) <= valor <= _hoy + _dt.timedelta(days=200)
-
-    def leer(trozo):
-        encontrado = numeros.search(trozo)
-        if encontrado:
-            fecha = _fecha_valida(*encontrado.groups())
-            if fecha and _plausible(fecha):
-                return _formatear_fecha(*fecha, formato=formato)
-        encontrado = escrito.search(trozo)
-        if encontrado and encontrado.group(2) in meses:
-            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
-            if fecha:
-                return _formatear_fecha(*fecha, formato=formato)
-        return ""
-
-    # 1) Con rótulo de fecha: es lo más confiable
-    etiquetas = (r"FECHA\s+DE\s+PAGO", r"FECHA\s+DE\s+LA\s+OPERACI[OÓ]N",
-                 r"FECHA\s+DE\s+OPERACI[OÓ]N", r"FECHA\s+DE\s+TRANSACCI[OÓ]N",
-                 r"FECHA\s+DE\s+TRANSFERENCIA", r"FECHA\s+DE\s+DEP[OÓ]SITO",
-                 r"FECHA\s*[/\-]\s*HORA", r"FECHA\s+DE\s+EMISI[OÓ]N", r"FECHA\s+OPE",
-                 r"FECHA")
-    for etiqueta in etiquetas:
-        encontrado = re.search(etiqueta + r"[^0-9]{0,18}", plano)
-        if not encontrado:
-            continue
-        fecha = leer(plano[encontrado.end(): encontrado.end() + 45])
-        if fecha:
-            return fecha
-    # 2) La primera fecha válida del documento
-    for encontrado in numeros.finditer(plano):
-        fecha = _fecha_valida(*encontrado.groups())
-        if fecha and _plausible(fecha):
-            return _formatear_fecha(*fecha, formato=formato)
-    for encontrado in escrito.finditer(plano):
-        if encontrado.group(2) in meses:
-            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
-            if fecha:
-                return _formatear_fecha(*fecha, formato=formato)
-    return ""
-
-
-def _texto_del_soporte(ruta):
-    """Texto de un PDF (o de una foto) de soporte de pago."""
-    texto = ""
-    try:
-        import fitz
-        documento = fitz.open(ruta)
-        try:
-            texto = chr(10).join(pagina.get_text("text") or "" for pagina in documento)
-        finally:
-            documento.close()
-    except Exception:
-        texto = ""
-    if str(texto or "").strip():
-        return texto
-    try:
-        return leer_ocr_windows(ruta)
-    except Exception:
-        return ""
-
-
-def nombre_tercero_desde_texto(texto):
-    """Nombre de quien hizo el pago (el tercero) según su comprobante."""
-    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
-    etiquetas = ("ENVIADO POR", "ORDENANTE", "REMITENTE", "PAGADOR", "TITULAR",
-                 "NOMBRE DEL ORDENANTE", "DESDE", "BENEFICIARIO", "ENVIADO A",
-                 "A NOMBRE DE")
-
-    def _candidato(valor):
-        valor = re.sub(r"^(NOMBRE|SR|SRA|SRTA)\.?\s*[:\-]?\s*", "", str(valor or "").strip(),
-                       flags=re.I)
-        valor = re.sub(r"\s{2,}", " ", valor).strip(" :.-")
-        if len(valor) < 5:
-            return ""
-        alto = _texto_sin_acentos(valor).upper()
-        if "BLACK RIDERS" in alto or "RUC" in alto or "S/" in alto:
-            return ""
-        if re.search(r"\d{3,}", valor):
-            return ""
-        if not re.search(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,}", valor):
-            return ""
-        # 🚫 Palabras que son RÓTULOS del voucher, no nombres de personas/empresas
-        prohibidas = ("DESDE", "ENVIADO A", "ENVIADO POR", "ORDENANTE", "REMITENTE",
-                      "PAGADOR", "TITULAR", "BENEFICIARIO", "A NOMBRE DE", "NUMERO DE OPERACION",
-                      "OPERACION", "MONEDA", "CORRIENTE", "SOLES", "CUENTA", "COMISION",
-                      "TOTAL", "TOTAL COBRADO", "MONTO", "FECHA", "TRANSFERENCIA",
-                      "EXITOSA", "TRANSFERENCIA EXITOSA", "BCP", "BBVA", "INTERBANK",
-                      "MONEDA SOLES", "CORRIENTE SOLES")
-        if alto in prohibidas or any(alto.endswith(p) for p in ("SOLES", "OPERACION")):
-            return ""
-        if "OPERACI" in alto or "MONEDA" in alto:
-            return ""
-        # Un nombre real suele tener al menos dos palabras (Collie Paiser Fabiola C.)
-        if len(valor.split()) < 2:
-            return ""
-        return valor
-
-    for posicion, linea in enumerate(lineas):
-        alto = _texto_sin_acentos(linea).upper()
-        for etiqueta in etiquetas:
-            if etiqueta in alto:
-                resto = linea[alto.find(etiqueta) + len(etiqueta):]
-                candidato = _candidato(resto)
-                if not candidato:
-                    # se revisan las siguientes líneas (el OCR desordena las columnas)
-                    for salto in range(1, 4):
-                        if posicion + salto >= len(lineas):
-                            break
-                        candidato = _candidato(lineas[posicion + salto])
-                        if candidato:
-                            break
-                if candidato:
-                    return candidato
-    return ""
-
-
-def extraer_numero_operacion(texto):
-    """N° de operación / transacción leído del comprobante de pago (o '').
-
-    Reconoce los rótulos habituales de un voucher ("N° de operación",
-    "Nro. de transacción", "Código de operación", "N° de referencia"...)
-    y también las capturas de la banca por internet. Es tolerante a los
-    errores del OCR (operacin, Nro, N°, etc.).
-    """
-    if not str(texto or "").strip():
-        return ""
-    plano = " ".join(str(texto).upper().split())
-    patrones = (
-        r"(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*:?\s*(?:DE\s+|DEL\s+)?)?"
-        r"(?:OPERACI[O\u00d3]N|TRANSACCI[O\u00d3]N|TRANSFERENCIA|REFERENCIA|CONSTANCIA|"
-        r"DEP[O\u00d3]SITO|C[O\u00d3]DIGO)\s*(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*)?"
-        r"[:#\-]?\s*([A-Z0-9][A-Z0-9\-\.]{3,24})",
-        r"OPERACI[O\u00d3]N\s*N(?:RO|R|\u00ba|\u00b0)?\.?\s*[:#\-]?\s*([A-Z0-9\-\.]{4,24})",
-    )
-    for patron in patrones:
-        for encontrado in re.finditer(patron, plano):
-            candidato = _limpiar_numero_operacion(encontrado.group(1))
-            if re.fullmatch(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}", candidato):
-                continue                      # es una fecha
-            digitos = re.sub(r"\D", "", candidato)
-            if len(digitos) < 5:
-                # "2026" (un año del documento) no es un N° de operación
-                continue
-            return candidato
-    # 🔗 El OCR de los vouchers lee las columnas desordenadas: el N° de operación
-    #    puede venir partido ("4550" ... "05155128"). Se unen los dos grupos que
-    #    aparecen después del rótulo, siempre que sean del mismo tamaño razonable.
-    etiqueta = re.search(
-        r"(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*:?\s*(?:DE\s+|DEL\s+)?)?"
-        r"(?:OPERACI[O\u00d3]N|TRANSACCI[O\u00d3]N|REFERENCIA|CONSTANCIA|COMPROBANTE)\s*"
-        r"(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*)?[:#\-]?",
-        plano)
-    if etiqueta:
-        despues = [(m.start(), m.group(0))
-                   for m in re.finditer(r"\b\d{4,20}\b", plano) if m.start() >= etiqueta.end()]
-        if despues:
-            # Se descartan fechas y RUC (11 dígitos); entre los que quedan se toma
-            # el MÁS LARGO: el fragmento corto que aparece arriba (p. ej. "0069")
-            # es parte del número de cuenta, no de la operación.
-            candidatos = [v for _pos, v in despues if len(v) != 11 and len(v) >= 5]
-            if not candidatos:
-                candidatos = [v for _pos, v in despues if len(v) >= 5]
-            if not candidatos:
-                return ""          # sin número válido: mejor vacío que un año (2026)
-            if candidatos:
-                mejor = max(candidatos, key=len)
-                if 4 <= len(mejor) <= 20:
-                    return mejor
-
-    # Último recurso: la secuencia más larga de 6 a 20 dígitos, siempre que el
-    # comprobante parezca una transferencia/pago (no un RUC de 11).
-    if re.search(r"TRANSFERENCIA|INTERBANCARI|OPERACI|CONSTANCIA|DEPOSITO|DEP\u00d3SITO|VOUCHER", plano):
-        numeros = [n for n in re.findall(r"\b\d{6,20}\b", plano) if len(n) != 11]
-        if numeros:
-            return max(numeros, key=len)
-    return ""
-
 
 def extraer_datos_de_texto(texto):
     """Saca los datos de una factura del texto (de un PDF o del OCR del escaneo).
@@ -2485,6 +1600,362 @@ def extraer_datos_de_texto(texto):
 # =========================================================
 # CLASE: MINI CALENDARIO COMPARTIDO
 # =========================================================
+MESES_ESPANOL = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+                 "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+# =========================================================
+# 🗓️ AVISO de «mes sin datos»
+# ⚡ Nunca consulta la base mientras se pinta la tabla: usa una caché que se
+#    refresca en segundo plano. Así la interfaz no se queda pegada.
+# =========================================================
+_CACHE_MESES = {}
+_CACHE_TTL = 180          # segundos de validez
+_CACHE_EN_CURSO = set()
+
+
+def _consulta_mes_con_registros(tabla, columna="fecha"):
+    """Consulta la base (SOLO desde un hilo aparte)."""
+    try:
+        from conexion import conectar_db, liberar_conexion
+        conexion = conectar_db()
+        if not conexion:
+            return "", 0, ""
+        try:
+            cursor = conexion.cursor()
+            cursor.execute(
+                "SELECT SPLIT_PART(" + columna + ", '/', 2) AS mes, "
+                "SPLIT_PART(" + columna + ", '/', 3) AS anio, COUNT(*) AS n FROM " + tabla + " "
+                "WHERE " + columna + " IS NOT NULL AND " + columna + " <> '' "
+                "GROUP BY 1, 2 ORDER BY "
+                "NULLIF(SPLIT_PART(MAX(" + columna + "), '/', 3), '')::int DESC NULLS LAST, "
+                "NULLIF(SPLIT_PART(MAX(" + columna + "), '/', 2), '')::int DESC NULLS LAST LIMIT 1")
+            fila = cursor.fetchone()
+            cursor.close()
+        finally:
+            try:
+                liberar_conexion(conexion)
+            except Exception:
+                try:
+                    conexion.close()
+                except Exception:
+                    pass
+        if not fila:
+            return "", 0, ""
+        numero_mes, anio, cantidad = int(fila[0]), str(fila[1]), int(fila[2])
+        if 1 <= numero_mes <= 12:
+            return ("%s %s" % (MESES_ESPANOL[numero_mes - 1], anio), cantidad,
+                    "%02d/%s" % (numero_mes, anio))
+    except Exception as e:
+        print("Aviso - mes con registros:", e)
+    return "", 0, ""
+
+
+def _refrescar_cache_mes(tabla, columna="fecha"):
+    """Lanza la consulta en un hilo aparte (no toca la interfaz)."""
+    clave = (tabla, columna)
+    if clave in _CACHE_EN_CURSO:
+        return
+    _CACHE_EN_CURSO.add(clave)
+
+    def _tarea():
+        try:
+            _CACHE_MESES[clave] = (time.time(), _consulta_mes_con_registros(tabla, columna))
+        except Exception as e:
+            print("Aviso - refrescar meses:", e)
+        finally:
+            _CACHE_EN_CURSO.discard(clave)
+
+    try:
+        threading.Thread(target=_tarea, daemon=True).start()
+    except Exception:
+        _CACHE_EN_CURSO.discard(clave)
+
+
+def mes_con_registros(tabla, columna="fecha"):
+    """Igual que antes, pero usando la caché (para pruebas y usos directos)."""
+    clave = (tabla, columna)
+    info = _CACHE_MESES.get(clave)
+    if info and (time.time() - info[0]) < _CACHE_TTL:
+        return info[1]
+    return _consulta_mes_con_registros(tabla, columna)
+
+
+def _aviso_contenedor(tab):
+    try:
+        return tab.tabla.master
+    except Exception:
+        return None
+
+
+def _ocultar_aviso_vacio(tab):
+    try:
+        if getattr(tab, "_lbl_aviso_vacio", None) is not None:
+            tab._lbl_aviso_vacio.place_forget()
+            tab._btn_aviso_vacio.place_forget()
+    except Exception:
+        pass
+
+
+def _mostrar_aviso_vacio(tab, titulo, detalle, mes_sugerido):
+    try:
+        import customtkinter as _ctk
+        contenedor = _aviso_contenedor(tab)
+        if contenedor is None:
+            return
+        if getattr(tab, "_lbl_aviso_vacio", None) is None:
+            import tkinter as _tk
+            tab._lbl_aviso_vacio = _tk.Label(
+                contenedor, text="", font=("Arial", 12, "bold"),
+                bg="#ffffff", fg="#566573", justify="center", bd=1, relief="solid")
+            # etiqueta clicable (mucho más rápida que un botón la primera vez)
+            tab._btn_aviso_vacio = _tk.Label(
+                contenedor, text="", font=("Arial", 11, "bold", "underline"),
+                bg="#1f538d", fg="#ffffff", cursor="hand2", padx=12, pady=4)
+            tab._btn_aviso_vacio.bind("<Button-1>", lambda _e: _ir_al_mes_sugerido(tab))
+        tab._lbl_aviso_vacio.configure(text=titulo + (("\n" + detalle) if detalle else ""))
+        tab._lbl_aviso_vacio.place(relx=0.5, rely=0.42, anchor="center")
+        if mes_sugerido:
+            tab._mes_sugerido_vacio = mes_sugerido
+            tab._btn_aviso_vacio.configure(text="Ver " + mes_sugerido + "  ➜")
+            tab._btn_aviso_vacio.place(relx=0.5, rely=0.56, anchor="center")
+        else:
+            tab._btn_aviso_vacio.place_forget()
+    except Exception as e:
+        print("Aviso - mostrar:", e)
+
+
+def _ir_al_mes_sugerido(tab):
+    mes = getattr(tab, "_mes_sugerido_vacio", "")
+    if not mes:
+        return
+    try:
+        tab.combo_mes.set(mes)
+    except Exception:
+        pass
+    try:
+        tab.mes_filtro = mes
+        tab.pagina_actual = 1
+    except Exception:
+        pass
+    for nombre in ("cargar_datos_tabla", "cargar_datos_cobrar", "cargar_datos_nc",
+                   "cargar_datos_pagar", "cargar_datos"):
+        metodo = getattr(tab, nombre, None)
+        if metodo is None:
+            continue
+        try:
+            metodo(reset_pagina=True)
+        except TypeError:
+            metodo()
+        return
+
+
+def avisar_tabla_vacia(tab, datos, tabla_sql, que="registros", columna="fecha"):
+    """Si el mes elegido no tiene nada, avisa. NUNCA consulta la base aquí."""
+    try:
+        if datos:
+            _ocultar_aviso_vacio(tab)
+            return
+        mes_filtro = str(getattr(tab, "mes_filtro", "") or "")
+        if not mes_filtro.strip() or "Todos" in mes_filtro:
+            _ocultar_aviso_vacio(tab)
+            return
+
+        clave = (tabla_sql, columna)
+        info = _CACHE_MESES.get(clave)
+        if info and (time.time() - info[0]) < _CACHE_TTL:
+            mes, cantidad, patron = info[1]
+            if mes and mes.strip().lower() != mes_filtro.strip().lower():
+                _mostrar_aviso_vacio(
+                    tab, "No hay %s en %s." % (que, mes_filtro),
+                    "En %s hay %d — pulse para verlos" % (mes, cantidad), mes)
+                return
+            _mostrar_aviso_vacio(tab, "No hay %s en %s." % (que, mes_filtro), "", "")
+            return
+
+        # sin datos en la caché: se muestra el aviso simple y se consulta aparte
+        _mostrar_aviso_vacio(tab, "No hay %s en %s." % (que, mes_filtro), "", "")
+        _refrescar_cache_mes(tabla_sql, columna)
+    except Exception as e:
+        print("Aviso - tabla vacía:", e)
+
+
+# calienta la caché al abrir el programa (en segundo plano, sin tocar la interfaz)
+def _precalentar_cache_meses(tablas=("facturas_emitidas", "facturas_recibidas"),
+                             columna="fecha"):
+    for tabla in tablas:
+        _refrescar_cache_mes(tabla, columna)
+
+
+
+# =========================================================
+# 🔎 OCR del sistema (compatibilidad con Ventas y Compras)
+# =========================================================
+def leer_ocr_windows(ruta, idiomas="es-PE,es-MX,es-ES,en-US", dpi=250):
+    """Texto del comprobante usando el OCR del sistema (Windows/macOS).
+
+    Se apoya en el módulo 'escaner' (que ya sabe leer imagenes Y PDF).
+    Devuelve "" si no se pudo leer.
+    """
+    try:
+        import escaner as _esc
+        resultado = _esc.ocr_paginas([str(ruta)])
+        return _esc.texto_de_resultados(resultado) or ""
+    except Exception as e:
+        print("Aviso - leer_ocr_windows:", e)
+        return ""
+
+
+
+# =========================================================
+# 🔎 Lectura de comprobantes de pago (portado de Flota)
+# =========================================================
+def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
+    """Fecha del comprobante de pago leída por OCR ('' si no aparece).
+
+    Se buscan primero las fechas con rótulo ("Fecha de pago", "Fecha de
+    operación", "Fecha de transferencia", "Fecha"... ) y, si no hay, la primera
+    fecha válida del documento. Acepta 12/10/2026, 12-10-26 y "12 de octubre
+    del 2026". Devuelve la fecha en el formato configurado en el sistema.
+    """
+    if not str(texto or "").strip():
+        return ""
+    plano = " ".join(str(texto).upper().split())
+    meses = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
+             "JULIO": 7, "AGOSTO": 8, "SETIEMBRE": 9, "SEPTIEMBRE": 9, "OCTUBRE": 10,
+             "NOVIEMBRE": 11, "DICIEMBRE": 12,
+             # Abreviaturas que usan los vouchers del banco ("12 OCT 2026")
+             "ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6, "JUL": 7,
+             "AGO": 8, "SET": 9, "SEP": 9, "OCT": 10, "NOV": 11, "DIC": 12}
+    numeros = re.compile(r"\b(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2,4})\b")
+    # 📅 "12 de Octubre del 2026", "12 Octubre 2026" (vouchers del banco)
+    #    y "Lunes, 12 OCT 2026": el "de" es opcional y se aceptan abreviaturas.
+    escrito = re.compile(r"\b(\d{1,2})\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
+
+    import datetime as _dt
+    _hoy = _dt.date.today()
+
+    def _plausible(fecha):
+        """Descarta fechas imposibles (vencimientos lejanos tipo 2030)."""
+        try:
+            valor = _dt.date(int(fecha[2]), int(fecha[1]), int(fecha[0]))
+        except Exception:
+            return False
+        return (_dt.date(_hoy.year - 5, 1, 1) <= valor <= _hoy + _dt.timedelta(days=200))
+
+    def leer(trozo):
+        encontrado = numeros.search(trozo)
+        if encontrado:
+            fecha = _fecha_valida(*encontrado.groups())
+            if fecha and _plausible(fecha):
+                return _formatear_fecha(*fecha, formato=formato)
+        encontrado = escrito.search(trozo)
+        if encontrado and encontrado.group(2) in meses:
+            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
+            if fecha and _plausible(fecha):
+                return _formatear_fecha(*fecha, formato=formato)
+        return ""
+
+    # 1) Con rótulo de fecha: es lo más confiable
+    etiquetas = (r"FECHA\s+DE\s+PAGO", r"FECHA\s+DE\s+LA\s+OPERACI[OÓ]N",
+                 r"FECHA\s+DE\s+OPERACI[OÓ]N", r"FECHA\s+DE\s+TRANSACCI[OÓ]N",
+                 r"FECHA\s+DE\s+TRANSFERENCIA", r"FECHA\s+DE\s+DEP[OÓ]SITO",
+                 r"FECHA\s*[/\-]\s*HORA", r"FECHA\s+DE\s+EMISI[OÓ]N", r"FECHA\s+OPE",
+                 r"FECHA")
+    for etiqueta in etiquetas:
+        encontrado = re.search(etiqueta + r"[^0-9]{0,18}", plano)
+        if not encontrado:
+            continue
+        fecha = leer(plano[encontrado.end(): encontrado.end() + 45])
+        if fecha:
+            return fecha
+    # 2) La primera fecha válida del documento
+    for encontrado in numeros.finditer(plano):
+        fecha = _fecha_valida(*encontrado.groups())
+        if fecha and _plausible(fecha):
+            return _formatear_fecha(*fecha, formato=formato)
+    for encontrado in escrito.finditer(plano):
+        if encontrado.group(2) in meses:
+            fecha = _fecha_valida(encontrado.group(1), meses[encontrado.group(2)], encontrado.group(3))
+            if fecha and _plausible(fecha):
+                return _formatear_fecha(*fecha, formato=formato)
+    return ""
+
+def extraer_numero_operacion(texto):
+    """N° de operación / transacción leído del comprobante de pago (o '').
+
+    Reconoce los rótulos habituales de un voucher ("N° de operación",
+    "Nro. de transacción", "Código de operación", "N° de referencia"...)
+    y también las capturas de la banca por internet. Es tolerante a los
+    errores del OCR (operacin, Nro, N°, etc.).
+    """
+    if not str(texto or "").strip():
+        return ""
+    plano = " ".join(str(texto).upper().split())
+    patrones = (
+        r"(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*:?\s*(?:DE\s+|DEL\s+)?)?"
+        r"(?:OPERACI[O\u00d3]N|TRANSACCI[O\u00d3]N|TRANSFERENCIA|REFERENCIA|CONSTANCIA|"
+        r"DEP[O\u00d3]SITO|C[O\u00d3]DIGO)\s*(?:N(?:RO|R|\u00ba|\u00b0|O)?\.?\s*[\u00ba\u00b0]?\s*)?"
+        r"[:#\-]?\s*([A-Z0-9][A-Z0-9\-\.]{3,24})",
+        r"OPERACI[O\u00d3]N\s*N(?:RO|R|\u00ba|\u00b0)?\.?\s*[:#\-]?\s*([A-Z0-9\-\.]{4,24})",
+    )
+    for patron in patrones:
+        for encontrado in re.finditer(patron, plano):
+            candidato = _limpiar_numero_operacion(encontrado.group(1))
+            if re.fullmatch(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}", candidato):
+                continue                      # es una fecha
+            digitos = re.sub(r"\D", "", candidato)
+            if len(digitos) < 5:
+                # "2026" (un año del documento) no es un N° de operación
+                continue
+            return candidato
+    # Último recurso: la secuencia más larga de 6 a 20 dígitos, siempre que el
+    # comprobante parezca una transferencia/pago (no un RUC de 11).
+    if re.search(r"TRANSFERENCIA|INTERBANCARI|OPERACI|CONSTANCIA|DEPOSITO|DEP\u00d3SITO|VOUCHER", plano):
+        numeros = [n for n in re.findall(r"\b\d{6,20}\b", plano) if len(n) != 11]
+        if numeros:
+            return max(numeros, key=len)
+    return ""
+
+
+def _fecha_valida(dia, mes, anio):
+    """Devuelve (dd, mm, aaaa) si es una fecha real del calendario, o None."""
+    try:
+        dia, mes, anio = int(dia), int(mes), int(anio)
+    except Exception:
+        return None
+    if anio < 100:
+        anio += 2000
+    if not (2000 <= anio <= 2100):
+        return None
+    for d, m in ((dia, mes), (mes, dia)):      # se acepta DD/MM y, si no, MM/DD
+        try:
+            datetime(anio, m, d)
+            return d, m, anio
+        except Exception:
+            continue
+    return None
+
+def _formatear_fecha(dia, mes, anio, formato="DD/MM/AAAA"):
+    """Arma la fecha en el formato configurado en el sistema."""
+    try:
+        formato = str((CONFIG_REGIONAL or {}).get("formato_fecha", formato) or formato)
+    except Exception:
+        pass
+    if str(formato).upper().startswith("MM"):
+        return f"{mes:02d}/{dia:02d}/{anio}"
+    return f"{dia:02d}/{mes:02d}/{anio}"
+
+def _limpiar_numero_operacion(token):
+    """Deja el N° de operación legible (corrige O->0, I->1... si es numérico)."""
+    token = str(token or "").strip(" .,:;#-")
+    digitos = re.sub(r"\D", "", token)
+    if token and len(digitos) >= max(4, len(token) - 2):
+        tabla = str.maketrans({"O": "0", "o": "0", "Q": "0", "D": "0", "I": "1", "l": "1", "|": "1",
+                               "S": "5", "s": "5", "Z": "2", "B": "8", "G": "6", "A": "4", "T": "7"})
+        token = token.translate(tabla)
+    return token.upper()
+
 class CalendarioNativo(ctk.CTkToplevel):
     def __init__(self, parent, target_entry):
         super().__init__(parent)
@@ -3107,7 +2578,7 @@ class FacturasRecibidasTab:
                 ruc_prov = re.sub(r"\D", "", str(datos_txt.get("ruc") or ""))
                 # 🚫 ¿La factura está a nombre de OTRA empresa? Entonces no se registra
                 #    nada: tampoco el proveedor de esa otra empresa.
-                estado_destino_w, _msg_w = validar_destinatario(datos_txt)
+                estado_destino_w, _msg_w = validar_destinatario(datos_txt, None, resultado.get("texto", ""))
                 resultado["destino"] = estado_destino_w
                 if estado_destino_w == "ajeno":
                     resultado["proveedor"] = {"estado": "ajeno",
@@ -3151,7 +2622,7 @@ class FacturasRecibidasTab:
         self._escaneo_actual = resultado
         config = cargar_configuracion_regional()
         datos = extraer_datos_de_texto(resultado.get("texto", ""))
-        estado_destino, mensaje_destino = validar_destinatario(datos, config)
+        estado_destino, mensaje_destino = validar_destinatario(datos, config, resultado.get("texto", ""))
 
         ventana = reutilizar
         if ventana is None:
@@ -3381,7 +2852,15 @@ class FacturasRecibidasTab:
         btn_aplicar = ctk.CTkButton(f_botones, text="✅ Aplicar al formulario", height=36, font=("Arial", 12, "bold"),
                                     fg_color="#27ae60", hover_color="#1e8449", command=aplicar)
         btn_aplicar.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        if estado_destino == "ajeno":
+        if estado_destino == "dudoso":
+            # ⚠️ El OCR no pudo confirmar el destinatario: se permite continuar,
+            #    pero se avisa para que el usuario lo revise.
+            try:
+                btn_aplicar.configure(fg_color="#e67e22", hover_color="#ca6f1e",
+                                      text="⚠️ Continuar (revisar a nombre de quién está)")
+            except Exception:
+                pass
+        elif estado_destino == "ajeno":
             # 🚫 La factura es de otra empresa: no se puede pasar al formulario
             btn_aplicar.configure(state="disabled", fg_color="#95a5a6",
                                   text="🚫 Factura de otra empresa (rechazada)")
@@ -3496,8 +2975,14 @@ class FacturasRecibidasTab:
         if not datos:
             return
         # 🏢 ¿Está a nombre de la empresa configurada?
-        estado_destino, mensaje_destino = validar_destinatario(datos)
+        estado_destino, mensaje_destino = validar_destinatario(datos, None, (self._escaneo_actual or {}).get("texto", ""))
         self._destino_escaneo = estado_destino
+        if estado_destino == "dudoso":
+            if not messagebox.askyesno(
+                    "Destinatario dudoso",
+                    mensaje_destino + "\n\n¿Está seguro de que la factura es de nuestra empresa?",
+                    parent=ventana_para_mensaje(getattr(self, "main_root", None))):
+                return
         if estado_destino == "ajeno":
             return messagebox.showerror("Factura de otra empresa", mensaje_destino +
                                         "\n\nNo se cargó nada en el formulario.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
@@ -3644,7 +3129,7 @@ class FacturasRecibidasTab:
 
             # 🏢 Solo se aceptan facturas a nombre de la empresa configurada
             datos_txt = extraer_datos_de_texto(texto)
-            estado_destino, mensaje_destino = validar_destinatario(datos_txt)
+            estado_destino, mensaje_destino = validar_destinatario(datos_txt, None, resultado.get("texto", ""))
             if estado_destino == "ajeno":
                 self.bloquear_autocompletado_ruc = False
                 return messagebox.showerror("Factura de otra empresa",
@@ -4171,6 +3656,16 @@ class FacturasRecibidasTab:
             fg_color="#2980b9", hover_color="#1f618d",
             command=self.seleccionar_soporte_tercero)
         self.btn_soporte_tercero_pdf.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # 📱 Escanear el comprobante del tercero con el teléfono
+        #    (va en su PROPIA fila: en la misma se salía del ancho del panel)
+        _fila_soporte_tel = ctk.CTkFrame(self.f_cruzada, fg_color="transparent")
+        _fila_soporte_tel.pack(fill="x", padx=8, pady=(0, 8))
+        self.btn_soporte_tercero_tel = ctk.CTkButton(
+            _fila_soporte_tel, text="📱 Escanear con el teléfono",
+            font=("Arial", 11, "bold"), fg_color="#8e44ad", hover_color="#6c3483",
+            height=28, command=self.escanear_soporte_tercero_telefono)
+        self.btn_soporte_tercero_tel.pack(side="left", fill="x", expand=True)
         self.ruta_soporte_tercero = ""
         self._soporte_pago_escaneado = ""
 
@@ -4600,6 +4095,26 @@ class FacturasRecibidasTab:
             ventana.destroy()
         except Exception:
             pass
+
+
+    def escanear_soporte_tercero_telefono(self):
+        """📱 Escanea el comprobante del pago hecho por el tercero con el teléfono."""
+        try:
+            # 🪟 La pestaña no siempre es una ventana (puede ser un objeto
+            #    controlador): se usa la ventana principal como respaldo.
+            try:
+                padre = self.winfo_toplevel()
+            except Exception:
+                padre = getattr(self, "main_root", None)
+            import escaner_movil as _mov
+            _mov.escanear_reusando_flujo(
+                parent=padre,
+                config=cargar_configuracion_regional(),
+                funcion=self.escanear_soporte_tercero,
+                etiqueta="Compras · pago hecho por un tercero")
+        except Exception as e:
+            messagebox.showerror("Escáner por teléfono", str(e),
+                                 parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
     def escanear_soporte_tercero(self):
         """🖨️ Escanea el comprobante del pago al tercero y lo deja como soporte."""
@@ -5469,6 +4984,7 @@ class FacturasRecibidasTab:
                 self.btn_sig.configure(state="normal")
             else: 
                 self.btn_sig.configure(state="disabled")
+        avisar_tabla_vacia(self, rows, "facturas_recibidas", "facturas recibidas", "fecha")
 
     def abrir_datos_bancarios(self, event=None):
         """🖱️ CLIC DERECHO sobre una factura: abre la ventana con los datos bancarios
@@ -7556,6 +7072,7 @@ class CuentasPorPagarTab:
                 self.btn_sig.configure(state="normal")
             else: 
                 self.btn_sig.configure(state="disabled")
+        avisar_tabla_vacia(self, filas_resultado, "facturas_recibidas", "facturas por pagar", "fecha")
 
     def abrir_pago_de_factura(self, id_factura, escanear=False):
         """Abre 'Registrar Pago' para una factura concreta (la selecciona en la tabla).

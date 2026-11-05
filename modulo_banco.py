@@ -2949,6 +2949,10 @@ class ModuloBancoApp:
         self.btn_tx_escanear = ctk.CTkButton(r_comp, text="🖨 Escanear + OCR", width=160,
                                             command=lambda: self._procesar_comprobante_tx(escanear=True))
         self.btn_tx_escanear.pack(side="left", padx=4)
+        self.btn_tx_telefono = ctk.CTkButton(r_comp, text="📱 Teléfono", width=130,
+                                            fg_color="#8e44ad", hover_color="#6c3483",
+                                            command=self.escanear_comprobante_tx_telefono)
+        self.btn_tx_telefono.pack(side="left", padx=4)
         ctk.CTkButton(r_comp, text="Quitar adjunto", width=120,
                       command=self._quitar_comprobante_tx).pack(side="left", padx=4)
         self.lbl_tx_archivo = ctk.CTkLabel(r_comp, text="Sin comprobante", anchor="w")
@@ -3201,6 +3205,36 @@ class ModuloBancoApp:
                       ).pack(side="left", padx=6)
         ctk.CTkButton(barra, text="Cerrar", width=120, height=34, fg_color="#7f8c8d",
                       hover_color="#606b6b", command=ventana.destroy).pack(side="left")
+
+    def escanear_comprobante_tx_telefono(self):
+        """📱 Escanea el comprobante de la transferencia con el teléfono."""
+        try:
+            try:
+                padre = self.parent_frame
+            except Exception:
+                padre = None
+            import escaner_movil as _mov
+
+            def al_recibir(rutas, tipo):
+                if not rutas:
+                    return
+
+                def procesar():
+                    self._procesar_comprobante_tx(ruta=rutas[0])
+
+                try:
+                    (padre or self.parent_frame).after(0, procesar)
+                except Exception:
+                    procesar()
+
+            _mov.escanear_desde_telefono(padre, config=None, al_recibir=al_recibir,
+                                         titulo_extra="Banco · comprobante de transferencia")
+        except Exception as e:
+            try:
+                from tkinter import messagebox as _mb
+                _mb.showerror("Escáner por teléfono", str(e), parent=self.parent_frame)
+            except Exception:
+                print("Escáner por teléfono:", e)
 
     def _procesar_comprobante_tx(self, ruta="", escanear=False):
         if getattr(self, "_tx_ocr_ocupado", False):

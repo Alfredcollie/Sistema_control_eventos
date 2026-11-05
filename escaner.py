@@ -1456,45 +1456,165 @@ def _ocr_tesseract(rutas, idioma="spa+eng"):
         return None
 
 
+
+def _pdf_a_imagenes(rutas, dpi=300):
+    """Convierte los PDF a imagenes (PyMuPDF) para poder leerlos con OCR.
+
+    Devuelve (lista_de_rutas, temporales).  Si no se puede convertir un PDF,
+    se deja la ruta original (el motor de OCR simplemente no lo leerá).
+    """
+    salida, temporales = [], []
+    for ruta in rutas:
+        texto_ruta = str(ruta)
+        if not texto_ruta.lower().endswith(".pdf"):
+            salida.append(texto_ruta)
+            continue
+        try:
+            import fitz      # PyMuPDF
+        except Exception:
+            salida.append(texto_ruta)
+            continue
+        try:
+            documento = fitz.open(texto_ruta)
+            carpeta = tempfile.mkdtemp(prefix="ocr_pdf_")
+            for numero, pagina in enumerate(documento):
+                destino = os.path.join(carpeta, "pagina_%02d.png" % (numero + 1))
+                pagina.get_pixmap(dpi=dpi).save(destino)
+                # 🎛️ Se mejora la imagen: muchos escaneos salen "grises" y el OCR
+                #    lee mal (B por S, 1 por 9...). Se estira el contraste y se enfoca.
+                try:
+                    from PIL import Image, ImageFilter, ImageOps
+                    with Image.open(destino) as imagen:
+                        gris = ImageOps.grayscale(imagen)
+                        minimo, maximo = gris.getextrema()
+                        if maximo > minimo:
+                            gris = gris.point(lambda p: max(0, min(255, int(
+                                (p - minimo) * 255.0 / max(1, maximo - minimo)))))
+                        gris = gris.filter(ImageFilter.UnsharpMask(
+                            radius=2, percent=160, threshold=2))
+                        gris.save(destino, "PNG")
+                except Exception as e_img:
+                    print("Aviso - mejora de imagen del PDF:", e_img)
+                salida.append(destino)
+                temporales.append(destino)
+            documento.close()
+        except Exception as e:
+            print("Aviso - no se pudo convertir el PDF a imagenes:", e)
+            salida.append(texto_ruta)
+    return salida, temporales
+
+
+
+def _calidad_de_texto(texto):
+    """Puntúa qué tan creíble es el texto leído (para elegir el mejor giro)."""
+    import re as _re
+    texto = str(texto or "")
+    t = texto.upper()
+    puntos = 0
+    for clave in ("S/", "S /", "OPERACION", "OPERACIÓN", "MONTO", "RECIBIDO", "FECHA",
+                  "TOTAL", "IMPORTE", "TRANSFERENCIA", "BANCO", "CUENTA", "RUC", "DNI",
+                  "FACTURA", "BOLETA", "PAGO", "CLIENTE"):
+        if clave in t:
+            puntos += 12
+    # números largos (montos, números de operación, RUC)
+    puntos += len(_re.findall(r"\d{4,}", texto)) * 3
+    # palabras "de verdad" (4+ letras seguidas)
+    puntos += len(_re.findall(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]{4,}", texto))
+    return puntos
+
+def _girar_imagenes(rutas, grados):
+    """Copias giradas (archivos temporales) de las imagenes, para reintentar el OCR."""
+    salida = []
+    try:
+        from PIL import Image
+    except Exception:
+        return salida
+    try:
+        carpeta = tempfile.mkdtemp(prefix="ocr_giro_")
+        for indice, ruta in enumerate(rutas):
+            try:
+                with Image.open(ruta) as imagen:
+                    girada = imagen.rotate(grados, expand=True)
+                    destino = os.path.join(carpeta, "g%s_%02d.png" % (grados, indice))
+                    girada.save(destino, "PNG")
+                    salida.append(destino)
+            except Exception:
+                continue
+    except Exception as e:
+        print("Aviso - girar imagenes para OCR:", e)
+    return salida
+
 def ocr_paginas(rutas, idioma="Automático"):
     """Texto de cada imagen: {'ok', 'motor', 'idioma', 'resultados', 'error'}."""
     rutas = [str(r) for r in (rutas or []) if os.path.exists(str(r))]
     if not rutas:
         return {"ok": False, "motor": "", "idioma": "", "resultados": [], "error": "No hay imagenes para leer."}
 
-    if es_mac():
-        # macOS: motor nativo (Vision) por PyObjC; si no está, Tesseract; si no, se avisa
-        resultado = _ocr_vision(rutas, idioma)
-        if resultado:
-            return resultado
-        respaldo = _ocr_tesseract(rutas)
+    # 📄 Los PDF (los comprobantes guardados) se convierten a imagenes antes de leer
+    rutas, _temporales_pdf = _pdf_a_imagenes(rutas)
+
+    def _leer(lista):
+        """Intenta leer las imagenes con el motor del sistema."""
+        if es_mac():
+            resultado = _ocr_vision(lista, idioma)
+            if resultado:
+                return resultado
+            respaldo = _ocr_tesseract(lista)
+            if respaldo:
+                return respaldo
+            return {"ok": False, "motor": "", "idioma": "", "resultados": [],
+                    "error": "El OCR de macOS (Vision) no está disponible. Reinstale la aplicación "
+                             "o complete los datos a mano."}
+        if not es_windows():
+            resultado = _ocr_tesseract(lista)
+            if resultado:
+                return resultado
+            return {"ok": False, "motor": "", "idioma": "", "resultados": [],
+                    "error": "El OCR solo esta disponible en Windows y macOS (o instale Tesseract)."}
+
+        idioma_ps = {"Español": "Espanol", "Inglés": "Ingles"}.get(idioma, "Automatico")
+        res = _ejecutar_ps(_PS_OCR_WINDOWS, [idioma_ps] + lista, timeout=300)
+        if res.get("ok"):
+            resultados = res.get("resultados") or []
+            if isinstance(resultados, dict):
+                resultados = [resultados]
+            if any(str(r.get("texto") or "").strip() for r in resultados):
+                return {"ok": True, "motor": res.get("motor", "Windows OCR"),
+                        "idioma": res.get("idioma", ""), "resultados": resultados, "error": ""}
+        respaldo = _ocr_tesseract(lista)
         if respaldo:
             return respaldo
-        return {"ok": False, "motor": "", "idioma": "", "resultados": [],
-                "error": "El OCR de macOS (Vision) no está disponible. Reinstale la aplicación "
-                         "o complete los datos a mano."}
-    if not es_windows():
-        resultado = _ocr_tesseract(rutas)
-        if resultado:
-            return resultado
-        return {"ok": False, "motor": "", "idioma": "", "resultados": [],
-                "error": "El OCR solo esta disponible en Windows y macOS (o instale Tesseract)."}
+        return {"ok": False, "motor": res.get("motor", "Windows OCR"),
+                "idioma": res.get("idioma", ""), "resultados": res.get("resultados") or [],
+                "error": res.get("error") or "El OCR no reconocio texto en la imagen."}
 
-    idioma_ps = {"Español": "Espanol", "Inglés": "Ingles"}.get(idioma, "Automatico")
-    res = _ejecutar_ps(_PS_OCR_WINDOWS, [idioma_ps] + rutas, timeout=300)
-    if res.get("ok"):
-        resultados = res.get("resultados") or []
-        if isinstance(resultados, dict):
-            resultados = [resultados]
-        if any(str(r.get("texto") or "").strip() for r in resultados):
-            return {"ok": True, "motor": res.get("motor", "Windows OCR"), "idioma": res.get("idioma", ""),
-                    "resultados": resultados, "error": ""}
-    respaldo = _ocr_tesseract(rutas)
-    if respaldo:
-        return respaldo
-    return {"ok": False, "motor": res.get("motor", "Windows OCR"), "idioma": res.get("idioma", ""),
-            "resultados": res.get("resultados") or [],
-            "error": res.get("error") or "El OCR no reconocio texto en la imagen."}
+    resultado = _leer(rutas)
+
+    # 🔄 Si no se reconoció texto, se reintenta girando la imagen:
+    #    muchos comprobantes se fotografían/escanean de costado o de cabeza.
+    def _texto_de(res):
+        try:
+            return texto_de_resultados(res) or ""
+        except Exception:
+            return ""
+
+    if len(_texto_de(resultado).strip()) < 40:
+        mejor = resultado
+        mejor_calidad = _calidad_de_texto(_texto_de(resultado))
+        for grados in (90, 270, 180):
+            giradas = _girar_imagenes(rutas, grados)
+            if not giradas:
+                continue
+            intento = _leer(giradas)
+            calidad = _calidad_de_texto(_texto_de(intento))
+            if calidad > mejor_calidad + 10:      # sólo si mejora de verdad
+                mejor = dict(intento)
+                mejor["motor"] = str(intento.get("motor") or "Windows OCR") + " (girada %d°)" % grados
+                mejor_calidad = calidad
+        if mejor is not resultado:
+            resultado = mejor
+
+    return resultado
 
 
 def texto_de_resultados(resultado_ocr):

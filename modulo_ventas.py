@@ -10,6 +10,7 @@ VENTAS.PY (ENTERPRISE EDITION - RENDIMIENTO EXTREMO)
 - 🚀 FIX MAC/WIN: Escudo de variables locales en rutas para evitar colapso en Sincronización Nube.
 - 🚀 NUEVO: Botón unificado y Filtro de Reporte Avanzado Inteligente.
 """
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import customtkinter as ctk
@@ -433,6 +434,194 @@ def obtener_conexion_segura(parent=None, mostrar_aviso=True):
     if not conn and mostrar_aviso:
         messagebox.showwarning("Modo Lectura", "⚠️ No se pudo conectar a la base de datos.\n\nEl sistema está en MODO LECTURA.", parent=parent)
     return conn
+
+MESES_ESPANOL = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+                 "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+# =========================================================
+# 🗓️ AVISO de «mes sin datos»
+# ⚡ Nunca consulta la base mientras se pinta la tabla: usa una caché que se
+#    refresca en segundo plano. Así la interfaz no se queda pegada.
+# =========================================================
+_CACHE_MESES = {}
+_CACHE_TTL = 180          # segundos de validez
+_CACHE_EN_CURSO = set()
+
+
+def _consulta_mes_con_registros(tabla, columna="fecha"):
+    """Consulta la base (SOLO desde un hilo aparte)."""
+    try:
+        from conexion import conectar_db, liberar_conexion
+        conexion = conectar_db()
+        if not conexion:
+            return "", 0, ""
+        try:
+            cursor = conexion.cursor()
+            cursor.execute(
+                "SELECT SPLIT_PART(" + columna + ", '/', 2) AS mes, "
+                "SPLIT_PART(" + columna + ", '/', 3) AS anio, COUNT(*) AS n FROM " + tabla + " "
+                "WHERE " + columna + " IS NOT NULL AND " + columna + " <> '' "
+                "GROUP BY 1, 2 ORDER BY "
+                "NULLIF(SPLIT_PART(MAX(" + columna + "), '/', 3), '')::int DESC NULLS LAST, "
+                "NULLIF(SPLIT_PART(MAX(" + columna + "), '/', 2), '')::int DESC NULLS LAST LIMIT 1")
+            fila = cursor.fetchone()
+            cursor.close()
+        finally:
+            try:
+                liberar_conexion(conexion)
+            except Exception:
+                try:
+                    conexion.close()
+                except Exception:
+                    pass
+        if not fila:
+            return "", 0, ""
+        numero_mes, anio, cantidad = int(fila[0]), str(fila[1]), int(fila[2])
+        if 1 <= numero_mes <= 12:
+            return ("%s %s" % (MESES_ESPANOL[numero_mes - 1], anio), cantidad,
+                    "%02d/%s" % (numero_mes, anio))
+    except Exception as e:
+        print("Aviso - mes con registros:", e)
+    return "", 0, ""
+
+
+def _refrescar_cache_mes(tabla, columna="fecha"):
+    """Lanza la consulta en un hilo aparte (no toca la interfaz)."""
+    clave = (tabla, columna)
+    if clave in _CACHE_EN_CURSO:
+        return
+    _CACHE_EN_CURSO.add(clave)
+
+    def _tarea():
+        try:
+            _CACHE_MESES[clave] = (time.time(), _consulta_mes_con_registros(tabla, columna))
+        except Exception as e:
+            print("Aviso - refrescar meses:", e)
+        finally:
+            _CACHE_EN_CURSO.discard(clave)
+
+    try:
+        threading.Thread(target=_tarea, daemon=True).start()
+    except Exception:
+        _CACHE_EN_CURSO.discard(clave)
+
+
+def mes_con_registros(tabla, columna="fecha"):
+    """Igual que antes, pero usando la caché (para pruebas y usos directos)."""
+    clave = (tabla, columna)
+    info = _CACHE_MESES.get(clave)
+    if info and (time.time() - info[0]) < _CACHE_TTL:
+        return info[1]
+    return _consulta_mes_con_registros(tabla, columna)
+
+
+def _aviso_contenedor(tab):
+    try:
+        return tab.tabla.master
+    except Exception:
+        return None
+
+
+def _ocultar_aviso_vacio(tab):
+    try:
+        if getattr(tab, "_lbl_aviso_vacio", None) is not None:
+            tab._lbl_aviso_vacio.place_forget()
+            tab._btn_aviso_vacio.place_forget()
+    except Exception:
+        pass
+
+
+def _mostrar_aviso_vacio(tab, titulo, detalle, mes_sugerido):
+    try:
+        import customtkinter as _ctk
+        contenedor = _aviso_contenedor(tab)
+        if contenedor is None:
+            return
+        if getattr(tab, "_lbl_aviso_vacio", None) is None:
+            import tkinter as _tk
+            tab._lbl_aviso_vacio = _tk.Label(
+                contenedor, text="", font=("Arial", 12, "bold"),
+                bg="#ffffff", fg="#566573", justify="center", bd=1, relief="solid")
+            # etiqueta clicable (mucho más rápida que un botón la primera vez)
+            tab._btn_aviso_vacio = _tk.Label(
+                contenedor, text="", font=("Arial", 11, "bold", "underline"),
+                bg="#1f538d", fg="#ffffff", cursor="hand2", padx=12, pady=4)
+            tab._btn_aviso_vacio.bind("<Button-1>", lambda _e: _ir_al_mes_sugerido(tab))
+        tab._lbl_aviso_vacio.configure(text=titulo + (("\n" + detalle) if detalle else ""))
+        tab._lbl_aviso_vacio.place(relx=0.5, rely=0.42, anchor="center")
+        if mes_sugerido:
+            tab._mes_sugerido_vacio = mes_sugerido
+            tab._btn_aviso_vacio.configure(text="Ver " + mes_sugerido + "  ➜")
+            tab._btn_aviso_vacio.place(relx=0.5, rely=0.56, anchor="center")
+        else:
+            tab._btn_aviso_vacio.place_forget()
+    except Exception as e:
+        print("Aviso - mostrar:", e)
+
+
+def _ir_al_mes_sugerido(tab):
+    mes = getattr(tab, "_mes_sugerido_vacio", "")
+    if not mes:
+        return
+    try:
+        tab.combo_mes.set(mes)
+    except Exception:
+        pass
+    try:
+        tab.mes_filtro = mes
+        tab.pagina_actual = 1
+    except Exception:
+        pass
+    for nombre in ("cargar_datos_tabla", "cargar_datos_cobrar", "cargar_datos_nc",
+                   "cargar_datos_pagar", "cargar_datos"):
+        metodo = getattr(tab, nombre, None)
+        if metodo is None:
+            continue
+        try:
+            metodo(reset_pagina=True)
+        except TypeError:
+            metodo()
+        return
+
+
+def avisar_tabla_vacia(tab, datos, tabla_sql, que="registros", columna="fecha"):
+    """Si el mes elegido no tiene nada, avisa. NUNCA consulta la base aquí."""
+    try:
+        if datos:
+            _ocultar_aviso_vacio(tab)
+            return
+        mes_filtro = str(getattr(tab, "mes_filtro", "") or "")
+        if not mes_filtro.strip() or "Todos" in mes_filtro:
+            _ocultar_aviso_vacio(tab)
+            return
+
+        clave = (tabla_sql, columna)
+        info = _CACHE_MESES.get(clave)
+        if info and (time.time() - info[0]) < _CACHE_TTL:
+            mes, cantidad, patron = info[1]
+            if mes and mes.strip().lower() != mes_filtro.strip().lower():
+                _mostrar_aviso_vacio(
+                    tab, "No hay %s en %s." % (que, mes_filtro),
+                    "En %s hay %d — pulse para verlos" % (mes, cantidad), mes)
+                return
+            _mostrar_aviso_vacio(tab, "No hay %s en %s." % (que, mes_filtro), "", "")
+            return
+
+        # sin datos en la caché: se muestra el aviso simple y se consulta aparte
+        _mostrar_aviso_vacio(tab, "No hay %s en %s." % (que, mes_filtro), "", "")
+        _refrescar_cache_mes(tabla_sql, columna)
+    except Exception as e:
+        print("Aviso - tabla vacía:", e)
+
+
+# calienta la caché al abrir el programa (en segundo plano, sin tocar la interfaz)
+def _precalentar_cache_meses(tablas=("facturas_emitidas", "facturas_recibidas"),
+                             columna="fecha"):
+    for tabla in tablas:
+        _refrescar_cache_mes(tabla, columna)
+
+
 
 class CalendarioNativo(ctk.CTkToplevel):
     def __init__(self, parent, target_entry):
@@ -1994,10 +2183,19 @@ class FacturasEmitidasTab:
             else: self.btn_ant.configure(state="disabled")
             if len(filas_resultado) == self.registros_por_pagina: self.btn_sig.configure(state="normal")
             else: self.btn_sig.configure(state="disabled")
+        avisar_tabla_vacia(self, filas_resultado, "facturas_emitidas", "facturas")
 
     # =========================================================
     # 🖱️ MENÚ DE CLIC DERECHO EN LA FACTURA
     # =========================================================
+
+    # ---------------- aviso de mes sin datos
+
+
+
+
+
+
     def _datos_factura_venta(self, id_factura):
         """(ruta_local, enlace_sunat, comprobantes) de una factura de venta."""
         ruta_local, enlace, comprobantes = "", "", []
@@ -3152,15 +3350,20 @@ class CuentasPorCobrarTab:
                 lbl_comp.configure(text="Sin comprobante cargado", text_color="#999999")
         def aplicar_ocr(ruta):
             """🔎 Lee el comprobante con OCR y rellena el monto y el N° de operación."""
+            # 🔎 Se importa cada ayudante por separado: si a algún módulo le falta
+            #    uno, el OCR igual funciona (antes se cortaba todo y no pasaba nada).
+            leer_ocr_windows = extraer_numero_operacion = monto_del_comprobante = None
             try:
-                from modulo_compras import (leer_ocr_windows, extraer_numero_operacion,
-                                            monto_del_comprobante)
+                import modulo_compras as _mc
+                leer_ocr_windows = getattr(_mc, "leer_ocr_windows", None)
+                extraer_numero_operacion = getattr(_mc, "extraer_numero_operacion", None)
+                monto_del_comprobante = getattr(_mc, "monto_del_comprobante", None)
             except Exception as _e_imp:
-                print("[OCR comprobante] no se pudo importar OCR:", _e_imp)
-                return
+                print("[OCR comprobante] aviso al cargar ayudantes:", _e_imp)
             try:
-                _texto = leer_ocr_windows(ruta)
-                if not _texto.strip():
+                _texto = leer_ocr_windows(ruta) if leer_ocr_windows else ""
+                # si el primer lector devolvió casi nada, se prueba el OCR del sistema
+                if len(str(_texto or "").strip()) < 20:
                     try:
                         _texto = escaner.texto_de_resultados(escaner.ocr_paginas([ruta]))
                     except Exception:
@@ -3172,11 +3375,11 @@ class CuentasPorCobrarTab:
                 return
             _num, _monto = "", 0.0
             try:
-                _num = extraer_numero_operacion(_texto) or ""
+                _num = (extraer_numero_operacion(_texto) or "") if extraer_numero_operacion else ""
             except Exception:
                 _num = ""
             try:
-                _monto = monto_del_comprobante(_texto) or 0.0
+                _monto = (monto_del_comprobante(_texto) or 0.0) if monto_del_comprobante else 0.0
             except Exception:
                 _monto = 0.0
             _avisos = []
@@ -3258,6 +3461,29 @@ class CuentasPorCobrarTab:
         ctk.CTkButton(f_comp, text="🖨️ Escanear comprobante", height=30, font=("Arial", 11, "bold"),
                       fg_color="#0e7490", hover_color="#155e75",
                       command=escanear_comp).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        # 📱 Escanear el comprobante del cobro con el teléfono (fila propia)
+        def escanear_comp_telefono():
+            """📱 Abre el QR y espera la foto del teléfono."""
+            try:
+                import escaner_movil as _mov
+                try:
+                    _cfg = cargar_configuracion_regional()
+                except Exception:
+                    _cfg = None
+                _mov.escanear_reusando_flujo(
+                    parent=v, config=_cfg, funcion=escanear_comp,
+                    etiqueta="Ventas · cobro de varias facturas")
+            except Exception as e:
+                messagebox.showerror("Escáner por teléfono", str(e), parent=v)
+
+        _fila_comp_tel = ctk.CTkFrame(f, fg_color="transparent")
+        _fila_comp_tel.pack(fill="x", pady=(4, 0))
+        ctk.CTkButton(_fila_comp_tel, text="📱 Escanear con el teléfono",
+                      height=30, font=("Arial", 11, "bold"),
+                      fg_color="#8e44ad", hover_color="#6c3483",
+                      command=escanear_comp_telefono
+                      ).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(f_comp, text="👁️ Ver", width=64, height=30, font=("Arial", 11, "bold"),
                       fg_color="#5d6d7e", hover_color="#4a5967",
                       command=lambda: (abrir_documento(estado_comp["ruta"])
@@ -3440,6 +3666,7 @@ class CuentasPorCobrarTab:
             else: self.btn_ant.configure(state="disabled")
             if len(filas_resultado) == self.registros_por_pagina: self.btn_sig.configure(state="normal")
             else: self.btn_sig.configure(state="disabled")
+        avisar_tabla_vacia(self, filas_resultado, "facturas_emitidas", "facturas por cobrar")
 
     def _refrescar_listas_cobro(self):
         """Refresca la lista de cobros y la de facturas (para el color de cobrado)."""
@@ -3650,15 +3877,18 @@ class CuentasPorCobrarTab:
                 lbl_comp.configure(text="Sin comprobante cargado", text_color="#999999")
 
         def aplicar_ocr(ruta):
+            leer_ocr_windows = extraer_numero_operacion = monto_del_comprobante = None
             try:
-                from modulo_compras import (leer_ocr_windows, extraer_numero_operacion,
-                                            monto_del_comprobante)
+                import modulo_compras as _mc
+                leer_ocr_windows = getattr(_mc, "leer_ocr_windows", None)
+                extraer_numero_operacion = getattr(_mc, "extraer_numero_operacion", None)
+                monto_del_comprobante = getattr(_mc, "monto_del_comprobante", None)
             except Exception as e_imp:
-                print("[OCR comprobante] no se pudo importar OCR:", e_imp)
-                return
+                print("[OCR comprobante] aviso al cargar ayudantes:", e_imp)
             try:
-                _texto = leer_ocr_windows(ruta)
-                if not _texto.strip():
+                _texto = leer_ocr_windows(ruta) if leer_ocr_windows else ""
+                # si el primer lector devolvió casi nada, se prueba el OCR del sistema
+                if len(str(_texto or "").strip()) < 20:
                     try:
                         _texto = escaner.texto_de_resultados(escaner.ocr_paginas([ruta]))
                     except Exception:
@@ -3670,11 +3900,11 @@ class CuentasPorCobrarTab:
                 return
             _num, _monto = "", 0.0
             try:
-                _num = extraer_numero_operacion(_texto) or ""
+                _num = (extraer_numero_operacion(_texto) or "") if extraer_numero_operacion else ""
             except Exception:
                 _num = ""
             try:
-                _monto = monto_del_comprobante(_texto) or 0.0
+                _monto = (monto_del_comprobante(_texto) or 0.0) if monto_del_comprobante else 0.0
             except Exception:
                 _monto = 0.0
             _avisos = []
@@ -3745,6 +3975,28 @@ class CuentasPorCobrarTab:
         ctk.CTkButton(f_comp, text="🖨️ Escanear comprobante", height=30, font=("Arial", 11, "bold"),
                       fg_color="#0e7490", hover_color="#155e75",
                       command=escanear_comp).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        # 📱 Escanear el comprobante del cobro con el teléfono (fila propia)
+        def escanear_comp_telefono():
+            """📱 Abre el QR y espera la foto del teléfono."""
+            try:
+                import escaner_movil as _mov
+                try:
+                    _cfg = cargar_configuracion_regional()
+                except Exception:
+                    _cfg = None
+                _mov.escanear_reusando_flujo(
+                    parent=v, config=_cfg, funcion=escanear_comp,
+                    etiqueta="Ventas · cobro de factura")
+            except Exception as e:
+                messagebox.showerror("Escáner por teléfono", str(e), parent=v)
+
+        _fila_cobro_tel = ctk.CTkFrame(f, fg_color="transparent")
+        _fila_cobro_tel.pack(fill="x", pady=(4, 0))
+        ctk.CTkButton(_fila_cobro_tel, text="📱 Escanear con el teléfono",
+                      height=30, font=("Arial", 11, "bold"),
+                      fg_color="#8e44ad", hover_color="#6c3483",
+                      command=escanear_comp_telefono
+                      ).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(f_comp, text="👁️ Ver", width=64, height=30, font=("Arial", 11, "bold"),
                       fg_color="#5d6d7e", hover_color="#4a5967",
                       command=lambda: (abrir_documento(estado_comp["ruta"])

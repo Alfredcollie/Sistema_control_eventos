@@ -1407,6 +1407,70 @@ def inicializar_seguridad_db():
     threading.Thread(target=tarea_init, daemon=True).start()
 
 class ControlGeneralEventos:
+    # =========================================================
+    # 🛡️ VIGILANTE DE BLOQUEOS MODALES COLGADOS
+    # =========================================================
+    def _vigilar_bloqueos_colgados(self):
+        """Suelta un bloqueo modal que quedó apuntando a una ventana inexistente.
+
+        Al abrir y cerrar varias ventanas seguidas (por ejemplo al cancelar
+        facturas) un bloqueo modal puede quedar apuntando a una ventana ya
+        destruida: la aplicación sigue viva pero NO responde a los clics.
+        Se da un margen de 3 revisiones para no molestar a los diálogos que
+        recién se están abriendo.
+        """
+        try:
+            actual = None
+            try:
+                actual = self.root.grab_current()
+            except Exception:
+                actual = None
+
+            if actual is None:
+                self._aviso_grab_veces = 0
+            else:
+                existe = visible = False
+                try:
+                    existe = bool(actual.winfo_exists())
+                    visible = bool(actual.winfo_viewable())
+                except Exception:
+                    existe = visible = False
+
+                if not existe:
+                    self._liberar_grab_colgado(actual)      # ventana destruida
+                    self._aviso_grab_veces = 0
+                elif not visible:
+                    veces = getattr(self, "_aviso_grab_veces", 0) + 1
+                    self._aviso_grab_veces = veces
+                    if veces >= 3:                          # oculta por varios segundos
+                        self._liberar_grab_colgado(actual)
+                        self._aviso_grab_veces = 0
+                else:
+                    self._aviso_grab_veces = 0
+        except Exception:
+            pass
+        try:
+            self.root.after(1200, self._vigilar_bloqueos_colgados)
+        except Exception:
+            pass
+
+    def _liberar_grab_colgado(self, ventana):
+        """Suelta el bloqueo modal (sobre la ventana que lo tiene)."""
+        liberado = False
+        try:
+            ventana.grab_release()
+            liberado = True
+        except Exception:
+            liberado = False
+        if not liberado:
+            try:
+                self.root.grab_release()
+                liberado = True
+            except Exception:
+                pass
+        if liberado:
+            print("[Vigilante] se liberó un bloqueo modal colgado.")
+
     def __init__(self, root):
         self.root = root
         # 🪟 CustomTkinter "repinta" la barra de título de la ventana principal
@@ -1831,6 +1895,11 @@ class ControlGeneralEventos:
             self.usuario_activo = "No autenticado"
             self.rol_activo = "Ninguno"
             self.permisos_activos = {}
+            # 🛡️ Vigilante de bloqueos modales colgados
+            try:
+                self.root.after(2000, self._vigilar_bloqueos_colgados)
+            except Exception:
+                pass
             self.root.withdraw()
             self.abrir_ventana_login()
 

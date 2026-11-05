@@ -16,6 +16,7 @@ Solo red local (intranet): el servidor escucha en la LAN, nunca en internet.
 
 import json
 import os
+import queue
 import secrets
 import socket
 import threading
@@ -443,31 +444,22 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
     barra.pack(pady=2)
     barra.start()
 
+    # 🧵 La foto llega en el hilo del servidor: NO se toca Tkinter desde ahí.
+    #    Se deja en una cola y el hilo principal (Tk) la procesa.
+    cola = queue.Queue()
+    estado_cierre = {"cerrado": False}
+
     def avisar(texto):
-        def _actualizar():
-            try:
-                lbl_estado.configure(text=texto)
-                if "cerrado" in str(texto).lower() or "recibida" in str(texto).lower():
-                    try:
-                        barra.stop()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        """Se llama desde el hilo del servidor: solo encola."""
         try:
-            ventana.after(0, _actualizar)
+            cola.put(("aviso", texto))
         except Exception:
             pass
 
     def recibir(rutas, tipo):
-        if al_recibir:
-            try:
-                al_recibir(rutas, tipo)
-            except Exception as e:
-                print("[Escáner móvil] error al procesar:", e)
-        avisar("✅ Foto recibida. Procesando…")
+        """Se llama desde el hilo del servidor: solo encola."""
         try:
-            ventana.after(1200, cerrar)
+            cola.put(("documento", rutas, tipo))
         except Exception:
             pass
 
@@ -475,10 +467,10 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
     ok, resultado = servidor.iniciar()
 
     def cerrar():
-        try:
-            servidor.detener()
-        except Exception:
-            pass
+        """Cierra la ventana y detiene el servidor (una sola vez)."""
+        if estado_cierre["cerrado"]:
+            return
+        estado_cierre["cerrado"] = True
         try:
             ventana.grab_release()
         except Exception:
@@ -492,6 +484,60 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
             ventana.destroy()
         except Exception:
             pass
+        # el servidor se detiene aparte para que su espera no congele la interfaz
+        def _detener():
+            try:
+                servidor.detener()
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_detener, daemon=True).start()
+        except Exception:
+            _detener()
+
+    def _procesar_cola():
+        """Revisa la cola DESDE el hilo principal."""
+        try:
+            while True:
+                try:
+                    elemento = cola.get_nowait()
+                except queue.Empty:
+                    break
+                if elemento[0] == "aviso":
+                    texto = elemento[1]
+                    try:
+                        lbl_estado.configure(text=str(texto))
+                        if "cerrado" in str(texto).lower() or "recibida" in str(texto).lower():
+                            try:
+                                barra.stop()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                elif elemento[0] == "documento":
+                    rutas, tipo = elemento[1], elemento[2]
+                    try:
+                        lbl_estado.configure(text="✅ Foto recibida. Procesando…")
+                        barra.stop()
+                    except Exception:
+                        pass
+                    if al_recibir:
+                        try:
+                            al_recibir(rutas, tipo)
+                        except Exception as e:
+                            print("[Escáner móvil] error al procesar:", e)
+                    try:
+                        ventana.after(900, cerrar)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print("[Escáner móvil] cola:", e)
+        finally:
+            try:
+                if not estado_cierre["cerrado"] and ventana.winfo_exists():
+                    ventana.after(150, _procesar_cola)
+            except Exception:
+                pass
 
     pie = ctk.CTkFrame(ventana, fg_color="transparent")
     pie.pack(side="bottom", pady=10)
@@ -518,19 +564,17 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
                   font=(familia, 12, "bold"), fg_color="#c0392b", hover_color="#922b21",
                   command=cerrar).pack(side="left")
 
+    try:
+        ventana.after(150, _procesar_cola)
+    except Exception:
+        pass
+
     if not ok:
         avisar("⚠️ " + str(resultado))
         return ventana
 
     lbl_url.configure(text=servidor.url())
     lbl_pin.configure(text="PIN: %s" % servidor.pin)
-
-    try:
-        from PIL import ImageTk
-        with PIL_OK_IMPORT if False else _nada():
-            pass
-    except Exception:
-        pass
 
     # --- los dos QR
     try:
@@ -582,9 +626,25 @@ def escanear_reusando_flujo(parent=None, config=None, funcion=None, etiqueta="")
     except Exception as e:
         raise RuntimeError("No se pudo cargar el módulo de escaneo: %s" % e)
 
+    # se mira ANTES de abrir la ventana del teléfono (que toma su propio bloqueo)
     tenia_grab = [False]
+    try:
+        if parent is not None:
+            tenia_grab[0] = bool(parent.grab_current() == parent)
+    except Exception:
+        tenia_grab[0] = False
 
     def al_recibir(rutas, tipo):
+        """Ya llega en el hilo principal: se puede tocar la interfaz con seguridad."""
+        try:
+            if parent is not None:
+                try:
+                    parent.grab_release()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         def lanzar():
             original = getattr(_escaner, "escanear", None)
 
@@ -600,31 +660,19 @@ def escanear_reusando_flujo(parent=None, config=None, funcion=None, etiqueta="")
             finally:
                 if original is not None:
                     _escaner.escanear = original
-                devolver_bloqueo()
+                # se devuelve el bloqueo modal solo si la ventana sigue viva
+                try:
+                    if parent is not None and tenia_grab[0] and parent.winfo_exists():
+                        parent.after(300, lambda: parent.grab_set())
+                except Exception:
+                    pass
 
-        def devolver_bloqueo():
-            """Vuelve a dejar la ventana del diálogo como modal."""
-            try:
-                if parent is not None and tenia_grab[0]:
-                    parent.after(300, lambda: parent.grab_set())
-            except Exception:
-                pass
-
-        def en_la_interfaz():
-            # se libera el bloqueo modal para poder usar la ventana del teléfono
-            try:
-                if parent is not None:
-                    tenia_grab[0] = bool(parent.grab_current() == parent)
-                    parent.grab_release()
-            except Exception:
-                pass
-            threading.Thread(target=lanzar, daemon=True).start()
-
+        # se ejecuta en el hilo principal (Tkinter no admite otro hilo)
         try:
             destino = parent if parent is not None else __import__("tkinter")._default_root
-            destino.after(0, en_la_interfaz)
+            destino.after(0, lanzar)
         except Exception:
-            en_la_interfaz()
+            lanzar()
 
     return escanear_desde_telefono(parent, config, al_recibir=al_recibir,
                                    titulo_extra=etiqueta)

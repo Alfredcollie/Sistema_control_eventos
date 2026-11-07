@@ -2159,6 +2159,47 @@ class ControlGeneralEventos:
         except Exception:
             pass
 
+    # =========================================================
+    # 🔔 LETRERO FLOTANTE (1,5 s) — sin mensajes que bloqueen
+    # =========================================================
+    def _letrero_modulo(self, clave, texto, milisegundos=1500):
+        """Muestra un letrero sobre la ventana del módulo y lo quita solo."""
+        ventana = self.ventanas_modulos.get(clave)
+        if ventana is None:
+            return
+        try:
+            anterior = getattr(ventana, "_letrero_actual", None)
+            if anterior is not None:
+                try:
+                    anterior.destroy()
+                except Exception:
+                    pass
+                ventana._letrero_actual = None
+
+            letrero = ctk.CTkLabel(ventana, text=str(texto),
+                                   font=("Arial", 13, "bold"), text_color="#ffffff",
+                                   fg_color="#27ae60", corner_radius=10,
+                                   height=40, width=400)
+            letrero.place(relx=0.5, y=56, anchor="n")
+            try:
+                letrero.lift()
+            except Exception:
+                pass
+            ventana._letrero_actual = letrero
+
+            def _quitar():
+                try:
+                    if letrero.winfo_exists():
+                        letrero.destroy()
+                except Exception:
+                    pass
+                if getattr(ventana, "_letrero_actual", None) is letrero:
+                    ventana._letrero_actual = None
+
+            ventana.after(int(milisegundos), _quitar)
+        except Exception as e:
+            print("Aviso - letrero del módulo:", e)
+
     def refrescar_ventana_modulo(self, clave, aviso=False):
         """🔄 Vuelve a cargar los datos del módulo abierto.
 
@@ -2174,11 +2215,26 @@ class ControlGeneralEventos:
         def _hacer():
             recargados = refrescar_instancia_modulo(instancia)
             if aviso:
-                if recargados:
-                    messagebox.showinfo("Actualizar", "✅ Información actualizada.")
-                else:
-                    messagebox.showinfo("Actualizar",
-                                        "El módulo ya está al día (usa sus propios botones de actualizar).")
+                # 🔔 letrero de 1,5 s (antes: un mensaje que había que cerrar)
+                try:
+                    ventana_mod = self.ventanas_modulos.get(clave)
+                    if ventana_mod is not None:
+                        try:
+                            if str(ventana_mod.state()) == "iconic":
+                                ventana_mod.deiconify()
+                        except Exception:
+                            pass
+                        try:
+                            ventana_mod.lift()
+                        except Exception:
+                            pass
+                    self._letrero_modulo(
+                        clave,
+                        "✅ Información actualizada" if recargados
+                        else "✅ El módulo ya está al día",
+                        1500)
+                except Exception as e_letrero:
+                    print("Aviso - letrero al actualizar:", e_letrero)
 
         try:
             self.root.after(60, _hacer)      # se deja que la ventana pinte primero

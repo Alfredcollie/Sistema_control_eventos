@@ -72,6 +72,22 @@ def maximizar_ventana(ventana):
             pass
 
 
+
+# =========================================================
+# 🧹 TEXTO LIMPIO PARA LA TABLA
+# =========================================================
+def _texto_limpio(valor):
+    """Quita saltos de línea, tabuladores y espacios repetidos.
+
+    Si un dato trae un salto de línea (pegado desde otro sitio), en la tabla se
+    dibujaba en dos renglones y se montaba sobre la fila siguiente.
+    """
+    if valor is None:
+        return ""
+    texto = str(valor).replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    return " ".join(texto.split())
+
+
 class ToolTip:
     def __init__(self, widget, text):
         self.widget = widget
@@ -508,6 +524,8 @@ class SistemaClientes:
         contador_visual = offset + 1
         for row in datos: 
             valores = (contador_visual, row[0], row[1], row[2], row[3], row[4], row[5], row[6])
+            # 🧹 se limpian los datos: evita texto "montado" si traen saltos de línea
+            valores = tuple(_texto_limpio(v) for v in valores)
             self.tabla.insert("", tk.END, values=valores)
             contador_visual += 1
             
@@ -814,15 +832,16 @@ class SistemaClientes:
             messagebox.showwarning("Modo Lectura", "Estás sin conexión a internet.\nEl sistema no permite guardar nuevos registros.")
             return
             
-        ruc = self.ent_ruc.get().strip()
-        empresa = self.ent_empresa.get().strip()
-        comercial = self.ent_comercial.get().strip()
-        direccion = self.ent_direccion.get().strip()
-        contacto = self.ent_contacto.get().strip()
-        telefono = self.ent_telefono.get().strip()
-        correo = self.ent_correo.get().strip()
-        web = self.ent_web.get().strip()
-        notas = self.txt_notas.get("1.0", "end-1c").strip()
+        # 🧹 se limpian los textos (sin saltos de línea ni espacios repetidos)
+        ruc = _texto_limpio(self.ent_ruc.get())
+        empresa = _texto_limpio(self.ent_empresa.get())
+        comercial = _texto_limpio(self.ent_comercial.get())
+        direccion = _texto_limpio(self.ent_direccion.get())
+        contacto = _texto_limpio(self.ent_contacto.get())
+        telefono = _texto_limpio(self.ent_telefono.get())
+        correo = _texto_limpio(self.ent_correo.get())
+        web = _texto_limpio(self.ent_web.get())
+        notas = _texto_limpio(self.txt_notas.get("1.0", "end-1c"))
         
         try:
             limite_val = self.ent_limite.get().strip().replace(',', '')
@@ -1037,14 +1056,14 @@ class SistemaClientes:
         txt_e_notes.bind("<KeyRelease>", limitar_caracteres_edit)
 
         def ejecutar_update():
-            if len(ent_e_ruc.get().strip()) != 11 or not ent_e_ruc.get().strip().isdigit():
+            if len(_texto_limpio(ent_e_ruc.get())) != 11 or not _texto_limpio(ent_e_ruc.get()).isdigit():
                 messagebox.showwarning("Error", "El RUC de la empresa debe tener exactamente 11 números.", parent=v_edit)
                 return
-            if not ent_e_empresa.get().strip():
+            if not _texto_limpio(ent_e_empresa.get()):
                 messagebox.showwarning("Error", "Debe ingresar el Nombre de la Empresa.", parent=v_edit)
                 return
             try:
-                limite_val = ent_e_limite.get().strip().replace(',', '')
+                limite_val = _texto_limpio(ent_e_limite.get()).replace(',', '')
                 limite_credito = float(limite_val) if limite_val else 0.0
             except ValueError:
                 return messagebox.showerror("Error", "El límite de crédito debe ser un número válido.", parent=v_edit)
@@ -1059,9 +1078,9 @@ class SistemaClientes:
                     UPDATE clientes 
                     SET ruc=%s, nombre_empresa=%s, razon_comercial=%s, direccion_fiscal=%s, persona_contacto=%s, telefono=%s, correo=%s, pagina_web=%s, limite_credito=%s, notas=%s
                     WHERE id=%s
-                ''', (ent_e_ruc.get().strip(), ent_e_empresa.get().strip(), ent_e_comercial.get().strip(), ent_e_direccion.get().strip(),
-                      ent_e_contacto.get().strip(), ent_e_telefono.get().strip(), ent_e_correo.get().strip(),
-                      ent_e_web.get().strip(), limite_credito, txt_e_notes.get("1.0", "end-1c").strip(), id_cli))
+                ''', (_texto_limpio(ent_e_ruc.get()), _texto_limpio(ent_e_empresa.get()), _texto_limpio(ent_e_comercial.get()), _texto_limpio(ent_e_direccion.get()),
+                      _texto_limpio(ent_e_contacto.get()), _texto_limpio(ent_e_telefono.get()), _texto_limpio(ent_e_correo.get()),
+                      _texto_limpio(ent_e_web.get()), limite_credito, txt_e_notes.get("1.0", "end-1c").strip(), id_cli))
                 conn_u.commit()
                 cache_sistema.invalidar()
                 registrar_auditoria(self.usuario_activo, "Clientes", f"Modificó los datos del cliente ID {id_cli} ({ent_e_empresa.get().strip()})")

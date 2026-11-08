@@ -81,14 +81,23 @@ def enlace_emparejamiento(url, pin):
     return "escanercollie://pair?url=%s&pin=%s&prog=%s" % (url, pin, PROGRAMA.lower())
 
 
+ULTIMO_ERROR_QR = ""
+
+
 def imagen_qr(contenido, lado=320):
     """Imagen PNG (PIL) con el QR, o None si falta 'segno'."""
+    global ULTIMO_ERROR_QR
     try:
         import io as _io
 
         import segno
         from PIL import Image
-    except Exception:
+    except Exception as error:
+        ULTIMO_ERROR_QR = "No se pudo cargar 'segno' (QR): %s" % error
+        try:
+            registrar(ULTIMO_ERROR_QR)
+        except Exception:
+            pass
         return None
     try:
         codigo = segno.make(contenido, error="m")
@@ -99,7 +108,12 @@ def imagen_qr(contenido, lado=320):
         if lado:
             imagen = imagen.resize((lado, lado), Image.NEAREST)
         return imagen
-    except Exception:
+    except Exception as error_dibujo:
+        ULTIMO_ERROR_QR = "No se pudo dibujar el QR: %s" % error_dibujo
+        try:
+            registrar(ULTIMO_ERROR_QR)
+        except Exception:
+            pass
         return None
 
 
@@ -625,7 +639,15 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
                 imagenes[titulo] = referencia
                 etiqueta.configure(image=referencia)
             else:
-                etiqueta.configure(text="Falta 'segno'")
+                # 🔎 se muestra el motivo real (queda también en el registro)
+                motivo_qr = (ULTIMO_ERROR_QR or "Falta 'segno'").replace(
+                    "No se pudo cargar 'segno' (QR): ", "Falta 'segno': ")
+                etiqueta.configure(text=motivo_qr[:150], wraplength=185,
+                                   text_color="#c0392b", font=(familia, 10, "bold"))
+                try:
+                    registrar("Aviso QR: " + motivo_qr)
+                except Exception:
+                    pass
         ctk.CTkLabel(ventana, text="En el navegador: " + servidor.url() + "/app",
                      font=(familia, 9), text_color="#7f8c8d").pack()
     except Exception as e_qr:

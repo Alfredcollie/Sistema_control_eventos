@@ -72,7 +72,7 @@ jobs:
           "{}" | Out-File -FilePath "config_local.json" -Encoding utf8
         }
     - name: Compilar con PyInstaller (Windows)
-      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "web_app;web_app" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py
+      run: pyinstaller --noconfirm --windowed --name "Instalador-ControlEventos-Windows" --icon "Ico_Collie_Software.ico" --add-data "web_app;web_app" --add-data "logo.png;." --add-data "Logo_Collie_Software.png;." --add-data "LogoCotizacion.jpg;." --add-data "config_local.json;." --add-binary "$env:RCLONE_BIN;." --collect-all customtkinter --collect-all keyring --collect-all pymupdf --collect-all certifi --hidden-import escaner --hidden-import escaner_movil --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py
 
     - name: Crear instalador Windows (Inno Setup)
       shell: pwsh
@@ -175,7 +175,7 @@ jobs:
           echo "{}" > config_local.json
         fi
     - name: Compilar con PyInstaller (macOS)
-      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "web_app:web_app" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --hidden-import escaner --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
+      run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "web_app:web_app" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --collect-all pymupdf --collect-all certifi --hidden-import escaner --hidden-import escaner_movil --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
 
     - name: Asegurar config_local.json junto al ejecutable (macOS)
       run: |

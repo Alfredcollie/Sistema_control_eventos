@@ -1994,6 +1994,28 @@ def _al_cerrar_modal(ventana):
         pass
 
 
+
+# =========================================================
+# 📝 REGISTRO DEL ESCANER (diagnóstico, también en el compilado)
+# =========================================================
+def _registrar_escaner(mensaje):
+    """Anota en el registro lo que pasa con el escaneo (y con la foto del teléfono)."""
+    try:
+        import escaner_movil
+        if hasattr(escaner_movil, "registrar"):
+            return escaner_movil.registrar(mensaje)
+    except Exception:
+        pass
+    try:
+        from app_paths import DATA_DIR
+        ruta = os.path.join(str(DATA_DIR), "escaner_movil.log")
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        with open(ruta, "a", encoding="utf-8") as archivo:
+            archivo.write("[%s] %s\n" % (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), mensaje))
+    except Exception:
+        pass
+
+
 class CalendarioNativo(ctk.CTkToplevel):
     def __init__(self, parent, target_entry):
         super().__init__(parent)
@@ -2588,7 +2610,18 @@ class FacturasRecibidasTab:
 
     def _worker_escanear_telefono(self, config, v_prog, rutas):
         """Procesa la foto del teléfono con el MISMO flujo del escáner."""
-        return self._worker_escanear(config, v_prog, imagenes=rutas)
+        _registrar_escaner("Procesando foto(s) del teléfono: %s" % (rutas,))
+        try:
+            resultado = self._worker_escanear(config, v_prog, imagenes=rutas)
+            _registrar_escaner("Proceso terminado · ok=%s · error=%s"
+                               % (bool((resultado or {}).get("ok")),
+                                  (resultado or {}).get("error")))
+            return resultado
+        except Exception as error:
+            import traceback
+            _registrar_escaner("ERROR procesando la foto del teléfono: %s\n%s"
+                               % (error, traceback.format_exc()))
+            raise
 
     def _etiqueta_telefono(self):
         return "Compras · factura de compra"
@@ -2640,10 +2673,29 @@ class FacturasRecibidasTab:
                 resultado["proveedor"] = {"estado": "error", "datos": {}}
                 resultado["aviso"] = (resultado.get("aviso", "") + f" (proveedor: {e_prov})").strip()
 
+        def abrir_revision():
+            try:
+                _registrar_escaner("Abriendo la ventana de revisión del escaneo…")
+                self._mostrar_resultado_escaneo(resultado, v_prog)
+                _registrar_escaner("Ventana de revisión abierta.")
+            except Exception as error_revision:
+                import traceback
+                _registrar_escaner("ERROR al abrir la revisión: %s\n%s"
+                                   % (error_revision, traceback.format_exc()))
+                try:
+                    messagebox.showerror(
+                        "Escáner",
+                        "Se recibió la foto pero no se pudo abrir la revisión:\n\n%s"
+                        % error_revision,
+                        parent=self.main_root)
+                except Exception:
+                    pass
+
         try:
-            self.main_root.after(0, lambda: self._mostrar_resultado_escaneo(resultado, v_prog))
-        except Exception:
-            pass
+            self.main_root.after(0, abrir_revision)
+        except Exception as error_after:
+            _registrar_escaner("No se pudo programar la revisión: %s" % error_after)
+            abrir_revision()
 
     def _mostrar_resultado_escaneo(self, resultado, v_prog=None, reutilizar=None):
         """Ventana con lo escaneado: campos detectados, texto OCR y el PDF adjunto."""

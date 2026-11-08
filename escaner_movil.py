@@ -24,6 +24,26 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROGRAMA = "EVENTOS"      # EVENTOS / FLOTA
+
+# =========================================================
+# 📝 REGISTRO DE DIAGNÓSTICO (sirve también en el programa compilado)
+# =========================================================
+def registrar(mensaje):
+    """Escribe una línea en el registro del escáner por teléfono."""
+    try:
+        from app_paths import DATA_DIR
+        carpeta = str(DATA_DIR)
+    except Exception:
+        carpeta = os.path.join(os.path.expanduser("~"), ".blackcube")
+    try:
+        os.makedirs(carpeta, exist_ok=True)
+        ruta = os.path.join(carpeta, "escaner_movil.log")
+        with open(ruta, "a", encoding="utf-8") as archivo:
+            archivo.write("[%s] %s\n" % (time.strftime("%d/%m/%Y %H:%M:%S"), mensaje))
+    except Exception:
+        pass
+
+
 PUERTO = 8765
 NOMBRE = "Escáner Software Collie"
 
@@ -267,6 +287,7 @@ class ServidorEscanerMovil:
                             % (tipo, PROGRAMA.lower(), marca))
         with open(ruta, "wb") as archivo:
             archivo.write(contenido)
+        registrar("Foto recibida: %s (%d bytes)" % (os.path.basename(ruta), len(contenido)))
         self.avisar("Foto recibida del teléfono: %s" % os.path.basename(ruta))
         if self.al_recibir:
             self.al_recibir([ruta], tipo)
@@ -465,6 +486,10 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
 
     servidor = ServidorEscanerMovil(al_recibir=recibir, al_avisar=avisar, carpeta=carpeta)
     ok, resultado = servidor.iniciar()
+    registrar("Servidor del teléfono: %s (puerto %s) · %s"
+              % ("iniciado" if ok else "NO inició", PUERTO, resultado))
+    if not ok:
+        registrar("ERROR al iniciar el servidor del teléfono: %s" % resultado)
 
     def cerrar():
         """Cierra la ventana y detiene el servidor (una sola vez)."""

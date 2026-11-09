@@ -895,6 +895,30 @@ def formatear_numero_entrada(texto):
 _TABLA_DIFERENCIALES_LISTA = [False]
 
 
+_SOPORTE_LISTO = [False]
+
+
+def _asegurar_columna_soporte():
+    """Agrega la columna del comprobante (soporte) si la tabla no la tiene."""
+    if _SOPORTE_LISTO[0]:
+        return True
+    conn = conectar_db(silencioso=True)
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as c:
+            c.execute("ALTER TABLE conciliacion_bancaria "
+                      "ADD COLUMN IF NOT EXISTS soporte TEXT DEFAULT ''")
+        conn.commit()
+        _SOPORTE_LISTO[0] = True
+        return True
+    except Exception as e:
+        print("[Banco] no se pudo agregar la columna soporte:", e)
+        return False
+    finally:
+        liberar_conexion(conn)
+
+
 def _asegurar_tabla_diferenciales():
     """Crea la tabla de diferenciales si falta (una vez por ejecución)."""
     if _TABLA_DIFERENCIALES_LISTA[0]:
@@ -3679,7 +3703,7 @@ class ModuloBancoApp:
         ctk.CTkButton(f_btns2, text="🏦 Asignar cuenta",
                       font=("Arial", 12, "bold"), fg_color="#16a085", hover_color="#117a65",
                       command=self.asignar_cuenta_a_movimientos).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="➕ Registrar Pago / Compra Cruzada", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="➕ Registro de Ingresos / Egresos / Cruzadas", font=("Arial", 12, "bold"),
                       fg_color="#8e44ad", hover_color="#703688",
                       command=self.agregar_movimiento_manual).pack(side="left", padx=4)
         ctk.CTkButton(f_btns2, text="🧾 Asentar ITF", font=("Arial", 12, "bold"),
@@ -5313,6 +5337,11 @@ class ModuloBancoApp:
             messagebox.showwarning("Banco", "Seleccione un banco.", parent=self.parent_frame)
             return
 
+        try:
+            _asegurar_columna_soporte()
+        except Exception:
+            pass
+
         cats = cargar_categorias_gastos()
         principales = ordenar_categorias_principales(list(cats.keys())) or ["Producción de Eventos"]
         comision = cargar_comision_interbancaria()
@@ -5321,15 +5350,29 @@ class ModuloBancoApp:
         id_edicion = registro.get("id") if en_edicion else None
 
         v = ctk.CTkToplevel(self.parent_frame)
-        v.title("Editar Pago (Conciliación)" if en_edicion else "Registrar Pago (Conciliación)")
+        v.title("Editar Movimiento (Conciliación)" if en_edicion
+                else "Registrar Ingreso / Egreso (Conciliación)")
         v.geometry("580x700")
         v.minsize(520, 480)
         v.transient(self.parent_frame)
         v.grab_set()
 
-        ctk.CTkLabel(v, text=("✏️ Editar Pago / Compra Cruzada" if en_edicion
-                              else "➕ Registrar Pago / Compra Cruzada"),
-                     font=("Arial", 15, "bold"), text_color="#1f538d").pack(pady=(15, 5))
+        TITULO_BASE = ("✏️ Editar Ingreso / Egreso" if en_edicion
+                       else "➕ Registro de Ingresos / Egresos / Cruzadas")
+        lbl_titulo = ctk.CTkLabel(v, text=TITULO_BASE,
+                                  font=("Arial", 15, "bold"), text_color="#1f538d")
+        lbl_titulo.pack(pady=(15, 5))
+
+        # 💰 EGRESO (pago) o INGRESO (cobro): cambia el título y la categoría principal
+        f_tipo = ctk.CTkFrame(v, fg_color="transparent")
+        f_tipo.pack(fill="x", padx=16, pady=(0, 4))
+        ctk.CTkLabel(f_tipo, text="Tipo de movimiento:", font=("Arial", 11, "bold")
+                     ).pack(side="left", padx=(0, 8))
+        seg_tipo = ctk.CTkSegmentedButton(f_tipo, values=["Egreso (pago)", "Ingreso (cobro)"],
+                                          font=("Arial", 10, "bold"))
+        seg_tipo.set("Ingreso (cobro)" if str(datos_ini.get("tipo") or "").lower() == "ingreso"
+                     else "Egreso (pago)")
+        seg_tipo.pack(side="left")
 
         # Pie fijo: el botón Guardar siempre visible
         f_pie = ctk.CTkFrame(v, fg_color="transparent")
@@ -5393,6 +5436,29 @@ class ModuloBancoApp:
         cmb_principal.configure(command=on_principal)
         cmb_sub.configure(command=lambda _=None: actualizar_personal())
 
+        def _al_cambiar_tipo(_valor=None):
+            """Pone la categoría Ingresos al elegir ingreso y cambia el título."""
+            es_ingreso = seg_tipo.get().startswith("Ingreso")
+            try:
+                if es_ingreso:
+                    if "Ingresos" in (cmb_principal.cget("values") or []):
+                        cmb_principal.set("Ingresos")
+                        on_principal()
+                    lbl_titulo.configure(text="➕ Registro de Ingreso (cobro)")
+                else:
+                    if cmb_principal.get() == "Ingresos":
+                        otras = [p for p in (cmb_principal.cget("values") or [])
+                                 if p != "Ingresos"]
+                        if otras:
+                            cmb_principal.set(otras[0])
+                            on_principal()
+                    lbl_titulo.configure(text=("✏️ Editar Ingreso / Egreso" if en_edicion
+                                               else "➕ Registro de Egreso (pago)"))
+            except Exception as e_tipo:
+                print("[Banco] tipo de movimiento:", e_tipo)
+
+        seg_tipo.configure(command=_al_cambiar_tipo)
+
         def recargar_categorias_combos():
             nonlocal cats, principales
             cats = cargar_categorias_gastos()
@@ -5454,6 +5520,81 @@ class ModuloBancoApp:
         ent_desc = ctk.CTkEntry(f)
         ent_desc.pack(fill="x", pady=(0, 8))
         ent_desc.insert(0, str(datos_ini.get("descripcion") or ""))
+
+        # 📎 Comprobante del movimiento: se puede ESCANEAR CON EL TELÉFONO
+        estado_soporte = {"ruta": str(datos_ini.get("soporte") or "")}
+        ctk.CTkLabel(f, text="Comprobante (soporte del banco):",
+                     font=("Arial", 11, "bold")).pack(anchor="w")
+        f_soporte = ctk.CTkFrame(f, fg_color="transparent")
+        f_soporte.pack(fill="x", pady=(0, 4))
+        btn_soporte_tel = ctk.CTkButton(f_soporte, text="📱 Escanear con el teléfono", width=190,
+                                        font=("Arial", 10, "bold"), fg_color="#5b2c6f",
+                                        hover_color="#4a2360")
+        btn_soporte_tel.pack(side="left")
+        ctk.CTkButton(f_soporte, text="📎 Archivo", width=90, font=("Arial", 10, "bold"),
+                      fg_color="#34495e", hover_color="#2c3e50",
+                      command=lambda: _elegir_soporte_archivo()).pack(side="left", padx=6)
+        ctk.CTkButton(f_soporte, text="🗏 Ver", width=70, font=("Arial", 10, "bold"),
+                      fg_color="#1f538d", hover_color="#163b65",
+                      command=lambda: _ver_soporte()).pack(side="left")
+        lbl_soporte = ctk.CTkLabel(f, text="", font=("Arial", 9), text_color="#7f8c8d")
+        lbl_soporte.pack(anchor="w", pady=(0, 8))
+
+        def _pintar_soporte():
+            ruta_sop = estado_soporte["ruta"]
+            if ruta_sop and os.path.exists(ruta_sop):
+                lbl_soporte.configure(text="📎 " + os.path.basename(ruta_sop),
+                                      text_color="#1e8449")
+            elif ruta_sop:
+                lbl_soporte.configure(text="📎 " + os.path.basename(ruta_sop) +
+                                      "  (no está en este equipo)", text_color="#b9770e")
+            else:
+                lbl_soporte.configure(text="Sin comprobante adjunto", text_color="#7f8c8d")
+
+        def _fijar_soporte(ruta_sop):
+            estado_soporte["ruta"] = str(ruta_sop or "")
+            _pintar_soporte()
+
+        def _ver_soporte():
+            ruta_sop = estado_soporte["ruta"]
+            if ruta_sop and os.path.exists(ruta_sop):
+                abrir_documento(ruta_sop, "Comprobante del movimiento")
+            else:
+                messagebox.showinfo("Comprobante", "No hay comprobante adjunto.", parent=v)
+
+        def _elegir_soporte_archivo():
+            elegido = seleccionar_archivo_dialogo(
+                "Comprobante del movimiento",
+                tipos=[("Documentos", "*.pdf *.jpg *.jpeg *.png"), ("Todos", "*.*")])
+            if elegido:
+                _fijar_soporte(elegido[0] if isinstance(elegido, (list, tuple)) else elegido)
+
+        def _escanear_soporte_telefono():
+            try:
+                import escaner_movil
+            except Exception as error_esc:
+                messagebox.showerror("Escáner",
+                                     "No se pudo cargar el escáner: " + str(error_esc), parent=v)
+                return
+            try:
+                config_esc = cargar_config()
+            except Exception:
+                config_esc = {}
+
+            def al_recibir(rutas, tipo_doc):
+                if rutas:
+                    _fijar_soporte(rutas[0])
+
+            try:
+                escaner_movil.escanear_desde_telefono(
+                    v, config_esc, al_recibir=al_recibir,
+                    titulo_extra="Banco · comprobante del movimiento")
+            except Exception as error_esc:
+                messagebox.showerror("Escáner",
+                                     "No se pudo abrir el escáner: " + str(error_esc), parent=v)
+
+        btn_soporte_tel.configure(command=_escanear_soporte_telefono)
+        _pintar_soporte()
 
         ctk.CTkLabel(f, text="Monto:", font=("Arial", 11, "bold")).pack(anchor="w")
         ent_monto = ctk.CTkEntry(f)
@@ -5784,6 +5925,8 @@ class ModuloBancoApp:
             guardar_comision_interbancaria(f"{com:.2f}")
 
             principal = cmb_principal.get()
+            if seg_tipo.get().startswith("Ingreso") and principal != "Ingresos":
+                principal = "Ingresos"      # se guarda como INGRESO
             sub = cmb_sub.get()
             if sub == "(Sin categoría)":
                 sub = ""
@@ -5810,7 +5953,8 @@ class ModuloBancoApp:
             desc_manual = ent_desc.get().strip()
             numero_operacion = ent_operacion.get().strip()
 
-            tipo = "ingreso" if principal == "Ingresos" else "egreso"
+            tipo = "ingreso" if (principal == "Ingresos"
+                                 or seg_tipo.get().startswith("Ingreso")) else "egreso"
             monto_final = total if tipo == "ingreso" else -total
 
             partes = []
@@ -5862,10 +6006,11 @@ class ModuloBancoApp:
                                 UPDATE conciliacion_bancaria
                                 SET fecha=%s, descripcion=%s, monto=%s, tipo=%s,
                                     categoria=%s, subcategoria=%s, evento=%s, personal=%s,
-                                    comision=%s, interbancario=%s, numero_operacion=%s
+                                    comision=%s, interbancario=%s, numero_operacion=%s, soporte=%s
                                 WHERE id=%s
                             """, (fecha, desc, monto_final, tipo, principal, sub, evento, personal_pago,
-                                  com, bool(inter), numero_operacion, id_edicion))
+                                  com, bool(inter), numero_operacion,
+                                  estado_soporte["ruta"], id_edicion))
                             try:
                                 c.execute("SELECT COALESCE(id_gasto_compras, 0) FROM conciliacion_bancaria WHERE id=%s",
                                           (id_edicion,))
@@ -5879,13 +6024,14 @@ class ModuloBancoApp:
                                 INSERT INTO conciliacion_bancaria
                                 (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado,
                                  categoria, subcategoria, evento, personal, comision, interbancario, es_cruzada,
-                                 numero_operacion)
+                                 numero_operacion, soporte)
                                 VALUES (%s, %s, %s, %s, %s, %s, 'manual', 0, 'pendiente',
-                                        %s, %s, %s, %s, %s, %s, %s, %s)
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 RETURNING id
                             """, (banco.get("banco", ""), banco.get("cuenta", ""), fecha, desc,
                                   monto_final, tipo, principal, sub, evento, personal_pago, com,
-                                  bool(inter), es_cruzada, numero_operacion))
+                                  bool(inter), es_cruzada, numero_operacion,
+                                  estado_soporte["ruta"]))
                             try:
                                 id_movimiento = c.fetchone()[0]
                             except Exception:

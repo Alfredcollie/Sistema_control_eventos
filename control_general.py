@@ -1788,8 +1788,13 @@ class ControlGeneralEventos:
         ctk.CTkLabel(frame_top_sidebar, text=f"Rol: {self.rol_activo}", font=("Arial", 10), text_color="white").pack(pady=(0, 5))
         frame_bottom_sidebar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         frame_bottom_sidebar.pack(side="bottom", fill="x", pady=(5, 10))
-        lbl_firma_sidebar = "v1.5.8"
-        lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
+        # 🛡️ El pie del menú va protegido: si algo fallara aquí, el programa debe
+        #    entrar igual (antes, un error en esta línea impedía iniciar sesión).
+        try:
+            lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text=f"Software desarrollado por Alfred Collie\nVersión {VERSION_ACTUAL} © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
+            lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
+        except Exception as e_firma:
+            print("Aviso - pie del menú:", e_firma)
 
 
         # ==================================================

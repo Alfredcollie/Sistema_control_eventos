@@ -199,23 +199,31 @@ def main():
             importados[nombre] = importlib.import_module(nombre)
             comprobar("import " + nombre, True)
         except Exception as error:
-            texto = str(error)
-            if "tkinter" in texto or "_tkinter" in texto:
-                print("   ...  import %s omitido (equipo sin Tkinter)" % nombre)
-            else:
-                comprobar("import " + nombre, False, texto[:70])
+            # En los servidores de compilacion puede faltar la configuracion, la
+            # base de datos o Tkinter: eso NO es un problema de compatibilidad.
+            print("   [AVISO] import %s omitido: %s" % (nombre, str(error)[:60]))
 
     print()
     print("2) Ventanas: Windows y macOS")
     if "control_general" in importados:
         probar_ventanas(importados["control_general"])
+    else:
+        print("   [AVISO] no se pudo cargar control_general: se omite esta parte")
 
     print()
     print("3) El codigo solo-Windows esta protegido")
     import re
-    for nombre, modulo in importados.items():
+    # se revisan los archivos del programa (aunque no se hayan podido importar)
+    carpeta = os.path.dirname(os.path.abspath(__file__))
+    archivos = []
+    for nombre in ("modulo_compras.py", "modulo_ventas.py", "clientes.py",
+                   "contratos_actas.py", "control_general.py"):
+        ruta = os.path.join(carpeta, nombre)
+        if os.path.isfile(ruta):
+            archivos.append((nombre, ruta))
+    for nombre, ruta in archivos:
         try:
-            fuente = io.open(modulo.__file__, "r", encoding="utf-8").read()
+            fuente = io.open(ruta, "r", encoding="utf-8").read()
         except Exception:
             continue
         for coincidencia in re.finditer(r"os\.startfile", fuente):

@@ -19,6 +19,7 @@ import sys
 import shutil
 import calendar
 import re
+import math
 import json
 from lector_comprobantes_venta import extraer_datos_venta
 try:  # OCR con IA (opcional)
@@ -654,12 +655,47 @@ def _al_cerrar_modal(ventana):
     except Exception:
         pass
     try:
+        # 🪟 Si el diálogo se MINIMIZA (o se oculta), se suelta el bloqueo:
+        #    si no, la aplicación queda sin responder a los clics.
+        ventana.bind("<Unmap>", _soltar, add="+")
+    except Exception:
+        pass
+    try:
         # sólo ventanas hijas: nunca se toca el cierre de la ventana principal
         if getattr(ventana, "master", None) is not None:
             ventana.protocol("WM_DELETE_WINDOW",
                              lambda _v=ventana: (_soltar(), _v.destroy()))
     except Exception:
         pass
+
+
+
+# =========================================================
+# 🧮 REDONDEO DE LA DETRACCIÓN (norma del Banco de la Nación)
+# Igual que en el programa de Flota.
+# =========================================================
+def redondear_centavos(monto):
+    """Redondea un importe a 2 decimales (evita el ruido de coma flotante)."""
+    try:
+        return round(float(monto) + 1e-9, 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def redondear_detraccion(monto):
+    """Redondea al entero el monto de la detracción.
+
+    - Fracción menor a 0.50  -> se suprimen los decimales (baja al entero).
+    - Fracción igual o mayor a 0.50 -> se ajusta a la unidad inmediata superior.
+    """
+    try:
+        valor = float(monto)
+    except (TypeError, ValueError):
+        return 0.0
+    if valor < 0:
+        return -redondear_detraccion(-valor)
+    entero = math.floor(valor)
+    return float(entero + 1) if (valor - entero) >= 0.5 else float(entero)
 
 
 class CalendarioNativo(ctk.CTkToplevel):
@@ -1708,6 +1744,16 @@ class FacturasEmitidasTab:
         self.ent_subtotal = ctk.CTkEntry(self.f_form); self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 8)); self.ent_subtotal.bind("<KeyRelease>", self.actualizar_totales)
         self.lbl_titulo_det = ctk.CTkLabel(self.f_form, text="Detracción (%):", font=("Arial", 11, "bold")); self.lbl_titulo_det.pack(anchor="w", padx=10)
         self.ent_detraccion = ctk.CTkEntry(self.f_form); self.ent_detraccion.pack(fill="x", padx=10, pady=(0, 8)); self.ent_detraccion.insert(0, "12"); self.ent_detraccion.bind("<KeyRelease>", self.actualizar_totales)
+        # 🧮 Redondeo opcional de la detracción al entero (norma del Banco de la Nación)
+        self.chk_redondeo_det = ctk.CTkCheckBox(
+            self.f_form, text="🧮 Redondear detracción al entero",
+            font=("Arial", 11, "bold"), checkbox_width=18, checkbox_height=18,
+            command=self.actualizar_totales)
+        self.chk_redondeo_det.pack(anchor="w", padx=10, pady=(0, 0))
+        ctk.CTkLabel(self.f_form,
+                     text="Fracción < 0.50: baja al entero · Fracción ≥ 0.50: sube a la unidad superior",
+                     font=("Arial", 9), text_color="#7a7a7a", justify="left",
+                     wraplength=290).pack(anchor="w", padx=10, pady=(0, 8))
         
         f_tot = ctk.CTkFrame(self.f_form, fg_color="#ffffff", border_width=1, border_color="#ccc"); f_tot.pack(fill="x", padx=10, pady=(5, 10))
         self.lbl_impuesto = ctk.CTkLabel(f_tot, text="IGV (18%): 0.00", font=("Arial", 11), text_color="#555"); self.lbl_impuesto.pack(anchor="w", padx=10, pady=(5, 0))
@@ -1983,13 +2029,27 @@ class FacturasEmitidasTab:
             self._eventos_aprobados = list(lista_limpia)
         self.combo_evento.configure(values=lista_evs)
         if self.combo_evento.get() not in lista_evs: self.combo_evento.set("GENERAL / NO ASIGNADO")
+    def detraccion_con_redondeo(self):
+        """True si el usuario activó el check de redondeo de la detracción."""
+        chk = getattr(self, "chk_redondeo_det", None)
+        if chk is None:
+            return False
+        try:
+            return bool(chk.get())
+        except Exception:
+            return False
+
     def actualizar_totales(self, *args):
         if not hasattr(self, 'combo_tipo') or not hasattr(self, 'ent_subtotal') or not hasattr(self, 'ent_detraccion'): return
         tipo = self.combo_tipo.get()
         try:
             sub, ui_pct = float(self.ent_subtotal.get() or 0), float(self.ent_detraccion.get() or 0)
             if "Factura" in tipo:
-                igv = sub * 0.18; tot = sub + igv; det = tot * (ui_pct / 100.0); neto = tot - det
+                igv = redondear_centavos(sub * 0.18); tot = redondear_centavos(sub + igv)
+                det = tot * (ui_pct / 100.0)
+                # 🧮 con el check activo se redondea al entero (0.01-0.49 baja, 0.50-0.99 sube)
+                det = redondear_detraccion(det) if self.detraccion_con_redondeo() else redondear_centavos(det)
+                neto = redondear_centavos(tot - det)
                 self.lbl_impuesto.configure(text=f"IGV (18%): {formatear_moneda(igv)}"); self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}"); self.lbl_total.configure(text=f"Neto a Cobrar: {formatear_moneda(neto)}")
             elif "Recibo" in tipo:
                 ret = sub * (ui_pct / 100.0); neto = sub - ret
@@ -2014,7 +2074,12 @@ class FacturasEmitidasTab:
                 return
         try: subtotal, dias, ui_pct = float(self.ent_subtotal.get() or 0), int(self.ent_dias.get().strip() or 0), float(self.ent_detraccion.get() or 0)
         except ValueError: return messagebox.showerror("Error", "Montos deben ser numéricos.")
-        if "Factura" in tipo: imp = subtotal * 0.18; tot_bruto = subtotal + imp; det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
+        if "Factura" in tipo:
+            imp = redondear_centavos(subtotal * 0.18); tot_bruto = redondear_centavos(subtotal + imp)
+            det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0)
+            det_monto = (redondear_detraccion(det_monto) if self.detraccion_con_redondeo()
+                         else redondear_centavos(det_monto))
+            neto_nuevo = redondear_centavos(tot_bruto - det_monto)
         elif "Recibo" in tipo: imp = subtotal * (ui_pct / 100.0); tot_bruto = subtotal; det_pct = 0.0; det_monto = 0.0; neto_nuevo = subtotal - imp  
         else: imp = 0.0; tot_bruto = subtotal; det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
         conn = obtener_conexion_segura()

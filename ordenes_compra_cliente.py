@@ -869,7 +869,7 @@ class OrdenesCompraClienteApp:
             pass
 
     def cargar_cotizaciones_aprobadas(self, cotizacion_a_incluir=None):
-        clave_cache = "lista_cotizaciones_aprobadas_combo"
+        clave_cache = "lista_cotizaciones_aprobadas_combo_v2"
         datos_cot = cache_sistema.obtener(clave_cache)
         
         if datos_cot is not None and not cotizacion_a_incluir:
@@ -892,6 +892,15 @@ class OrdenesCompraClienteApp:
                               "SELECT cotizacion_asociada FROM ordenes_compra_clientes "
                               "WHERE cotizacion_asociada IS NOT NULL)")
 
+                    # 🚀 Se muestran TODAS las aprobadas; si alguna ya tiene orden de
+                    #    compra, se indica en la lista (antes esas se ocultaban).
+                    ocs_sql = ("LEFT JOIN (SELECT TRIM(cotizacion_asociada) AS cod, "
+                               "STRING_AGG(numero_oc, ', ') AS ocs "
+                               "FROM ordenes_compra_clientes "
+                               "WHERE cotizacion_asociada IS NOT NULL "
+                               "GROUP BY TRIM(cotizacion_asociada)) oc "
+                               "ON oc.cod = TRIM(cot.codigo_cotizacion)")
+
                     def construir_sql(con_reglas_fee):
                         # sin_fee y porcentaje_financiamiento son los mismos parámetros que usa
                         # Cotizaciones para exonerar el Fee 15% y calcular el financiamiento.
@@ -901,14 +910,14 @@ class OrdenesCompraClienteApp:
                             SELECT cot.codigo_cotizacion,
                                    COALESCE(cot.nombre_empresa, 'Cliente'),
                                    {total_sql},
-                                   COALESCE(cot.nombre_evento, ''){cols_extra}
+                                   COALESCE(cot.nombre_evento, ''){cols_extra},
+                                   COALESCE(oc.ocs, '')
                             FROM cotizaciones cot
+                            {ocs_sql}
                             WHERE cot.status = 'Aprobada'
                         """
-                        if cotizacion_a_incluir:
-                            return (sql + f" AND ({sin_oc} OR cot.codigo_cotizacion = %s) ORDER BY cot.id DESC LIMIT 80",
-                                    (cotizacion_a_incluir,))
-                        return (sql + f" AND {sin_oc} ORDER BY cot.id DESC LIMIT 80", None)
+                        # 🚀 Ya NO se filtran las que tienen OC: se listan todas.
+                        return (sql + " ORDER BY cot.id DESC LIMIT 500", None)
 
                     filas, error_reglas = None, None
                     for con_reglas_fee in (True, False):
@@ -944,9 +953,16 @@ class OrdenesCompraClienteApp:
                             fin_pct_val = float(r[5]) if len(r) > 5 and r[5] is not None else 0.0
                         except (TypeError, ValueError):
                             fin_pct_val = 0.0
+                        oc_val = ""
+                        try:
+                            if len(r) > 6 and r[6] is not None:
+                                oc_val = str(r[6]).strip()
+                        except Exception:
+                            oc_val = ""
                         lista.append({
                             "codigo": cod_val,
                             "cliente": cli_val,
+                            "oc": oc_val,
                             "evento": str(r[3]).strip() if len(r) > 3 and r[3] is not None else "",
                             "venta": parsear_numero_seguro(r[2]),
                             "sin_fee": sin_fee_val,
@@ -998,7 +1014,11 @@ class OrdenesCompraClienteApp:
                 registro = dict(d)
                 registro.update(totales)
                 mapa[cod_val] = registro
-                etiquetas.append(f"{cod_val} | {registro.get('cliente') or 'Cliente'} | {totales['total']:,.2f}")
+                etiqueta = (f"{cod_val} | {registro.get('cliente') or 'Cliente'} | "
+                            f"{totales['total']:,.2f}")
+                if str(registro.get("oc") or "").strip():
+                    etiqueta += f" | ⚠️ ya tiene OC: {registro['oc']}"
+                etiquetas.append(etiqueta)
 
             self._datos_cotizaciones = mapa
             self.cmb_cot_cli.configure(values=etiquetas)
@@ -1028,6 +1048,8 @@ class OrdenesCompraClienteApp:
             if registro.get("financiamiento", 0.0):
                 partes.append(f"+ Financ. ({registro.get('fin_pct', 0):g}%): {moneda} {registro['financiamiento']:,.2f}")
             partes.append(f"= Total OC: {moneda} {registro.get('total', 0.0):,.2f}")
+            if str(registro.get("oc") or "").strip():
+                partes.append(f"⚠️ Esta cotización YA tiene OC: {registro['oc']}")
             self.lbl_desglose.configure(text="  ".join(partes))
         except Exception:
             pass

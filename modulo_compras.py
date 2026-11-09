@@ -1986,6 +1986,12 @@ def _al_cerrar_modal(ventana):
     except Exception:
         pass
     try:
+        # 🪟 Si el diálogo se MINIMIZA (o se oculta), se suelta el bloqueo:
+        #    si no, la aplicación queda sin responder a los clics.
+        ventana.bind("<Unmap>", _soltar, add="+")
+    except Exception:
+        pass
+    try:
         # sólo ventanas hijas: nunca se toca el cierre de la ventana principal
         if getattr(ventana, "master", None) is not None:
             ventana.protocol("WM_DELETE_WINDOW",

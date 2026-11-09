@@ -26,7 +26,7 @@ import threading
 import webbrowser
 from datetime import datetime, timedelta
 
-VERSION_ACTUAL = "v1.5.6"
+VERSION_ACTUAL = "v1.5.8"
 
 
 def _version_a_tupla(v):
@@ -1425,6 +1425,13 @@ class ControlGeneralEventos:
                 try:
                     existe = bool(actual.winfo_exists())
                     visible = bool(actual.winfo_viewable())
+                    # 🪟 Una ventana MINIMIZADA sigue "visible" para Tk, pero no se
+                    #    puede usar: si tiene el bloqueo, la aplicación no responde.
+                    try:
+                        if str(actual.state()) == "iconic":
+                            visible = False
+                    except Exception:
+                        pass
                 except Exception:
                     existe = visible = False
 
@@ -1781,7 +1788,7 @@ class ControlGeneralEventos:
         ctk.CTkLabel(frame_top_sidebar, text=f"Rol: {self.rol_activo}", font=("Arial", 10), text_color="white").pack(pady=(0, 5))
         frame_bottom_sidebar = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         frame_bottom_sidebar.pack(side="bottom", fill="x", pady=(5, 10))
-        lbl_firma_sidebar = ctk.CTkLabel(frame_bottom_sidebar, text=f"Software desarrollado por Alfred Collie\nVersión {VERSION_ACTUAL} © 2026", font=("Arial", 9, "italic"), text_color="#7f8c8d")
+        lbl_firma_sidebar = "v1.5.8"
         lbl_firma_sidebar.pack(side="bottom", pady=(2, 5))
 
 

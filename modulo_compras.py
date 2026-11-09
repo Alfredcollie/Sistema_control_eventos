@@ -38,7 +38,7 @@ from buffer_memoria import cache_sistema
 # 📁 Rutas portables: la BD guarda rutas RELATIVAS a la carpeta sincronizada,
 #    así que para abrir un archivo hay que resolverlas con app_paths.
 try:
-    from app_paths import resolver_ruta_archivo, ruta_para_guardar
+    from app_paths import resolver_ruta_archivo, ruta_para_guardar, eliminar_archivo
 except Exception:  # pragma: no cover
     def resolver_ruta_archivo(ruta, ruta_base=""):
         return str(ruta) if ruta and os.path.exists(str(ruta)) else ""
@@ -2014,6 +2014,600 @@ def _registrar_escaner(mensaje):
             archivo.write("[%s] %s\n" % (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), mensaje))
     except Exception:
         pass
+
+
+
+# =========================================================
+# 🔢 DEDUCCIÓN DE MONTOS A PARTIR DEL TEXTO DEL OCR
+# (base + IGV = total). Venían del programa de Flota y aquí
+# faltaban: al escanear por teléfono se cortaba la revisión
+# con "name 'deducir_montos_por_suma' is not defined".
+# =========================================================
+_PALABRAS_NUMERO = {
+    "CERO": 0, "UN": 1, "UNO": 1, "UNA": 1, "DOS": 2, "TRES": 3, "CUATRO": 4, "CINCO": 5, "SEIS": 6,
+    "SIETE": 7, "OCHO": 8, "NUEVE": 9, "DIEZ": 10, "ONCE": 11, "DOCE": 12, "TRECE": 13, "CATORCE": 14,
+    "QUINCE": 15, "DIECISEIS": 16, "DIECISIETE": 17, "DIECIOCHO": 18, "DIECINUEVE": 19, "VEINTE": 20,
+    "VEINTIUNO": 21, "VEINTIDOS": 22, "VEINTITRES": 23, "VEINTICUATRO": 24, "VEINTICINCO": 25,
+    "VEINTISEIS": 26, "VEINTISIETE": 27, "VEINTIOCHO": 28, "VEINTINUEVE": 29, "TREINTA": 30,
+    "CUARENTA": 40, "CINCUENTA": 50, "SESENTA": 60, "SETENTA": 70, "OCHENTA": 80, "NOVENTA": 90,
+    "CIEN": 100, "CIENTO": 100, "DOSCIENTOS": 200, "TRESCIENTOS": 300, "CUATROCIENTOS": 400,
+    "QUINIENTOS": 500, "SEISCIENTOS": 600, "SETECIENTOS": 700, "OCHOCIENTOS": 800, "NOVECIENTOS": 900,
+}
+
+def _texto_sin_acentos(texto):
+    """Texto en mayúsculas y sin tildes (para comparar rótulos). Multiplataforma."""
+    import unicodedata
+    base = unicodedata.normalize("NFKD", str(texto or ""))
+    return "".join(c for c in base if not unicodedata.combining(c)).upper()
+
+def monto_en_palabras(texto):
+    """Lee el importe escrito en letras ('SON: CIENTO SETENTA Y SIETE CON 0/100 SOLES').
+
+    Devuelve 177.0 en ese ejemplo, o 0.0 si no lo encuentra. Sirve de respaldo
+    cuando el comprobante trae los importes en columnas y no se lee el total.
+    """
+    limpio = _texto_sin_acentos(texto)
+    posicion = limpio.find("SON")
+    if posicion == -1:
+        return 0.0
+    resto = limpio[posicion + 3:]
+    resto = resto.split(chr(10))[0]                     # solo esa linea
+    centimos = 0
+    # 💬 "DIEZ Y 97 / 100 SOLES" (los tickets escriben los céntimos con "Y")
+    if " CON " not in resto:
+        _m_cent = re.search(r"Y\s+(\d{1,2})\s*/\s*100", resto)
+        if _m_cent:
+            centimos = int(_m_cent.group(1))
+            resto = resto[:_m_cent.start()]
+    if " CON " in resto:
+        antes, despues = resto.split(" CON ", 1)
+        resto = antes
+        try:
+            centimos = int(re.findall(r"\d{1,2}", despues)[0])
+        except Exception:
+            centimos = 0
+    palabras = [p for p in re.split(r"[^A-Z]+", resto) if p]
+    total, parcial = 0, 0
+    for palabra in palabras:
+        if palabra in ("Y", "CON", "SOLES", "SOL", "DOLARES", "SON", "DE", "CONFORMADO", "SEUO"):
+            continue
+        if palabra in ("MIL", "MILES"):
+            total += (parcial or 1) * 1000
+            parcial = 0
+            continue
+        if palabra in ("MILLON", "MILLONES"):
+            total += (parcial or 1) * 1000000
+            parcial = 0
+            continue
+        if palabra in _PALABRAS_NUMERO:
+            parcial += _PALABRAS_NUMERO[palabra]
+            continue
+        if parcial or total:
+            break                                      # palabra rara: se corta
+    total += parcial
+    if total <= 0:
+        return 0.0
+    return round(total + centimos / 100.0, 2)
+
+def deducir_montos_por_suma(texto, tipo=""):
+    """Deduce (base, IGV, total) buscando 'base + IGV = total' entre los importes.
+
+    Sirve cuando el OCR separa los rótulos de los números o confunde las
+    etiquetas: se recogen todos los importes y se busca el par que cumple la
+    relación del IGV (18% o 10.5%). Devuelve (0, 0, 0) si no hay combinación válida.
+    """
+    # 📊 Primero el caso de tablas en columnas (rótulos en una línea, importes en la otra)
+    por_columnas = montos_en_columnas(texto)
+    if por_columnas[2] > 0:
+        return por_columnas
+
+    valores = _importes_del_texto(texto)
+
+    # 💬 El importe en letras manda: la base es el mayor importe menor que el total
+    letras = monto_en_palabras(texto)
+    if letras:
+        candidatos = [v for v in valores if 0 < v < letras]
+        if candidatos:
+            base = max(candidatos)
+            igv = round(letras - base, 2)
+            if 0 < igv <= letras * 0.5:
+                return base, igv, letras
+        # Si no hay con qué comparar, se asume el IGV general (18%)
+        return round(letras / 1.18, 2), round(letras - letras / 1.18, 2), letras
+
+    if len(valores) < 3:
+        return 0.0, 0.0, 0.0
+    tasas = [0.105] if "10.5" in str(tipo) else [0.18]
+    mejor = None
+    for base in valores:
+        for igv in valores:
+            if base <= 0 or igv <= 0 or igv == base:
+                continue
+            if not any(abs(igv / base - tasa) < 0.02 for tasa in tasas):
+                continue
+            total = round(base + igv, 2)
+            if any(abs(v - total) <= 0.05 for v in valores):
+                if mejor is None or total > mejor[2]:
+                    mejor = (base, igv, total)
+    return mejor or (0.0, 0.0, 0.0)
+
+def _importes_del_texto(texto):
+    """Todos los importes con decimales del texto (corrige los 'oo' del OCR)."""
+    limpio = str(texto or "").replace("oo", "00").replace("OO", "00")
+    valores = []
+    for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", limpio):
+        valor = _a_numero(encontrado)
+        if valor and valor not in valores:
+            valores.append(round(float(valor), 2))
+    return valores
+
+def montos_en_columnas(texto):
+    """(base, igv, total) cuando los rótulos y los importes van en líneas distintas.
+
+    Es el caso de RIMAC, AFP y servicios: la línea de rótulos
+    ("OP- GRAVADA ... I.G.V. IMPORTE TOTAL") y la de valores ("S/ 150,00 S/ 27.00 S/ 177.0").
+    Se toma el último importe como total y el mayor de los demás como base.
+    """
+    lineas = str(texto or "").splitlines()
+    for indice in range(1, len(lineas)):
+        etiquetas = _texto_sin_acentos(lineas[indice - 1])
+        # Solo un encabezado inequívoco (IGV / IMPORTE TOTAL / TOTAL A PAGAR) y que esa
+        # línea NO traiga importes: así las facturas normales no entran por aquí.
+        if not re.search(r"(IMPORTE\s*TOTAL|TOTAL\s*A\s*PAGAR|I\.?\s*G\.?\s*V|\bIGV\b)", etiquetas):
+            continue
+        if re.search(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}", etiquetas):
+            continue
+        fila = lineas[indice].replace("S/.", " ").replace("S/", " ")
+        valores = []
+        for encontrado in re.findall(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{1,2}|\d+[.,]\d{1,2}", fila):
+            try:
+                valor = _a_numero(encontrado)
+            except Exception:
+                valor = 0
+            if valor and valor > 0:
+                valores.append(round(float(valor), 2))
+        if len(valores) >= 2:
+            total = valores[-1]
+            base = max(valores[:-1])
+            igv = round(total - base, 2)
+            if 0 < igv <= total * 0.5:
+                return base, igv, total
+    return 0.0, 0.0, 0.0
+
+
+
+# =========================================================
+# 🏢 APOYO DEL MÓDULO (tomado del programa de Flota)
+# Faltaban en este programa y cortaban el flujo del escaneo:
+# "name '<función>' is not defined".
+# =========================================================
+_SUFIJO_EMPRESA = re.compile(
+    r"\b(S\.?A\.?C\.?|S\.?A\.?|S\.?R\.?L\.?|E\.?I\.?R\.?L\.?|LTDA|SOCIEDAD|EMPRESA|CORPORACI[OÓ]N|"
+    r"INVERSIONES|COMERCIAL|SERVICIOS|CONTRATISTAS|NEGOCIOS|GRIFO|TRANSPORTES|DISTRIBUIDORA|"
+    r"IMPORT|EXPORT|HOLDING|GRUPO)\b", re.IGNORECASE)
+
+def _mismo_proveedor(nombre_a, nombre_b):
+    """¿Los dos nombres son del mismo proveedor? (tolera S.A.C., tildes, espacios)."""
+    def normalizar(nombre):
+        texto = str(nombre or "").upper()
+        for relleno in ("S.A.C.", "S.A.C", "SAC", "E.I.R.L.", "E.I.R.L", "EIRL",
+                        "S.R.L.", "S.R.L", "SRL", "S.A.", "S.A", "SAA", "E.I.R.L",
+                        "-", ".", ",", "  "):
+            texto = texto.replace(relleno, " ")
+        texto = " ".join(texto.split())
+        for con_tilde, sin_tilde in (("Á","A"), ("É","E"), ("Í","I"), ("Ó","O"), ("Ú","U"), ("Ñ","N")):
+            texto = texto.replace(con_tilde, sin_tilde)
+        return texto
+    a, b = normalizar(nombre_a), normalizar(nombre_b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # uno contenido en el otro (p. ej. "COESTI" y "COESTI E/S ORRANTIA")
+    return a.startswith(b) or b.startswith(a)
+
+def _serie_ocr_normalizada(serie):
+    """Corrige las letras que el OCR confunde con dígitos (EOOI -> E001)."""
+    tabla = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1",
+                           "S": "5", "Z": "2", "G": "6", "A": "4", "T": "7", "B": "8"})
+    serie = str(serie or "").upper()
+    # Solo se corrigen los DÍGITOS: la letra inicial (E/F/B) se respeta.
+    return serie[:1] + serie[1:].translate(tabla) if len(serie) > 1 else serie
+
+def _texto_del_soporte(ruta):
+    """Texto de un PDF (o de una foto) de soporte de pago."""
+    texto = ""
+    try:
+        import fitz
+        documento = fitz.open(ruta)
+        try:
+            texto = chr(10).join(pagina.get_text("text") or "" for pagina in documento)
+        finally:
+            documento.close()
+    except Exception:
+        texto = ""
+    if str(texto or "").strip():
+        return texto
+    try:
+        return leer_ocr_windows(ruta)
+    except Exception:
+        return ""
+
+def asegurar_proveedor(nombre, ruc, usar_internet=True, timeout=10):
+    """Deja registrado al proveedor (creándolo si hace falta) y devuelve sus datos.
+
+    Orden de trabajo:
+      1. Si ya existe (por RUC o por nombre) se usa el de la base de datos;
+         si le faltan la dirección o la ubicación y hay internet, se completan.
+      2. Si no existe, se consulta el RUC en internet (SUNAT) y se guarda con
+         TODA la información de la empresa (razón social, dirección fiscal, ubicación).
+      3. Si no hay internet o el RUC no existe en SUNAT, se guarda con lo leído
+         en el comprobante para no perder el registro.
+
+    Devuelve (estado, datos) con estado en:
+      'existe' | 'completado' | 'creado' | 'creado_sin_sunat' | 'sin-datos'
+      | 'sin-conexion' | 'error'
+    """
+    nombre = " ".join(str(nombre or "").split()).strip()
+    ruc = re.sub(r"\D", "", str(ruc or ""))
+    datos = {"ruc": ruc, "nombre": nombre, "direccion_fiscal": "", "ubicacion": ""}
+    if not nombre and not ruc:
+        return "sin-datos", datos
+
+    conn = conectar_db(silencioso=True)
+    if not conn:
+        return "sin-conexion", datos
+    try:
+        cursor = conn.cursor()
+        existente = None
+        if ruc:
+            cursor.execute("SELECT id, COALESCE(ruc,''), COALESCE(nombre,''), "
+                           "COALESCE(direccion_fiscal,''), COALESCE(ubicacion,'') "
+                           "FROM proveedores WHERE ruc = %s LIMIT 1", (ruc,))
+            existente = cursor.fetchone()
+        if not existente and nombre:
+            cursor.execute("SELECT id, COALESCE(ruc,''), COALESCE(nombre,''), "
+                           "COALESCE(direccion_fiscal,''), COALESCE(ubicacion,'') "
+                           "FROM proveedores WHERE TRIM(UPPER(nombre)) = TRIM(UPPER(%s)) LIMIT 1",
+                           (nombre,))
+            existente = cursor.fetchone()
+
+        de_sunat = None
+        if existente:
+            id_prov, ruc_db, nombre_db, direccion_db, ubicacion_db = existente
+            datos.update({"ruc": ruc_db or ruc, "nombre": nombre_db or nombre,
+                          "direccion_fiscal": direccion_db, "ubicacion": ubicacion_db})
+            # Solo se consulta SUNAT si a la ficha le falta información
+            falta_algo = not (direccion_db and ubicacion_db)
+            de_sunat = datos_proveedor_desde_ruc(ruc, timeout=timeout) if (usar_internet and ruc and falta_algo) else None
+            cambios = {}
+            if de_sunat:
+                if not direccion_db and de_sunat.get("direccion_fiscal"):
+                    cambios["direccion_fiscal"] = de_sunat["direccion_fiscal"]
+                    datos["direccion_fiscal"] = de_sunat["direccion_fiscal"]
+                if not ubicacion_db and de_sunat.get("ubicacion"):
+                    cambios["ubicacion"] = de_sunat["ubicacion"]
+                    datos["ubicacion"] = de_sunat["ubicacion"]
+                if not nombre_db and de_sunat.get("nombre"):
+                    cambios["nombre"] = de_sunat["nombre"]
+                    datos["nombre"] = de_sunat["nombre"]
+            if cambios:
+                columnas = ", ".join(f"{c} = %s" for c in cambios)
+                cursor.execute(f"UPDATE proveedores SET {columnas} WHERE id = %s",
+                               tuple(cambios.values()) + (id_prov,))
+                conn.commit()
+                try:
+                    cache_sistema.invalidar()
+                except Exception:
+                    pass
+                return "completado", datos
+            return "existe", datos
+
+        # No existe: se crea con los datos de SUNAT (si se pudieron traer)
+        if de_sunat is None and usar_internet and ruc:
+            de_sunat = datos_proveedor_desde_ruc(ruc, timeout=timeout)
+        if de_sunat and (de_sunat.get("nombre") or nombre):
+            datos.update({"nombre": de_sunat.get("nombre") or nombre,
+                          "direccion_fiscal": de_sunat.get("direccion_fiscal", ""),
+                          "ubicacion": de_sunat.get("ubicacion", "")})
+            estado = "creado"
+        elif nombre:
+            datos["nombre"] = nombre
+            estado = "creado_sin_sunat"
+        else:
+            # Sin razón social (ni del comprobante ni de SUNAT) NO se crea un proveedor
+            # con el número de RUC como nombre: se le pide al usuario que lo escriba.
+            return "sin-datos", datos
+
+        cursor.execute("""
+            INSERT INTO proveedores (ruc, nombre, direccion_fiscal, categoria, ubicacion, descripcion)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (datos["ruc"], datos["nombre"], datos.get("direccion_fiscal", ""),
+              "No seleccionada", datos.get("ubicacion", ""),
+              "Agregado automáticamente al escanear un comprobante"))
+        conn.commit()
+        try:
+            cache_sistema.invalidar()
+        except Exception:
+            pass
+        return estado, datos
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return "error", datos
+    finally:
+        liberar_conexion(conn)
+
+def avisar_sin_permiso_guardado(parent=None):
+    """Muestra el aviso correcto cuando no hay carpeta base disponible.
+
+    Si el bloqueo viene de la política de almacenamiento (cuenta Rclone distinta a
+    la del equipo principal) muestra esa advertencia; si no, la de configuración.
+    Devuelve True si ya se mostró el aviso de bloqueo.
+    """
+    try:
+        from politica_almacenamiento import avisar_sin_ruta
+        return avisar_sin_ruta(parent)
+    except Exception:
+        messagebox.showwarning("Configuración Requerida", "No ha configurado la ruta de Google Drive.\nEs obligatorio para guardar archivos.", parent=parent)
+        return False
+
+def buscar_comprobante_duplicado(numero_documento):
+    """Comprobante ya registrado con ese N° de documento (o None).
+
+    Se compara solo el número (sin espacios ni mayúsculas), igual que la
+    verificación que hace 'guardar_registro', para no permitir duplicados.
+    """
+    nro = re.sub(r"\s+", "", str(numero_documento or "")).upper()
+    if not nro:
+        return None
+    conn = conectar_db(silencioso=True)
+    if not conn:
+        return None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT proveedor, fecha, COALESCE(total, 0), COALESCE(ruc, ''), COALESCE(archivo_ruta, '')
+            FROM facturas_recibidas
+            WHERE REGEXP_REPLACE(REGEXP_REPLACE(UPPER(COALESCE(numero_documento, '')), '[^A-Z0-9]', '', 'g'),
+                                 '^([A-Z]+)0+', '\1')
+                  = REGEXP_REPLACE(REGEXP_REPLACE(%s, '[^A-Z0-9]', '', 'g'), '^([A-Z]+)0+', '\1')
+            ORDER BY id DESC LIMIT 1
+        """, (nro,))
+        fila = cursor.fetchone()
+        if not fila:
+            return None
+        return {"numero": nro, "proveedor": fila[0], "fecha": fila[1],
+                "total": fila[2], "ruc": fila[3], "archivo": fila[4]}
+    except Exception:
+        return None
+    finally:
+        liberar_conexion(conn)
+
+def crear_proveedor_si_no_existe(nombre, ruc, usar_internet=True):
+    """Compatibilidad: agrega el proveedor si no está y devuelve solo el estado."""
+    estado, _datos = asegurar_proveedor(nombre, ruc, usar_internet=usar_internet)
+    return estado
+
+def datos_proveedor_desde_ruc(ruc, timeout=10):
+    """Datos completos del proveedor traídos de SUNAT por internet (o None)."""
+    try:
+        from proveedores import consultar_ruc_en_internet
+    except Exception:
+        return None
+    return consultar_ruc_en_internet(ruc, timeout=timeout)
+
+def facturas_que_cancela(archivo_ruta="", numero_operacion=""):
+    """Facturas canceladas por el MISMO comprobante o el mismo N° de operación."""
+    filas = []
+    try:
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return filas
+        try:
+            with conn.cursor() as cur:
+                # 🌍 La base puede tener la ruta RELATIVA ("facturas_recibidas/x.pdf")
+                #    mientras que la app maneja la ruta ABSOLUTA resuelta. Se comparan
+                #    las tres formas posibles + el nombre del archivo.
+                ruta_txt = str(archivo_ruta or "").replace("\\", "/").strip()
+                nombre = ruta_txt.split("/")[-1] if ruta_txt else ""
+                relativa = ruta_txt
+                try:
+                    from app_paths import partir_ruta_guardada
+                    sub, nom = partir_ruta_guardada(ruta_txt)
+                    if nom:
+                        relativa = (sub + "/" + nom) if sub else nom
+                except Exception:
+                    pass
+                cur.execute("""
+                    SELECT DISTINCT f.numero_documento, COALESCE(f.proveedor, ''),
+                                    COALESCE(pc.monto_pagado, 0), COALESCE(pc.fecha_pago, '')
+                    FROM pagos_comprobantes pc
+                    JOIN facturas_recibidas f ON f.id = pc.id_factura
+                    WHERE (%s <> '' AND (
+                              COALESCE(pc.archivo_ruta, '') = %s
+                           OR COALESCE(pc.archivo_ruta, '') = %s
+                           OR COALESCE(pc.archivo_ruta, '') LIKE %s))
+                       OR (%s <> '' AND COALESCE(pc.numero_operacion, '') = %s)
+                    ORDER BY f.numero_documento
+                """, (ruta_txt, ruta_txt, relativa, ("%" + nombre) if nombre else "\x00",
+                      str(numero_operacion or ""), str(numero_operacion or "")))
+                filas = cur.fetchall()
+        finally:
+            liberar_conexion(conn)
+    except Exception as e:
+        print("Aviso - facturas del comprobante:", e)
+    return filas
+
+def nombre_tercero_desde_texto(texto):
+    """Nombre de quien hizo el pago (el tercero) según su comprobante."""
+    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
+    etiquetas = ("ENVIADO POR", "ORDENANTE", "REMITENTE", "PAGADOR", "TITULAR",
+                 "NOMBRE DEL ORDENANTE", "DESDE", "BENEFICIARIO", "ENVIADO A",
+                 "A NOMBRE DE")
+
+    def _candidato(valor):
+        valor = re.sub(r"^(NOMBRE|SR|SRA|SRTA)\.?\s*[:\-]?\s*", "", str(valor or "").strip(),
+                       flags=re.I)
+        valor = re.sub(r"\s{2,}", " ", valor).strip(" :.-")
+        if len(valor) < 5:
+            return ""
+        alto = _texto_sin_acentos(valor).upper()
+        if "BLACK RIDERS" in alto or "RUC" in alto or "S/" in alto:
+            return ""
+        if re.search(r"\d{3,}", valor):
+            return ""
+        if not re.search(r"[A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,}", valor):
+            return ""
+        # 🚫 Palabras que son RÓTULOS del voucher, no nombres de personas/empresas
+        prohibidas = ("DESDE", "ENVIADO A", "ENVIADO POR", "ORDENANTE", "REMITENTE",
+                      "PAGADOR", "TITULAR", "BENEFICIARIO", "A NOMBRE DE", "NUMERO DE OPERACION",
+                      "OPERACION", "MONEDA", "CORRIENTE", "SOLES", "CUENTA", "COMISION",
+                      "TOTAL", "TOTAL COBRADO", "MONTO", "FECHA", "TRANSFERENCIA",
+                      "EXITOSA", "TRANSFERENCIA EXITOSA", "BCP", "BBVA", "INTERBANK",
+                      "MONEDA SOLES", "CORRIENTE SOLES")
+        if alto in prohibidas or any(alto.endswith(p) for p in ("SOLES", "OPERACION")):
+            return ""
+        if "OPERACI" in alto or "MONEDA" in alto:
+            return ""
+        # Un nombre real suele tener al menos dos palabras (Collie Paiser Fabiola C.)
+        if len(valor.split()) < 2:
+            return ""
+        return valor
+
+    for posicion, linea in enumerate(lineas):
+        alto = _texto_sin_acentos(linea).upper()
+        for etiqueta in etiquetas:
+            if etiqueta in alto:
+                resto = linea[alto.find(etiqueta) + len(etiqueta):]
+                candidato = _candidato(resto)
+                if not candidato:
+                    # se revisan las siguientes líneas (el OCR desordena las columnas)
+                    for salto in range(1, 4):
+                        if posicion + salto >= len(lineas):
+                            break
+                        candidato = _candidato(lineas[posicion + salto])
+                        if candidato:
+                            break
+                if candidato:
+                    return candidato
+    return ""
+
+def numero_comprobante_desde_texto(texto):
+    """N° de documento (F001-123, E001-45...) leído del comprobante."""
+    texto = str(texto or "")
+    m = re.search(r"\b([EFB][0-9A-Z]{3})\s*[-:\u2013\u2014]?\s*(\d{1,8})", texto)
+    if m:
+        # Se respetan los ceros tal como vienen (F001-00001234)
+        return f"{_serie_ocr_normalizada(m.group(1))}-{m.group(2)}"
+    # 🔎 El OCR confunde la letra inicial con un dígito ("F37B" -> "1376")
+    m = re.search(r"\b([0-9][0-9A-Z]{3})\s*[-\u2013\u2014]\s*(\d{5,8})\b", texto)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    m = re.search(r"([EFB][0-9A-Z]{3}\s*-\s*\d+)", texto)
+    return m.group(1).replace(" ", "") if m else ""
+
+
+
+# =========================================================
+# 🏢 PROVEEDOR A PARTIR DEL TEXTO DEL OCR
+# (estas tres se usaban en "autocompletar_desde_pdf" pero no
+#  estaban definidas: cortaban la carga de la factura escaneada)
+# =========================================================
+def _ruc_del_proveedor(texto, ruc_empresa=""):
+    """RUC (11 dígitos) del proveedor: el primero que no sea el de la empresa."""
+    propio = re.sub(r"\D", "", str(ruc_empresa or ""))
+    for candidato in re.findall(r"(?<!\d)(\d{11})(?!\d)", str(texto or "")):
+        if candidato == propio:
+            continue
+        if candidato[:2] in ("10", "15", "17", "20"):
+            return candidato
+    return ""
+
+
+def _proveedor_por_ruc_ocr(texto, ruc_empresa=""):
+    """Busca el RUC leído en la tabla de proveedores. Devuelve (ruc, nombre)."""
+    ruc = _ruc_del_proveedor(texto, ruc_empresa)
+    if not ruc:
+        return "", ""
+    conexion = None
+    try:
+        from conexion import conectar_db, liberar_conexion
+        conexion = conectar_db(silencioso=True)
+        if not conexion:
+            return "", ""
+        cursor = conexion.cursor()
+        cursor.execute("SELECT ruc, nombre FROM proveedores WHERE ruc = %s LIMIT 1", (ruc,))
+        fila = cursor.fetchone()
+        if fila:
+            return str(fila[0] or ruc), str(fila[1] or "")
+        return ruc, ""
+    except Exception as error:
+        print("Aviso - proveedor por RUC:", error)
+        return ruc, ""
+    finally:
+        try:
+            if conexion is not None:
+                liberar_conexion(conexion)
+        except Exception:
+            pass
+
+
+def _nombre_del_proveedor(texto, ruc=""):
+    """Deduce el nombre del proveedor: la línea en mayúsculas cercana al RUC."""
+    lineas = [l.strip() for l in str(texto or "").splitlines() if l.strip()]
+    if not lineas:
+        return ""
+    posicion = 0
+    if ruc:
+        for indice, linea in enumerate(lineas):
+            if str(ruc) in re.sub(r"\D", "", linea) or str(ruc) in linea:
+                posicion = indice
+                break
+    # se prefiere la línea anterior/siguiente al RUC con aspecto de razón social
+    orden = []
+    for salto in (0, -1, 1, -2, 2, -3, 3):
+        indice = posicion + salto
+        if 0 <= indice < len(lineas):
+            orden.append(lineas[indice])
+    for linea in orden:
+        limpia = re.sub(r"\s+", " ", linea).strip(" .-|:")
+        sin_ruc = re.sub(r"\d{11}", "", limpia).strip(" .-|:")
+        if len(sin_ruc) < 4:
+            continue
+        if re.search(r"RUC|FACTURA|BOLETA|ELECTR|TOTAL|SUBTOTAL|IGV|FECHA|DNI", sin_ruc.upper()):
+            continue
+        letras = sum(1 for c in sin_ruc if c.isalpha())
+        if letras < 4:
+            continue
+        if sin_ruc.isupper() or sin_ruc.upper() == sin_ruc:
+            return sin_ruc[:120]
+    return ""
+
+
+
+
+# =========================================================
+# 🔢 APOYOS QUE FALTABAN
+# =========================================================
+def formatear_numero_entrada(valor):
+    """'1234.5' -> '1,234.50' (formato del programa)."""
+    try:
+        numero = float(str(valor).replace(",", "").replace(" ", ""))
+    except Exception:
+        return str(valor or "")
+    return "{:,.2f}".format(numero)
+
+
+def cargar_configuracion_general():
+    """Compatibilidad: la configuración local del programa."""
+    try:
+        return cargar_configuracion_regional()
+    except Exception:
+        return {}
+
 
 
 class CalendarioNativo(ctk.CTkToplevel):

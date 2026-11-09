@@ -286,15 +286,7 @@ def traer_al_frente(ventana, retrasos=(60, 260, 700, 1150)):
 # Métodos que vuelven a traer los datos de un módulo desde la base de datos.
 # El sistema los usa cuando se abre un módulo que YA estaba abierto, para que la
 # ventana que se trae al frente muestre la información actualizada.
-METODOS_RECARGA_MODULOS = (
-    "cargar_datos_tabla", "cargar_datos_cobrar", "cargar_datos_pagar", "cargar_datos_nc",
-    "cargar_clientes_tabla", "cargar_proveedores_tabla", "cargar_tabla",
-    "cargar_historial_ordenes", "cargar_historial", "cargar_registros",
-    "cargar_solicitudes_tab", "cargar_datos_diario", "cargar_datos_mayor", "cargar_datos_db",
-    "cargar_kpis", "cargar_categorias", "cargar_combos",
-    "refrescar_saldos", "refrescar_transferencias", "refrescar_tree",
-    "refrescar_tabla_categorias", "refrescar_datos", "actualizar_tabla", "recargar_datos",
-)
+METODOS_RECARGA_MODULOS = ('cargar_datos', 'cargar_datos_tabla', 'cargar_tabla', 'refrescar_datos', 'actualizar_tabla', 'recargar_datos', 'refrescar', 'cargar_vehiculos', 'cargar_clientes_tabla', 'cargar_proveedores_tabla', 'refrescar_saldos', 'cargar_datos_pagar', 'cargar_datos_cobrar', 'refrescar_tree', 'cargar_historial', 'cargar_datos_nc', 'cargar_historial_ordenes', 'cargar_registros', 'cargar_solicitudes_tab', 'cargar_datos_diario', 'cargar_datos_mayor', 'cargar_datos_db', 'cargar_kpis', 'cargar_categorias', 'cargar_combos', 'refrescar_transferencias', 'refrescar_tabla_categorias', 'cargar_datos_iniciales', 'cargar_matriz_asistencia', 'cargar_panel', 'cargar_tareas_tabla', 'cargar_inspecciones', 'cargar_empleados', 'cargar_asignaciones', 'cargar_rangos_viaje', 'cargar_unidades_cliente', 'cargar_clientes', 'refrescar_combos_globales', 'cargar_personas_reloj', 'cargar_flota_activa', 'cargar_papeletas', 'cargar_parte', 'cargar_rendiciones', 'cargar_zonas', 'cargar_vehiculos_tabla', 'cargar_ordenes', 'cargar_facturas', 'cargar_pagos_clientes', 'cargar_cobros', 'cargar_comprobantes', 'cargar_saldos')
 
 
 def _acepta_reset_pagina(metodo):

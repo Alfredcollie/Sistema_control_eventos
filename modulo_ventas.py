@@ -333,7 +333,8 @@ def abrir_documento_externo(ruta):
 
 def cargar_configuracion_regional():
     config = {
-        "simbolo_moneda": "S/.", "formato_numero": "1,000.00", "formato_fecha": "DD/MM/AAAA",
+        "simbolo_moneda": "S/.", "formato_numero": "1,000.00",
+        "detraccion_umbral": "700", "detraccion_porcentaje": "12", "formato_fecha": "DD/MM/AAAA",
         "ruta_drive": "", "impresora": "", "ultimo_factura": "F001-0", "ultimo_boleta": "B001-0",
         "ultimo_recibo": "E001-0", "2fa_metodo": "Inactivo", "tel_bot_token": "", "tel_chat_id": "",
         "email_smtp": "smtp.gmail.com", "email_port": "587", "email_user": "", "email_pass": "",
@@ -696,6 +697,56 @@ def redondear_detraccion(monto):
         return -redondear_detraccion(-valor)
     entero = math.floor(valor)
     return float(entero + 1) if (valor - entero) >= 0.5 else float(entero)
+
+
+
+# =========================================================
+# 📏 REGLA AUTOMÁTICA DE LA DETRACCIÓN (SPOT)
+#   Servicios generales / producción de eventos : 12%
+#   Transporte de bienes por vía terrestre      : 4%
+#   NO se aplica si el total (CON IGV) NO SUPERA el umbral:
+#       12%  -> hasta S/ 700.00  no hay detracción
+#        4%  -> hasta S/ 400.00  no hay detracción
+#   Ojo: exactamente S/ 700.00 no lleva; S/ 700.01 sí lleva 12%.
+# Se puede cambiar el umbral y el porcentaje en la Configuración
+# General (claves "detraccion_umbral" y "detraccion_porcentaje").
+# =========================================================
+UMBRAL_DETRACCION_VENTAS = 700.0
+PORCENTAJE_DETRACCION_VENTAS = 12.0
+
+
+def _numero_config(clave, por_defecto):
+    try:
+        valor = CONFIG_REGIONAL.get(clave)
+        if valor in (None, ""):
+            return float(por_defecto)
+        return float(str(valor).replace(",", "."))
+    except Exception:
+        return float(por_defecto)
+
+
+def umbral_detraccion_ventas():
+    """Monto (con IGV) hasta el cual NO corresponde detracción."""
+    return _numero_config("detraccion_umbral", UMBRAL_DETRACCION_VENTAS)
+
+
+def porcentaje_detraccion_ventas(total, umbral=None, porcentaje=None, producto=False):
+    """Devuelve el % de detracción que corresponde según el total CON IGV.
+
+    - Venta de PRODUCTOS (pines, merchandising, etc.): SIEMPRE 0 %.
+    - Servicios / producción de eventos: 12 % sólo si el total SUPERA el umbral
+      (S/ 700 con IGV). Si no lo supera, 0 % (no hay detracción).
+    """
+    if producto:
+        return 0.0
+    tope = umbral_detraccion_ventas() if umbral is None else float(umbral)
+    pct = (_numero_config("detraccion_porcentaje", PORCENTAJE_DETRACCION_VENTAS)
+           if porcentaje is None else float(porcentaje))
+    try:
+        total = float(total)
+    except (TypeError, ValueError):
+        return 0.0
+    return pct if total > tope + 1e-9 else 0.0
 
 
 class CalendarioNativo(ctk.CTkToplevel):
@@ -1744,6 +1795,16 @@ class FacturasEmitidasTab:
         self.ent_subtotal = ctk.CTkEntry(self.f_form); self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 8)); self.ent_subtotal.bind("<KeyRelease>", self.actualizar_totales)
         self.lbl_titulo_det = ctk.CTkLabel(self.f_form, text="Detracción (%):", font=("Arial", 11, "bold")); self.lbl_titulo_det.pack(anchor="w", padx=10)
         self.ent_detraccion = ctk.CTkEntry(self.f_form); self.ent_detraccion.pack(fill="x", padx=10, pady=(0, 8)); self.ent_detraccion.insert(0, "12"); self.ent_detraccion.bind("<KeyRelease>", self.actualizar_totales)
+        # 🏷️ ¿La venta es de un EVENTO (servicio, 12 %) o de un PRODUCTO (pines, 0 %)?
+        ctk.CTkLabel(self.f_form, text="Tipo de venta (detracción):",
+                     font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
+        self.seg_tipo_venta = ctk.CTkSegmentedButton(
+            self.f_form, values=["🎪 Evento / Servicio (12%)", "📦 Producto (0%)"],
+            font=("Arial", 10, "bold"),
+            command=lambda _v: self.actualizar_totales())
+        self.seg_tipo_venta.pack(fill="x", padx=10, pady=(0, 8))
+        self.seg_tipo_venta.set("🎪 Evento / Servicio (12%)")
+
         # 🧮 Redondeo opcional de la detracción al entero (norma del Banco de la Nación)
         self.chk_redondeo_det = ctk.CTkCheckBox(
             self.f_form, text="🧮 Redondear detracción al entero",
@@ -2029,6 +2090,16 @@ class FacturasEmitidasTab:
             self._eventos_aprobados = list(lista_limpia)
         self.combo_evento.configure(values=lista_evs)
         if self.combo_evento.get() not in lista_evs: self.combo_evento.set("GENERAL / NO ASIGNADO")
+    def venta_de_producto(self):
+        """True si la venta es de PRODUCTOS (pines, etc.): no lleva detracción."""
+        control = getattr(self, "seg_tipo_venta", None)
+        if control is None:
+            return False
+        try:
+            return "producto" in str(control.get()).lower()
+        except Exception:
+            return False
+
     def detraccion_con_redondeo(self):
         """True si el usuario activó el check de redondeo de la detracción."""
         chk = getattr(self, "chk_redondeo_det", None)
@@ -2046,6 +2117,15 @@ class FacturasEmitidasTab:
             sub, ui_pct = float(self.ent_subtotal.get() or 0), float(self.ent_detraccion.get() or 0)
             if "Factura" in tipo:
                 igv = redondear_centavos(sub * 0.18); tot = redondear_centavos(sub + igv)
+                # 📏 Regla automática: hasta S/ 700 con IGV no corresponde detracción
+                pct_regla = porcentaje_detraccion_ventas(tot, producto=self.venta_de_producto())
+                if abs(pct_regla - ui_pct) > 0.001:
+                    ui_pct = pct_regla
+                    try:
+                        self.ent_detraccion.delete(0, tk.END)
+                        self.ent_detraccion.insert(0, "%g" % ui_pct)
+                    except Exception:
+                        pass
                 det = tot * (ui_pct / 100.0)
                 # 🧮 con el check activo se redondea al entero (0.01-0.49 baja, 0.50-0.99 sube)
                 det = redondear_detraccion(det) if self.detraccion_con_redondeo() else redondear_centavos(det)
@@ -2076,7 +2156,10 @@ class FacturasEmitidasTab:
         except ValueError: return messagebox.showerror("Error", "Montos deben ser numéricos.")
         if "Factura" in tipo:
             imp = redondear_centavos(subtotal * 0.18); tot_bruto = redondear_centavos(subtotal + imp)
-            det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0)
+            # 📏 el % se decide solo según el total con IGV (hasta S/ 700 no hay)
+            det_pct = porcentaje_detraccion_ventas(tot_bruto,
+                                                   producto=self.venta_de_producto())
+            det_monto = tot_bruto * (det_pct / 100.0)
             det_monto = (redondear_detraccion(det_monto) if self.detraccion_con_redondeo()
                          else redondear_centavos(det_monto))
             neto_nuevo = redondear_centavos(tot_bruto - det_monto)
@@ -2726,7 +2809,8 @@ class FacturasEmitidasTab:
                 if reg[6] > 0 and reg[9] > 0: pct = (float(reg[9]) / float(reg[6])) * 100; ent_det.insert(0, f"{pct:g}")
                 else: ent_det.insert(0, "0")
             else:
-                lbl_tit_det.configure(text="Detracción (%):"); ent_det.insert(0, str(reg[8]))
+                lbl_tit_det.configure(text="Detracción (%):")
+                ent_det.insert(0, ("%g" % float(reg[8] or 0)))   # se muestra lo guardado (0 incluido)
 
             def guardar_cambios():
                 tipo, nro_doc, fecha = cmb_tipo.get(), ent_nro.get().strip(), ent_f.get().strip()

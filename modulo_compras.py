@@ -700,6 +700,7 @@ def cargar_configuracion_regional():
     config = {
         "simbolo_moneda": "S/.",
         "formato_numero": "1,000.00",
+        "detraccion_umbral": "700", "detraccion_porcentaje": "12",
         "formato_fecha": "DD/MM/AAAA",
         "ruta_drive": "",
         "impresora": "",

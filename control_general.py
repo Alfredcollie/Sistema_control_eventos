@@ -1060,6 +1060,7 @@ def cargar_configuracion_general():
         "color_primario": "#eb337a", "color_secundario": "#000000", "color_franja": "#eb337a",
         "ruc_empresa": "", "razon_social_empresa": "", "igv_porcentaje": "0",
         "detraccion_porcentaje": "12",
+        "detraccion_umbral": "700",
         "renta_mensual_porcentaje": "0", "renta_anual_porcentaje": "0",
         "regimen_empresa": "MYPE Tributario", "nombre_cliente_cotizacion": "Razón Social",
         "proveedor_fe": "Nubefact", "url_api_fe": "", "token_api_fe": "",
@@ -3677,6 +3678,21 @@ class ControlGeneralEventos:
         cmb_fecha.pack(side="left")
         cmb_fecha.set(config_actual.get("formato_fecha", "DD/MM/AAAA"))
 
+        # REGLA AUTOMATICA DEL SPOT (detraccion)
+        f_det = ctk.CTkFrame(f_region, fg_color="transparent")
+        f_det.pack(fill="x", padx=15, pady=5)
+        ctk.CTkLabel(f_det, text="Detracción: no aplica hasta (con IGV):",
+                     font=("Arial", 11, "bold"), width=280, anchor="w").pack(side="left")
+        ent_det_umbral = ctk.CTkEntry(f_det, width=110)
+        ent_det_umbral.pack(side="left")
+        ent_det_umbral.insert(0, str(config_actual.get("detraccion_umbral", "700")))
+        ctk.CTkLabel(f_region,
+                     text=("El porcentaje se aplica SOLO si el total con IGV SUPERA ese monto. "
+                           "Si la factura es igual o menor, no corresponde detraccion "
+                           "(ejemplo: 700 exactos no llevan; 700.01 si lleva)."),
+                     font=("Arial", 9), text_color="#7a7a7a", justify="left",
+                     wraplength=780).pack(anchor="w", padx=15, pady=(0, 6))
+
         ctk.CTkLabel(f_region, text="🖨️ Impresora por Defecto", font=("Arial", 12, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
         ent_impresora = ctk.CTkEntry(f_region, placeholder_text="Ej: Epson L3150 Series")
         ent_impresora.pack(fill="x", padx=15)
@@ -4263,6 +4279,7 @@ class ControlGeneralEventos:
                 "impresora": ent_impresora.get().strip(),
                 "simbolo_moneda": cmb_moneda.get().strip() or "S/.",
                 "formato_numero": cmb_num.get(),
+            "detraccion_umbral": (ent_det_umbral.get().strip() or "700"),
                 "formato_fecha": cmb_fecha.get(),
                 "ruta_logo_cotizacion": ent_logo.get().strip(),
                 "color_primario": ent_color_1.get().strip(),

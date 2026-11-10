@@ -19,6 +19,7 @@ from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 from datetime import datetime
 import os
+from formato_numeros import formatear_numero
 import sys
 import shutil
 import json
@@ -167,7 +168,7 @@ def parsear_numero_seguro(valor_str):
 def formatear_moneda(valor):
     simbolo = cargar_configuracion_regional().get("simbolo_moneda", "S/.")
     valor_float = parsear_numero_seguro(valor)
-    return f"{simbolo} {valor_float:,.2f}"
+    return f"{simbolo} {formatear_numero(valor_float)}"
 
 FEE_PRODUCCION_PCT = 15.0
 
@@ -818,9 +819,9 @@ class OrdenesCompraClienteApp:
                 f"✅ Lectura OCR Exitosa:\n\n"
                 f"• Nº de Orden: {num_oc_detectado or 'Detectado en blanco'}\n"
                 f"• Fecha Emisión: {fecha_detectada or 'No detectada'}\n"
-                f"• Subtotal: S/. {subtotal_detectado:,.2f}\n"
-                f"• IGV (18%): S/. {igv_detectado:,.2f}\n"
-                f"• Total OC: S/. {total_detectado:,.2f}\n"
+                f"• Subtotal: S/. {formatear_numero(subtotal_detectado)}\n"
+                f"• IGV (18%): S/. {formatear_numero(igv_detectado)}\n"
+                f"• Total OC: S/. {formatear_numero(total_detectado)}\n"
                 f"• Descripción: {descripcion_detectada[:45] + '...' if len(descripcion_detectada) > 45 else (descripcion_detectada or 'General')}\n"
             )
             messagebox.showinfo("Escaneo Completado", resumen_msg)
@@ -835,7 +836,7 @@ class OrdenesCompraClienteApp:
                 return
 
             if total_pdf > 0:
-                total_str_fmt = f"{total_pdf:,.2f}"
+                total_str_fmt = f"{formatear_numero(total_pdf)}"
                 for item in valores_combo:
                     if total_str_fmt in item:
                         self.cmb_cot_cli.set(item)
@@ -1015,7 +1016,7 @@ class OrdenesCompraClienteApp:
                 registro.update(totales)
                 mapa[cod_val] = registro
                 etiqueta = (f"{cod_val} | {registro.get('cliente') or 'Cliente'} | "
-                            f"{totales['total']:,.2f}")
+                            f"{formatear_numero(totales['total'])}")
                 if str(registro.get("oc") or "").strip():
                     etiqueta += f" | ⚠️ ya tiene OC: {registro['oc']}"
                 etiquetas.append(etiqueta)
@@ -1037,17 +1038,17 @@ class OrdenesCompraClienteApp:
             moneda = cargar_configuracion_regional().get("simbolo_moneda", "S/.")
             partes = []
             if registro.get("venta") is not None:
-                partes.append(f"Venta: {moneda} {registro['venta']:,.2f}")
+                partes.append(f"Venta: {moneda} {formatear_numero(registro['venta'])}")
             if "fee" in registro:
                 if registro.get("sin_fee"):
                     partes.append("Fee 15%: exonerado")
                 else:
-                    partes.append(f"+ Fee 15%: {moneda} {registro['fee']:,.2f}")
-            partes.append(f"= Sin IGV: {moneda} {registro.get('sin_igv', 0.0):,.2f}")
-            partes.append(f"+ IGV ({registro.get('igv_pct', 18):g}%): {moneda} {registro.get('igv', 0.0):,.2f}")
+                    partes.append(f"+ Fee 15%: {moneda} {formatear_numero(registro['fee'])}")
+            partes.append(f"= Sin IGV: {moneda} {formatear_numero(registro.get('sin_igv', 0.0))}")
+            partes.append(f"+ IGV ({registro.get('igv_pct', 18):g}%): {moneda} {formatear_numero(registro.get('igv', 0.0))}")
             if registro.get("financiamiento", 0.0):
-                partes.append(f"+ Financ. ({registro.get('fin_pct', 0):g}%): {moneda} {registro['financiamiento']:,.2f}")
-            partes.append(f"= Total OC: {moneda} {registro.get('total', 0.0):,.2f}")
+                partes.append(f"+ Financ. ({registro.get('fin_pct', 0):g}%): {moneda} {formatear_numero(registro['financiamiento'])}")
+            partes.append(f"= Total OC: {moneda} {formatear_numero(registro.get('total', 0.0))}")
             if str(registro.get("oc") or "").strip():
                 partes.append(f"⚠️ Esta cotización YA tiene OC: {registro['oc']}")
             self.lbl_desglose.configure(text="  ".join(partes))

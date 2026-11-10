@@ -12,6 +12,7 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 """
 
 import os
+from formato_numeros import formatear_numero
 import re
 import json
 import sys
@@ -520,9 +521,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)
                     c.setFillColorRGB(0, 0, 0)
-                    c.drawCentredString(385, y_centro_fila, f"{simbolo_moneda} {f['p_unitario']:,.2f}")
+                    c.drawCentredString(385, y_centro_fila, f"{simbolo_moneda} {formatear_numero(f['p_unitario'])}")
                     c.drawCentredString(450, y_centro_fila, str(f["cantidad"]))
-                    c.drawCentredString(525, y_centro_fila, f"{simbolo_moneda} {f['precio']:,.2f}")
+                    c.drawCentredString(525, y_centro_fila, f"{simbolo_moneda} {formatear_numero(f['precio'])}")
                     subtotal_acumulado += f["precio"]
                     if i_idx == len(bloque["indices"]) - 1:
                         c.setFont("Helvetica-Bold", 9)
@@ -608,13 +609,13 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 y_cursor -= espacio_detalle
             c.drawRightString(440, y_cursor, etiqueta_fila)
             c.drawString(490, y_cursor, "S/")
-            c.drawRightString(565, y_cursor, f"{monto_fila:,.2f}")
+            c.drawRightString(565, y_cursor, f"{formatear_numero(monto_fila)}")
             
         y_cursor -= espacio_cierre
         c.setFont("Helvetica-Bold", 11)
         c.drawRightString(440, y_cursor, "TOTAL (SOLES)")
         c.drawString(490, y_cursor, "S/")
-        c.drawRightString(565, y_cursor, f"{total_general_soles:,.2f}")
+        c.drawRightString(565, y_cursor, f"{formatear_numero(total_general_soles)}")
         
         y_cursor -= espacio_cierre
         c.setFont("Helvetica-Bold", 10.5)
@@ -622,7 +623,7 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.drawRightString(440, y_cursor, "TOTAL EQUIVALENTE (DÓLARES)")
         c.setFont("Helvetica-Bold", 12)
         c.drawString(475, y_cursor, "$")
-        c.drawRightString(565, y_cursor, f"{total_general_dolares:,.2f} USD")
+        c.drawRightString(565, y_cursor, f"{formatear_numero(total_general_dolares)} USD")
 
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColorRGB(*rgb_primario)

@@ -24,6 +24,7 @@ import customtkinter as ctk
 from datetime import datetime
 import sys
 import os
+from formato_numeros import formatear_numero
 import subprocess
 import webbrowser
 import urllib.parse
@@ -236,8 +237,8 @@ def texto_totales_orden(subtotal_neto):
     igv = subtotal_neto * (IGV_PORCENTAJE / 100.0)
     total_con_igv = subtotal_neto + igv
     texto = (
-        f"Subtotal (sin IGV): S/ {subtotal_neto:,.2f}   +   IGV ({IGV_PORCENTAJE:g}%): S/ {igv:,.2f}\n"
-        f"TOTAL DE LA ORDEN (con IGV): S/ {total_con_igv:,.2f}"
+        f"Subtotal (sin IGV): S/ {formatear_numero(subtotal_neto)}   +   IGV ({IGV_PORCENTAJE:g}%): S/ {formatear_numero(igv)}\n"
+        f"TOTAL DE LA ORDEN (con IGV): S/ {formatear_numero(total_con_igv)}"
     )
     return texto, total_con_igv
 
@@ -638,7 +639,7 @@ class OrdenesCompraApp:
                             ver = r[2] or 0
                             n_imprimir = num_base if ver == 0 else f"{num_base}-{ver}"
                             ev_nombre = r[4] if r[4] else "Evento no registrado"
-                            rows.append((r[0], n_imprimir, r[3], ev_nombre, r[5], r[6], f"{r[7]:,.2f}"))
+                            rows.append((r[0], n_imprimir, r[3], ev_nombre, r[5], r[6], f"{formatear_numero(r[7])}"))
                             
                         cache_sistema.guardar(clave_cache, rows)
                     except Exception as e:
@@ -973,8 +974,8 @@ class OrdenesCompraApp:
             costo_linea = float(valores[4])
             cant_linea = cantidad_numerica(valores[1])
             p_unit = (costo_linea / cant_linea) if cant_linea > 0 else 0.0
-            c.drawString(400, y_pos, f"S/ {p_unit:,.2f}")
-            c.drawString(500, y_pos, f"S/ {costo_linea:,.2f}")
+            c.drawString(400, y_pos, f"S/ {formatear_numero(p_unit)}")
+            c.drawString(500, y_pos, f"S/ {formatear_numero(costo_linea)}")
             y_pos -= 20.0
             if y_pos < 250:
                 c.showPage()
@@ -985,13 +986,13 @@ class OrdenesCompraApp:
         c.line(40, y_pos + 10, 572, y_pos + 10)
         c.setFont("Helvetica", 10)
         c.drawString(380, y_pos - 10, "SUBTOTAL:")
-        c.drawString(480, y_pos - 10, f"S/ {subtotal:,.2f}")
+        c.drawString(480, y_pos - 10, f"S/ {formatear_numero(subtotal)}")
         c.drawString(380, y_pos - 25, f"IGV ({IGV_PORCENTAJE:g}%):")
-        c.drawString(480, y_pos - 25, f"S/ {igv:,.2f}")
+        c.drawString(480, y_pos - 25, f"S/ {formatear_numero(igv)}")
         c.setFont("Helvetica-Bold", 12)
         c.drawString(380, y_pos - 45, "MONTO TOTAL:")
         c.setFillColorRGB(0.75, 0.22, 0.16)
-        c.drawString(480, y_pos - 45, f"S/ {total_orden:,.2f}")
+        c.drawString(480, y_pos - 45, f"S/ {formatear_numero(total_orden)}")
         c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica-Bold", 10)
         y_pos -= 80.0

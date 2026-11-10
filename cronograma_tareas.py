@@ -15,6 +15,7 @@ Optimizaciones de Rendimiento y Compatibilidad Aplicadas:
 """
 
 import os
+from formato_numeros import formatear_moneda, formatear_numero
 import sys
 import tempfile
 import subprocess
@@ -503,7 +504,7 @@ class CalendarioDashboard(ctk.CTkToplevel):
                                         evt_id = f"FAC_{f_id}"
                                         f_limite = vencimiento.strftime("%d/%m/%Y")
                                         estado_txt = "Pendiente" if dias_restantes >= 0 else "Retrasado"
-                                        t_nombre = f"💳 PAGO A PROVEEDOR (Saldo: S/ {saldo:,.2f})"
+                                        t_nombre = f"💳 PAGO A PROVEEDOR (Saldo: {formatear_moneda(saldo)})"
                                         evento_asoc_str = ev_asoc if ev_asoc else "OFICINA | Trabajos Internos"
                                         responsable = prov
                                         notas = f"Documento: {t_doc}\nDescripción: {desc}\nDías de crédito: {dias_cred}\nVence en: {dias_restantes} días."
@@ -1647,7 +1648,7 @@ class CronogramaApp:
             if ruta_temp_edit["path"]:
                 ruta_final, monto_d = self.procesar_e_insertar_factura(ruta_temp_edit["path"], r, codigo_evento, tarea_completa)
                 if ruta_final and codigo_evento != "OFICINA":
-                    messagebox.showinfo("Factura Cargada", f"Se procesó y registró automáticamente en Facturas Recibidas (Compras).\nMonto detectado: S/. {monto_d:,.2f}", parent=v_edit)
+                    messagebox.showinfo("Factura Cargada", f"Se procesó y registró automáticamente en Facturas Recibidas (Compras).\nMonto detectado: S/. {formatear_numero(monto_d)}", parent=v_edit)
             
             conn = conectar_db()
             if not conn:
@@ -1871,7 +1872,7 @@ class CronogramaApp:
         if self.ruta_temp_pago:
             ruta_final, monto_d = self.procesar_e_insertar_factura(self.ruta_temp_pago, responsable, codigo_evento, tarea)
             if ruta_final and codigo_evento != "OFICINA":
-                messagebox.showinfo("Factura Cargada", f"Archivo procesado e insertado en Facturas Recibidas automáticamente.\nMonto detectado: S/. {monto_d:,.2f}")
+                messagebox.showinfo("Factura Cargada", f"Archivo procesado e insertado en Facturas Recibidas automáticamente.\nMonto detectado: S/. {formatear_numero(monto_d)}")
                 
         conn = conectar_db()
         if not conn:

@@ -13,6 +13,7 @@ from tkinter import messagebox, filedialog, ttk, colorchooser
 import sys
 import ctypes
 import os
+from formato_numeros import formatear_numero
 import time
 import json
 import importlib
@@ -2485,7 +2486,7 @@ class ControlGeneralEventos:
                                 if saldo > 0.01 and hoy > vencimiento:
                                     ventas_vencidas += 1; deuda_ventas += saldo
                             except Exception: pass
-                        if ventas_vencidas > 0: alertas.append({"tipo": "peligro", "icono": "⚠️", "titulo": "Cobros Vencidos", "mensaje": f"Tienes {ventas_vencidas} factura(s) de clientes atrasada(s) (S/. {deuda_ventas:,.2f})"})
+                        if ventas_vencidas > 0: alertas.append({"tipo": "peligro", "icono": "⚠️", "titulo": "Cobros Vencidos", "mensaje": f"Tienes {ventas_vencidas} factura(s) de clientes atrasada(s) (S/. {formatear_numero(deuda_ventas)})"})
                     except Exception: pass
                     
                 # RADAR: PAGOS FINANCIEROS (Compras)
@@ -2510,7 +2511,7 @@ class ControlGeneralEventos:
                                 if saldo > 0.01 and hoy > vencimiento:
                                     compras_vencidas += 1; deuda_compras += saldo
                             except Exception: pass
-                        if compras_vencidas > 0: alertas.append({"tipo": "peligro", "icono": "🚨", "titulo": "Pagos Vencidos", "mensaje": f"Tienes {compras_vencidas} factura(s) de proveedores atrasada(s) (S/. {deuda_compras:,.2f})"})
+                        if compras_vencidas > 0: alertas.append({"tipo": "peligro", "icono": "🚨", "titulo": "Pagos Vencidos", "mensaje": f"Tienes {compras_vencidas} factura(s) de proveedores atrasada(s) (S/. {formatear_numero(deuda_compras)})"})
                     except Exception: pass
                     
                 # RADAR: IMPUESTOS SUNAT

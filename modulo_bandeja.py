@@ -10,6 +10,7 @@ con lo que el motor propone, y permite:
   - descartar.
 """
 import os
+from formato_numeros import formatear_moneda, formatear_numero
 import shutil
 import datetime
 
@@ -232,7 +233,7 @@ class BandejaEntradaApp:
             p = it["propuesta"] or {}
             entidad = p.get("proveedor") or p.get("cliente") or ""
             total = d.get("total")
-            total_txt = ("{:,.2f}".format(float(total))).replace(",", " ") if total else ""
+            total_txt = formatear_numero(float(total)) if total else ""
             if it["estado"] == "verde":
                 verdes += 1
             self.tabla.insert("", tk.END, iid=str(it["id"]),
@@ -278,7 +279,7 @@ class BandejaEntradaApp:
             elegida = "— Sin OC —"
             for oc in self.ordenes:
                 texto = "%s | %s | S/ %s" % (oc["numero"], oc["cliente"][:24],
-                                                "{:,.2f}".format(oc["monto"]))
+                                                formatear_numero(oc["monto"]))
                 valores_oc.append(texto)
                 if (d.get("total") and abs(float(d["total"]) - oc["monto"]) < 0.05
                         and cliente and cliente in oc["cliente"].upper() and elegida == "— Sin OC —"):

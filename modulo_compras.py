@@ -2599,12 +2599,16 @@ def _nombre_del_proveedor(texto, ruc=""):
 # 🔢 APOYOS QUE FALTABAN
 # =========================================================
 def formatear_numero_entrada(valor):
-    """'1234.5' -> '1,234.50' (formato del programa)."""
+    """'1234.5' -> '1,234.50' o '1.234,50' según la Configuración General."""
     try:
         numero = float(str(valor).replace(",", "").replace(" ", ""))
     except Exception:
         return str(valor or "")
-    return "{:,.2f}".format(numero)
+    try:
+        from formato_numeros import formatear_numero as _formato_config
+        return _formato_config(numero)
+    except Exception:
+        return "{:,.2f}".format(numero)
 
 
 def cargar_configuracion_general():
@@ -7314,20 +7318,31 @@ class CuentasPorPagarTab:
 
         v = ctk.CTkToplevel(getattr(self, "main_root", None))
         v.title("🧾 Pagar Varias Facturas (1 comprobante)")
-        v.geometry("620x580")
+        try:
+            _sw, _sh = v.winfo_screenwidth(), v.winfo_screenheight()
+            v.geometry("620x%d+%d+%d" % (min(780, max(560, _sh - 70)),
+                                         max(0, (_sw - 620) // 2), 2 if _sh < 800 else 40))
+        except Exception:
+            v.geometry("620x700")
         v.transient(getattr(self, "main_root", None))
         try:
             v.grab_set()
             _al_cerrar_modal(v)
         except Exception:
             pass
-        f = ctk.CTkFrame(v, fg_color="transparent")
-        f.pack(fill="both", expand=True, padx=16, pady=12)
+        # 📜 El área de campos tiene scroll y el pie con los botones queda FIJO:
+        #    así el botón de pagar siempre se ve, aunque el bloque cruzado ocupe más.
+        barra = ctk.CTkFrame(v, fg_color="transparent")
+        barra.pack(side="bottom", fill="x", padx=16, pady=(0, 10))
+
+        f = ctk.CTkScrollableFrame(v, fg_color="transparent")
+        f.pack(fill="both", expand=True, padx=16, pady=(12, 4))
 
         ctk.CTkLabel(f, text="📋 %d facturas seleccionadas (se pagarán con UN solo comprobante)"
                      % len(pendientes), font=("Arial", 12, "bold"), text_color="#1f538d").pack(anchor="w")
 
-        ctk.CTkLabel(f, text="Fecha del pago:", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        lbl_fecha_pago = ctk.CTkLabel(f, text="Fecha del pago:", font=("Arial", 11, "bold"))
+        lbl_fecha_pago.pack(anchor="w", pady=(8, 0))
         f_fecha_pago = ctk.CTkFrame(f, fg_color="transparent")
         f_fecha_pago.pack(fill="x")
         ent_fecha = ctk.CTkEntry(f_fecha_pago)
@@ -7336,7 +7351,9 @@ class CuentasPorPagarTab:
         ctk.CTkButton(f_fecha_pago, text="📅", width=40, fg_color="#1f538d", hover_color="#163b65",
                       command=lambda: CalendarioNativo(v, ent_fecha)).pack(side="left", padx=(5, 0))
 
-        ctk.CTkLabel(f, text="Cuenta / método de pago:", font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        lbl_cuenta_pago = ctk.CTkLabel(f, text="Cuenta / método de pago:",
+                                       font=("Arial", 11, "bold"))
+        lbl_cuenta_pago.pack(anchor="w", pady=(8, 0))
         cmb_cuenta = ctk.CTkComboBox(f, values=bancos, width=420, state="readonly")
         cmb_cuenta.pack(fill="x")
         if bancos:
@@ -7433,6 +7450,7 @@ class CuentasPorPagarTab:
                                        text_color="#1e8449")
                 except Exception:
                     pass
+            return _avisos
 
 
 
@@ -7477,8 +7495,13 @@ class CuentasPorPagarTab:
             _esc.imagenes_a_pdf(_pags, _pdf)
             estado_comp["ruta"] = _pdf
             actualizar_lbl_comp()
-            aplicar_ocr(_pdf)
+            _leidos = aplicar_ocr(_pdf)
             messagebox.showinfo("Comprobante", "Comprobante escaneado:\n" + os.path.basename(_pdf), parent=v)
+            if not _leidos:
+                messagebox.showwarning(
+                    "OCR del comprobante",
+                    "El comprobante se adjuntó, pero el OCR no pudo leer el monto ni el "
+                    "N° de operación.\n\nEscríbalos a mano en los campos del pago.", parent=v)
 
         def escanear_desde_telefono():
             """📱 Escanear este comprobante con el teléfono."""
@@ -7509,6 +7532,256 @@ class CuentasPorPagarTab:
         lbl_comp.pack(anchor="w", pady=(2, 6))
         actualizar_lbl_comp()
 
+        # ================================================================
+        # 💸 PAGO CRUZADO: la pagó un tercero y le devolví el dinero
+        # ================================================================
+        var_cruzada = tk.BooleanVar(value=False)
+        var_inter_cruz = tk.BooleanVar(value=False)
+        estado_soporte_tercero = {"ruta": ""}
+
+        chk_cruzada = ctk.CTkCheckBox(f, text="💸 Pagada por un tercero · le devolví el dinero",
+                                      font=("Arial", 11, "bold"), variable=var_cruzada,
+                                      command=lambda: _mostrar_cruzada())
+        chk_cruzada.pack(anchor="w", pady=(10, 2))
+
+        f_cruzada = ctk.CTkFrame(f, fg_color="#fdf2e9", corner_radius=8)
+
+        ctk.CTkLabel(f_cruzada, text="A quién le devuelvo (tercero): *",
+                     font=("Arial", 10, "bold")).pack(anchor="w", padx=8, pady=(8, 0))
+        ent_tercero = ctk.CTkEntry(f_cruzada, placeholder_text="Nombre o empresa que pagó")
+        ent_tercero.pack(fill="x", padx=8, pady=(0, 4))
+
+        ctk.CTkLabel(f_cruzada, text="Cuenta desde la que le devuelvo el dinero: *",
+                     font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        cmb_cuenta_dev = ctk.CTkComboBox(f_cruzada, values=bancos, state="readonly")
+        cmb_cuenta_dev.pack(fill="x", padx=8, pady=(0, 4))
+        if bancos:
+            cmb_cuenta_dev.set(bancos[0])
+
+        ctk.CTkLabel(f_cruzada, text="N° de Operación de la devolución:",
+                     font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        ent_oper_dev = ctk.CTkEntry(f_cruzada)
+        ent_oper_dev.pack(fill="x", padx=8, pady=(0, 4))
+
+        ctk.CTkLabel(f_cruzada, text="Fecha de la devolución / pago (DD/MM/AAAA):",
+                     font=("Arial", 10, "bold")).pack(anchor="w", padx=8)
+        f_fec_dev = ctk.CTkFrame(f_cruzada, fg_color="transparent")
+        f_fec_dev.pack(fill="x", padx=8, pady=(0, 4))
+        ent_fec_dev = ctk.CTkEntry(f_fec_dev)
+        ent_fec_dev.pack(side="left", fill="x", expand=True)
+        ent_fec_dev.insert(0, datetime.now().strftime("%d/%m/%Y"))
+        ctk.CTkButton(f_fec_dev, text="📅", width=38, font=("Arial", 12, "bold"),
+                      fg_color="#1f538d", hover_color="#163b65",
+                      command=lambda: CalendarioNativo(v, ent_fec_dev)).pack(side="left", padx=(5, 0))
+
+        f_sop_tercero = ctk.CTkFrame(f_cruzada, fg_color="transparent")
+        f_sop_tercero.pack(fill="x", padx=8, pady=(2, 2))
+        ctk.CTkButton(f_sop_tercero, text="📎 Soporte del pago al tercero", height=28,
+                      font=("Arial", 10, "bold"), fg_color="#16a085", hover_color="#11806a",
+                      command=lambda: _elegir_soporte_tercero()
+                      ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(f_sop_tercero, text="📱 Teléfono", height=28, width=110,
+                      font=("Arial", 10, "bold"), fg_color="#8e44ad", hover_color="#6c3483",
+                      command=lambda: _escanear_soporte_tercero()
+                      ).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(f_sop_tercero, text="👁️", height=28, width=44, font=("Arial", 10, "bold"),
+                      fg_color="#5d6d7e", hover_color="#4a5967",
+                      command=lambda: _ver_soporte_tercero()).pack(side="left", padx=(6, 0))
+        lbl_sop_tercero = ctk.CTkLabel(f_cruzada, text="Sin soporte del pago al tercero",
+                                       font=("Arial", 9), text_color="#999999")
+        lbl_sop_tercero.pack(anchor="w", padx=8)
+
+        f_inter = ctk.CTkFrame(f_cruzada, fg_color="transparent")
+        f_inter.pack(fill="x", padx=8, pady=(6, 2))
+        chk_inter = ctk.CTkCheckBox(f_inter, text="Pago Interbancario — Comisión (S/.)",
+                                    variable=var_inter_cruz, font=("Arial", 10, "bold"),
+                                    command=lambda: _actualizar_total_cruzada())
+        chk_inter.pack(side="left")
+        ent_com_cruz = ctk.CTkEntry(f_inter, width=90)
+        ent_com_cruz.pack(side="left", padx=(8, 0))
+        ent_com_cruz.insert(0, "0.00")
+        ent_com_cruz.bind("<KeyRelease>", lambda _e: _actualizar_total_cruzada())
+
+        lbl_cruzada_total = ctk.CTkLabel(f_cruzada, text="", font=("Arial", 10, "bold"),
+                                        text_color="#1f538d", justify="left", anchor="w")
+        lbl_cruzada_total.pack(anchor="w", padx=8, pady=(2, 8))
+
+        def comision_cruzada():
+            if not var_inter_cruz.get():
+                return 0.0
+            try:
+                return float(parsear_monto_texto(ent_com_cruz.get()) or 0)
+            except Exception:
+                return 0.0
+
+        def _actualizar_total_cruzada(*_a):
+            total_pag = sum(max(0.0, p["saldo"]) for p in pendientes)
+            com = comision_cruzada()
+            if com > 0:
+                lbl_cruzada_total.configure(
+                    text=("Facturas: %s  +  Comisión: %s  =  %s sale de la cuenta"
+                          % (formatear_moneda(total_pag), formatear_moneda(com),
+                             formatear_moneda(total_pag + com))))
+            else:
+                lbl_cruzada_total.configure(
+                    text="Facturas: %s — sin comisión interbancaria" % formatear_moneda(total_pag))
+
+        def _pintar_sop_tercero():
+            ruta_sop = estado_soporte_tercero["ruta"]
+            if ruta_sop:
+                lbl_sop_tercero.configure(text="📎 " + os.path.basename(ruta_sop),
+                                          text_color="#1e8449")
+            else:
+                lbl_sop_tercero.configure(text="Sin soporte del pago al tercero",
+                                          text_color="#999999")
+
+        def _aplicar_ocr_soporte(ruta_sop):
+            """🔎 Lee el soporte del pago al tercero y completa el N° de operación."""
+            try:
+                texto = leer_ocr_windows(ruta_sop)
+                if not texto.strip():
+                    try:
+                        import escaner as _esc_ocr
+                        texto = _esc_ocr.texto_de_resultados(_esc_ocr.ocr_paginas([ruta_sop]))
+                    except Exception:
+                        texto = ""
+            except Exception as e_ocr:
+                print("[OCR soporte del tercero] error:", e_ocr)
+                texto = ""
+            if not texto.strip():
+                _pintar_sop_tercero()
+                return
+            numero, monto = "", 0.0
+            try:
+                numero = extraer_numero_operacion(texto) or ""
+            except Exception:
+                numero = ""
+            try:
+                monto = monto_del_comprobante(texto) or 0.0
+            except Exception:
+                monto = 0.0
+            avisos = []
+            if numero:
+                try:
+                    ent_oper_dev.delete(0, tk.END)
+                    ent_oper_dev.insert(0, str(numero))
+                except Exception:
+                    pass
+                avisos.append("N° operación: " + str(numero))
+            if monto and float(monto) > 0:
+                avisos.append("Monto: %.2f" % float(monto))
+            try:
+                if avisos:
+                    lbl_sop_tercero.configure(
+                        text="📎 " + os.path.basename(ruta_sop) + "   ·   " + " · ".join(avisos),
+                        text_color="#1e8449")
+                else:
+                    _pintar_sop_tercero()
+            except Exception:
+                pass
+
+        def _fijar_soporte_tercero(ruta_sop):
+            estado_soporte_tercero["ruta"] = str(ruta_sop or "")
+            _pintar_sop_tercero()
+            if estado_soporte_tercero["ruta"]:
+                _aplicar_ocr_soporte(estado_soporte_tercero["ruta"])
+
+        def _elegir_soporte_tercero():
+            ruta_sop = _pick_comprobante(v)
+            if ruta_sop:
+                _fijar_soporte_tercero(ruta_sop)
+
+        def _escanear_soporte_tercero_directo():
+            """🖨️ Escanea el soporte (o usa la foto del teléfono) y arma el PDF."""
+            try:
+                import escaner as _esc
+            except Exception as e_esc:
+                messagebox.showerror("Escáner", "No se pudo cargar el escáner:" + chr(10) + str(e_esc),
+                                     parent=v)
+                return
+            try:
+                cfg = cargar_configuracion_regional()
+            except Exception:
+                cfg = {}
+            datos = _esc.config_escaner(cfg)
+            try:
+                res = _escanear_con_progreso(
+                    v, "el soporte del pago al tercero", _esc, _esc.carpeta_escaneos(cfg),
+                    dispositivo=datos.get("escaner_dispositivo", ""),
+                    dpi=datos.get("escaner_dpi", "300"),
+                    color=datos.get("escaner_color", "Escala de grises"),
+                    origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+                    paginas=1,
+                    optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
+                    modo=datos.get("escaner_modo", "Automático (sin ventanas)"))
+            except Exception as e_prog:
+                messagebox.showerror("Escáner", "No se pudo escanear:" + chr(10) + str(e_prog),
+                                     parent=v)
+                return
+            paginas = [p for p in (res.get("paginas") or []) if os.path.exists(str(p))]
+            if not paginas:
+                return messagebox.showerror("Escáner", "No se pudo escanear:" + chr(10) +
+                                            str(res.get("error") or "sin detalle"), parent=v)
+            pdf = os.path.join(os.path.dirname(paginas[0]),
+                               "Soporte_Tercero_%s.pdf" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+            _esc.imagenes_a_pdf(paginas, pdf)
+            _fijar_soporte_tercero(pdf)
+            messagebox.showinfo("Soporte del tercero",
+                                "Soporte escaneado y leído:" + chr(10) + os.path.basename(pdf),
+                                parent=v)
+
+        def _escanear_soporte_tercero():
+            """📱 Escanear el soporte con el teléfono (y leerlo con OCR)."""
+            try:
+                import escaner_movil as _movil
+                _movil.escanear_reusando_flujo(
+                    parent=v,
+                    config=cargar_configuracion_regional(),
+                    funcion=_escanear_soporte_tercero_directo,
+                    etiqueta="Compras · soporte del pago al tercero")
+            except Exception as e_sop:
+                messagebox.showerror("Escáner por teléfono", str(e_sop), parent=v)
+
+        def _ver_soporte_tercero():
+            ruta_sop = estado_soporte_tercero["ruta"]
+            if ruta_sop and os.path.isfile(ruta_sop):
+                abrir_documento(ruta_sop)
+            else:
+                messagebox.showinfo("Soporte", "Sin soporte cargado.", parent=v)
+
+        def _mostrar_cruzada():
+            try:
+                if var_cruzada.get():
+                    f_cruzada.pack(fill="x", pady=(0, 8), before=lbl_comp)
+                    _actualizar_total_cruzada()
+                    # 💸 Con pago cruzado hay UNA sola fecha: la de la devolución
+                    try:
+                        lbl_fecha_pago.pack_forget()
+                        f_fecha_pago.pack_forget()
+                    except Exception:
+                        pass
+                else:
+                    f_cruzada.pack_forget()
+                    try:
+                        lbl_fecha_pago.pack(anchor="w", pady=(8, 0), before=lbl_cuenta_pago)
+                        f_fecha_pago.pack(fill="x", before=lbl_cuenta_pago)
+                    except Exception:
+                        pass
+            except Exception as e_cruz:
+                print("Aviso - bloque de pago cruzado:", e_cruz)
+
+        def datos_cruzada():
+            return {"activa": bool(var_cruzada.get()),
+                    "tercero": ent_tercero.get().strip(),
+                    "cuenta": cmb_cuenta_dev.get().strip(),
+                    "operacion": ent_oper_dev.get().strip(),
+                    "fecha": ent_fec_dev.get().strip(),
+                    "comision": comision_cruzada(),
+                    "interbancario": bool(var_inter_cruz.get()),
+                    "soporte": estado_soporte_tercero["ruta"]}
+
+        _pintar_sop_tercero()
+
         resumen_texto = chr(10).join(
             "• %s — %s (%s)" % (p["nro"] or "s/n", p["prov"],
                                   formatear_moneda(max(0.0, p["saldo"])))
@@ -7521,17 +7794,55 @@ class CuentasPorPagarTab:
             oper = ent_oper.get().strip()
             if not cuenta:
                 return messagebox.showwarning("Pagar varias facturas", "Elija la cuenta / método de pago.", parent=v)
+            # 💸 Pago cruzado: la pagó un tercero y le devolvimos el dinero
+            cruzada = datos_cruzada()
+            if cruzada["activa"]:
+                if not cruzada["tercero"]:
+                    return messagebox.showwarning(
+                        "Pago cruzado",
+                        "Escriba el nombre de la persona o empresa que pagó (tercero).", parent=v)
+                if not cruzada["cuenta"]:
+                    return messagebox.showwarning(
+                        "Pago cruzado",
+                        "Seleccione la CUENTA BANCARIA desde la que le devolvió el dinero." +
+                        chr(10) + chr(10) +
+                        "Sin cuenta bancaria el pago no se descuenta del saldo del banco.", parent=v)
+
             ruta_bd = ""
             if estado_comp["ruta"]:
                 try:
                     ruta_bd = ruta_para_guardar(estado_comp["ruta"]) or estado_comp["ruta"]
                 except Exception:
                     ruta_bd = estado_comp["ruta"]
+
+            # 📎 Soporte del pago hecho al tercero (documento aparte del comprobante)
+            ruta_soporte_cruzada = ""
+            if cruzada["activa"] and cruzada["soporte"]:
+                try:
+                    ruta_soporte_cruzada = ruta_para_guardar(cruzada["soporte"]) or cruzada["soporte"]
+                except Exception:
+                    ruta_soporte_cruzada = cruzada["soporte"]
+
+            # 💸 Con pago cruzado, el asiento del banco sale de la cuenta de la DEVOLUCIÓN
+            if cruzada["activa"]:
+                fecha_pago = cruzada["fecha"] or fecha_val
+                cuenta_pago = cruzada["cuenta"]
+                oper_pago = cruzada["operacion"] or "DEVOLUCIÓN A TERCERO"
+            else:
+                fecha_pago, cuenta_pago, oper_pago = fecha_val, cuenta, oper
+
             pagados, errores = 0, []
-            for p in pendientes:
+            for indice, p in enumerate(pendientes):
                 if p["saldo"] <= 0:
                     continue
                 try:
+                    # la comisión interbancaria se suma UNA sola vez (primera factura)
+                    monto_pago = p["saldo"]
+                    comision_esta = 0.0
+                    if cruzada["activa"] and indice == 0 and cruzada["comision"] > 0:
+                        comision_esta = cruzada["comision"]
+                        monto_pago = monto_pago + comision_esta
+                    archivo_pago = ruta_soporte_cruzada or ruta_bd
                     conn = conectar_db()
                     if not conn:
                         continue
@@ -7541,8 +7852,21 @@ class CuentasPorPagarTab:
                             (id_factura, monto_pagado, archivo_ruta, proveedor_nombre, fecha_pago,
                              categoria_suministro, codigo_cotizacion, cuenta_origen, numero_operacion)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                            (p["id"], p["saldo"], ruta_bd, p["prov"], fecha_val,
-                             p["cat"], p["nro"], cuenta, oper))
+                            (p["id"], monto_pago, archivo_pago, p["prov"], fecha_pago,
+                             p["cat"], p["nro"], cuenta_pago, oper_pago))
+                        if cruzada["activa"]:
+                            # 🔁 la factura queda marcada como pagada por el tercero
+                            try:
+                                cur.execute("""
+                                    UPDATE facturas_recibidas
+                                    SET pagado_por_tercero=%s, es_compra_cruzada=TRUE,
+                                        soporte_pago_tercero=%s, comision_interbancaria=%s,
+                                        es_interbancario=%s
+                                    WHERE id=%s""",
+                                    (cruzada["tercero"], ruta_soporte_cruzada,
+                                     comision_esta, bool(cruzada["interbancario"]), p["id"]))
+                            except Exception as e_cruz:
+                                print("Aviso - marcando la factura como cruzada:", e_cruz)
                     conn.commit()
                     liberar_conexion(conn)
                     pagados += 1
@@ -7573,8 +7897,6 @@ class CuentasPorPagarTab:
             messagebox.showinfo("Éxito", msg,
                                 parent=ventana_para_mensaje(getattr(self, "main_root", None)))
 
-        barra = ctk.CTkFrame(v, fg_color="transparent")
-        barra.pack(fill="x", padx=16, pady=(0, 12))
         ctk.CTkButton(barra, text="💾 Pagar las %d facturas" % len(pendientes), height=40,
                       font=("Arial", 13, "bold"), fg_color="#27ae60", hover_color="#1e8449",
                       command=guardar).pack(side="left", expand=True, fill="x", padx=(0, 6))

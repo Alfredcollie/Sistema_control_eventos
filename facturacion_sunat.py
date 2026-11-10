@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+from formato_numeros import formatear_numero
 import sys
 import urllib.request
 import urllib.error
@@ -218,7 +219,7 @@ def abrir_ventana_emision_sunat(parent_window, datos_factura, usuario_activo="De
     if tipo_emision == "nota_credito":
         ctk.CTkLabel(f_info, text=f"Motivo SUNAT: {datos_factura.get('motivo_nc', '-')}", font=("Arial", 11, "italic"), text_color="#c0392b").pack(anchor="w")
     else:
-        ctk.CTkLabel(f_info, text=f"Monto Total: S/. {float(datos_factura.get('total', 0)):,.2f}", font=("Arial", 12, "bold"), text_color="#27ae60").pack(anchor="w", pady=(5, 0))
+        ctk.CTkLabel(f_info, text=f"Monto Total: S/. {formatear_numero(float(datos_factura.get('total', 0)))}", font=("Arial", 12, "bold"), text_color="#27ae60").pack(anchor="w", pady=(5, 0))
 
     lbl_estado = ctk.CTkLabel(v_sunat, text=f"Estado: Listo para transmitir por {proveedor_actual}", font=("Arial", 11, "italic"), text_color="gray")
     lbl_estado.pack(pady=10)

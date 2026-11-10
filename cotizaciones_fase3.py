@@ -11,6 +11,7 @@ import calendar
 import sys
 import subprocess
 import os
+from formato_numeros import formatear_numero
 import re
 import json
 from tareas_seguras import ejecutar_en_hilo
@@ -1446,19 +1447,19 @@ class VentanaEtapaProveedores:
         except Exception:
             tc_val = tc if tc else 3.75
             
-        self.lbl_tot_sub.configure(text=f"Total Venta al Cliente: S/ {subtotal:,.2f}")
+        self.lbl_tot_sub.configure(text=f"Total Venta al Cliente: S/ {formatear_numero(subtotal)}")
         
         if aplica_fee:
-            self.lbl_tot_igv.configure(text=f"15% Fee Producción: S/ {fee:,.2f}")
+            self.lbl_tot_igv.configure(text=f"15% Fee Producción: S/ {formatear_numero(fee)}")
         else:
             self.lbl_tot_igv.configure(text=f"Fee Producción: S/ 0.00 (Exonerado)")
 
-        self.lbl_tot_sin_igv.configure(text=f"Total sin IGV: S/ {venta_fee:,.2f}")
-        self.lbl_tot_igv_monto.configure(text=f"IGV ({igv_pct:g}%): S/ {igv_venta:,.2f}")
-        self.lbl_tot_financiamiento.configure(text=f"S/ {financiamiento:,.2f}")
+        self.lbl_tot_sin_igv.configure(text=f"Total sin IGV: S/ {formatear_numero(venta_fee)}")
+        self.lbl_tot_igv_monto.configure(text=f"IGV ({igv_pct:g}%): S/ {formatear_numero(igv_venta)}")
+        self.lbl_tot_financiamiento.configure(text=f"S/ {formatear_numero(financiamiento)}")
             
-        self.lbl_tot_gran.configure(text=f"Gran Total: S/ {gran_total:,.2f}")
-        self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {gran_total / tc_val:,.2f} USD")
+        self.lbl_tot_gran.configure(text=f"Gran Total: S/ {formatear_numero(gran_total)}")
+        self.lbl_tot_usd.configure(text=f"Total Equivalente: $ {formatear_numero(gran_total / tc_val)} USD")
 
         # ── GANANCIA TOTAL DE LA COTIZACIÓN ─────────────────────────────
         # Fórmula: (Venta + Fee + Financiamiento + IGV) − (Compras + IGV) − Detracción − ISR − (IGV Venta − IGV Compra)
@@ -1478,10 +1479,10 @@ class VentanaEtapaProveedores:
         impuesto_renta = venta_sin_igv * renta_pct / 100.0
         ganancia_neta = venta_con_igv - compras_igv - detraccion - impuesto_renta - (igv_venta - igv_compra)
 
-        self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {compra_sin_igv:,.2f}")
-        self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {detraccion:,.2f}")
-        self.lbl_imp_renta.configure(text=f"   Imp. Renta ({renta_pct:g}%): S/ {impuesto_renta:,.2f}")
-        self.lbl_tot_gan.configure(text=f"GANANCIA TOTAL: S/ {ganancia_neta:,.2f}")
+        self.lbl_tot_costo.configure(text=f"Total Compra (sin IGV): S/ {formatear_numero(compra_sin_igv)}")
+        self.lbl_detraccion.configure(text=f"Detracción ({detraccion_pct:g}%): S/ {formatear_numero(detraccion)}")
+        self.lbl_imp_renta.configure(text=f"   Imp. Renta ({renta_pct:g}%): S/ {formatear_numero(impuesto_renta)}")
+        self.lbl_tot_gan.configure(text=f"GANANCIA TOTAL: S/ {formatear_numero(ganancia_neta)}")
 
     # =======================================================
     # VISTAS Y NAVEGACIÓN
@@ -2169,7 +2170,7 @@ class VentanaEtapaProveedores:
                 (f"S/. {pl_r:.2f}", 70, "e"), 
                 (f"S/. {pd_r:.2f}", 50, "e"), 
                 (f"S/. {pf_r:.2f}", 80, "e"), 
-                (f"S/. {ganancia_item:,.2f}", 85, "e", "#1e8449")
+                (f"S/. {formatear_numero(ganancia_item)}", 85, "e", "#1e8449")
             ]
             
             for idx_item, item in enumerate(anchos_row):

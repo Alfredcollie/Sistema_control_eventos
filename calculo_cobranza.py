@@ -36,6 +36,7 @@ from tkinter import ttk, messagebox
 import customtkinter as ctk
 import calendar
 import os
+from formato_numeros import formatear_numero
 import sys
 import json
 import ssl
@@ -209,9 +210,9 @@ def formatear_moneda(valor):
     except Exception:
         valor = 0.0
     if formato == "1.000,00":
-        str_val = f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        str_val = f"{formatear_numero(valor)}".replace(",", "X").replace(".", ",").replace("X", ".")
     else:
-        str_val = f"{valor:,.2f}"
+        str_val = f"{formatear_numero(valor)}"
     return f"{simbolo} {str_val}"
 
 
@@ -2161,7 +2162,7 @@ class CalculoCobranzaApp:
                 c.drawCentredString(xs_a[4] + cols_a[4] / 2, y - 10, str(int(vn or 0)))
                 c.drawCentredString(xs_a[5] + cols_a[5] / 2, y - 10, str(int(vd or 0)))
                 c.drawCentredString(xs_a[6] + cols_a[6] / 2, y - 10, str(int(vf or 0)))
-                c.drawCentredString(xs_a[7] + cols_a[7] / 2, y - 10, f"{simbolo} {float(mb2 or 0):,.2f}")
+                c.drawCentredString(xs_a[7] + cols_a[7] / 2, y - 10, f"{simbolo} {formatear_numero(float(mb2 or 0))}")
                 c.setStrokeColorRGB(0.85, 0.85, 0.85)
                 c.line(40, y - 13, 40 + ancho_a, y - 13)
                 y -= 15.0
@@ -2197,7 +2198,7 @@ class CalculoCobranzaApp:
                 c.drawCentredString(xs_b[1] + cols_b[1] / 2, y - 10, str(int(dn or 0)))
                 c.drawCentredString(xs_b[2] + cols_b[2] / 2, y - 10, str(int(dd or 0)))
                 c.drawCentredString(xs_b[3] + cols_b[3] / 2, y - 10, str(int(df or 0)))
-                c.drawCentredString(xs_b[4] + cols_b[4] / 2, y - 10, f"{simbolo} {float(md2 or 0):,.2f}")
+                c.drawCentredString(xs_b[4] + cols_b[4] / 2, y - 10, f"{simbolo} {formatear_numero(float(md2 or 0))}")
                 c.setStrokeColorRGB(0.85, 0.85, 0.85)
                 c.line(40, y - 13, 40 + ancho_b, y - 13)
                 y -= 15.0
@@ -2207,10 +2208,10 @@ class CalculoCobranzaApp:
             y -= 8.0
             c.setFont("Helvetica-Bold", 10)
             c.drawString(42, y - 10, "SUBTOTAL (BASE)")
-            c.drawRightString(40 + ancho_a - 2, y - 10, f"{simbolo} {float(m_base or 0):,.2f}")
+            c.drawRightString(40 + ancho_a - 2, y - 10, f"{simbolo} {formatear_numero(float(m_base or 0))}")
             y -= 15.0
             c.drawString(42, y - 10, "TOTAL NO REALIZADOS (DEDUCCIÓN)")
-            c.drawRightString(40 + ancho_a - 2, y - 10, f"- {simbolo} {float(m_ded or 0):,.2f}")
+            c.drawRightString(40 + ancho_a - 2, y - 10, f"- {simbolo} {formatear_numero(float(m_ded or 0))}")
             y -= 26.0
         else:
             # ---- Cuadro de cobro POR UNIDAD ----
@@ -2245,10 +2246,10 @@ class CalculoCobranzaApp:
                 c.setFillColorRGB(0, 0, 0)
                 c.drawString(xs_u[0] + 4, y - 10, str(uni)[:36])
                 c.drawCentredString(xs_u[1] + cols_u[1] / 2, y - 10, f"{float(hd or 0):g}")
-                c.drawCentredString(xs_u[2] + cols_u[2] / 2, y - 10, f"{simbolo} {float(pn or 0):,.2f}")
-                c.drawCentredString(xs_u[3] + cols_u[3] / 2, y - 10, f"{simbolo} {float(pd or 0):,.2f}")
-                c.drawCentredString(xs_u[4] + cols_u[4] / 2, y - 10, f"{simbolo} {float(pf or 0):,.2f}")
-                c.drawCentredString(xs_u[5] + cols_u[5] / 2, y - 10, f"{simbolo} {float(sub or 0):,.2f}")
+                c.drawCentredString(xs_u[2] + cols_u[2] / 2, y - 10, f"{simbolo} {formatear_numero(float(pn or 0))}")
+                c.drawCentredString(xs_u[3] + cols_u[3] / 2, y - 10, f"{simbolo} {formatear_numero(float(pd or 0))}")
+                c.drawCentredString(xs_u[4] + cols_u[4] / 2, y - 10, f"{simbolo} {formatear_numero(float(pf or 0))}")
+                c.drawCentredString(xs_u[5] + cols_u[5] / 2, y - 10, f"{simbolo} {formatear_numero(float(sub or 0))}")
                 c.setStrokeColorRGB(0.85, 0.85, 0.85)
                 c.line(40, y - 13, 40 + ancho_tabla, y - 13)
                 y -= 15.0
@@ -2257,7 +2258,7 @@ class CalculoCobranzaApp:
             c.line(40, y + 1, 40 + ancho_tabla, y + 1)
             c.setFont("Helvetica-Bold", 10)
             c.drawString(xs_u[0] + 4, y - 10, "SUBTOTAL (BASE)")
-            c.drawRightString(40 + ancho_tabla, y - 10, f"{simbolo} {float(m_base or 0):,.2f}")
+            c.drawRightString(40 + ancho_tabla, y - 10, f"{simbolo} {formatear_numero(float(m_base or 0))}")
             y -= 18.0
 
             # ---- Deducciones por unidad (en la página siguiente) ----
@@ -2295,7 +2296,7 @@ class CalculoCobranzaApp:
                 c.drawCentredString(xs_d[1] + cols_d[1] / 2, y - 10, f"{float(dn or 0):g}")
                 c.drawCentredString(xs_d[2] + cols_d[2] / 2, y - 10, f"{float(dd or 0):g}")
                 c.drawCentredString(xs_d[3] + cols_d[3] / 2, y - 10, f"{float(df or 0):g}")
-                c.drawCentredString(xs_d[4] + cols_d[4] / 2, y - 10, f"{simbolo} {float(mded or 0):,.2f}")
+                c.drawCentredString(xs_d[4] + cols_d[4] / 2, y - 10, f"{simbolo} {formatear_numero(float(mded or 0))}")
                 c.setStrokeColorRGB(0.85, 0.85, 0.85)
                 c.line(40, y - 13, 40 + ancho_tabla_d, y - 13)
                 y -= 15.0
@@ -2304,7 +2305,7 @@ class CalculoCobranzaApp:
             c.line(40, y + 1, 40 + ancho_tabla_d, y + 1)
             c.setFont("Helvetica-Bold", 10)
             c.drawString(xs_d[0] + 4, y - 10, "TOTAL DEDUCCIONES")
-            c.drawRightString(40 + ancho_tabla_d, y - 10, f"- {simbolo} {float(m_ded or 0):,.2f}")
+            c.drawRightString(40 + ancho_tabla_d, y - 10, f"- {simbolo} {formatear_numero(float(m_ded or 0))}")
             y -= 26.0
 
         # ---- Total ----
@@ -2313,7 +2314,7 @@ class CalculoCobranzaApp:
         c.setFillColorRGB(0, 0, 0)
         c.setFont("Helvetica-Bold", 13)
         c.drawString(48, y - 14, "TOTAL A COBRAR")
-        c.drawRightString(460, y - 14, f"{simbolo} {float(total or 0):,.2f}")
+        c.drawRightString(460, y - 14, f"{simbolo} {formatear_numero(float(total or 0))}")
         y -= 34.0
 
         if notas:

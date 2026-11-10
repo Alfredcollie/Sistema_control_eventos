@@ -10,6 +10,7 @@ import calendar
 import sys
 import subprocess
 import os
+from formato_numeros import formatear_numero
 import re
 import json
 import threading
@@ -569,9 +570,9 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                     y_centro_fila = y_pos + (f["altura"] / 2) - 3
                     c.setFont("Helvetica", 9)
                     c.setFillColorRGB(0, 0, 0)
-                    c.drawCentredString(385, y_centro_fila, f"{simbolo_moneda} {f['p_unitario']:,.2f}")
+                    c.drawCentredString(385, y_centro_fila, f"{simbolo_moneda} {formatear_numero(f['p_unitario'])}")
                     c.drawCentredString(450, y_centro_fila, str(f["cantidad"]))
-                    c.drawCentredString(525, y_centro_fila, f"{simbolo_moneda} {f['precio']:,.2f}")
+                    c.drawCentredString(525, y_centro_fila, f"{simbolo_moneda} {formatear_numero(f['precio'])}")
                     subtotal_acumulado += f["precio"]
                     if i_idx == len(bloque["indices"]) - 1:
                         c.setFont("Helvetica-Bold", 9)
@@ -608,16 +609,16 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.setFillColorRGB(0.1, 0.1, 0.1)
         c.setFont("Helvetica-Bold", 9.5)
         c.drawString(490, y_totales+25, "S/")
-        c.drawRightString(565, y_totales+25, f"{subtotal_acumulado:,.2f}")
+        c.drawRightString(565, y_totales+25, f"{formatear_numero(subtotal_acumulado)}")
         c.drawString(490, y_totales+8, "S/")
-        c.drawRightString(565, y_totales+8, f"{fee_produccion:,.2f}")
+        c.drawRightString(565, y_totales+8, f"{formatear_numero(fee_produccion)}")
         c.setFont("Helvetica-Bold", 11)
         c.drawString(490, y_totales-12, "S/")
-        c.drawRightString(565, y_totales-12, f"{total_general_soles:,.2f}")
+        c.drawRightString(565, y_totales-12, f"{formatear_numero(total_general_soles)}")
         c.setFillColorRGB(*rgb_primario)
         c.setFont("Helvetica-Bold", 12)
         c.drawString(475, y_totales-32, "$")
-        c.drawRightString(565, y_totales-32, f"{total_general_dolares:,.2f} USD")
+        c.drawRightString(565, y_totales-32, f"{formatear_numero(total_general_dolares)} USD")
 
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColorRGB(*rgb_primario)

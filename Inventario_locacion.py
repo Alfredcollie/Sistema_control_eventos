@@ -11,6 +11,7 @@ INVENTARIO_LOCACION.PY (ENTERPRISE EDITION)
 """
 
 import os
+from formato_numeros import formatear_numero
 import shutil
 import sys 
 import subprocess 
@@ -504,7 +505,7 @@ class CatalogoLocacionesTab:
                             
                         for r in cursor.fetchall():
                             est_txt = "No" if r[8] == "No" else f"Sí ({r[9]} puestos)"
-                            precio_fmt = f"S/. {float(r[6]):,.2f}"
+                            precio_fmt = f"S/. {formatear_numero(float(r[6]))}"
                             fec_pr = r[11] if r[11] else ""
                             rows.append((r[0], r[1], r[2], r[3], r[4], f"{r[5]} m²", precio_fmt, fec_pr, r[7], est_txt, r[10]))
                             

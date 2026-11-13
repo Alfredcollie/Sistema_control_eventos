@@ -6,8 +6,13 @@ No abre ventanas del programa: simula las dos plataformas y verifica que el
 codigo NO use llamadas que solo existen en Windows:
 
     state("zoomed")                -> solo Windows
-    ctypes / SetForegroundWindow   -> solo Windows
+    ctypes.windll / SetForegroundWindow -> solo Windows
     os.startfile                   -> solo Windows
+    winreg                         -> solo Windows
+
+La revision del punto 3 se hace con AST sobre TODOS los .py del programa
+(menos copias y respaldos): asi un "os.startfile" escrito dentro de un
+comentario o de la documentacion no se cuenta como error.
 
 Se puede ejecutar de dos formas:
     * doble clic en PROBAR_COMPATIBILIDAD.bat   (recomendado)
@@ -15,6 +20,7 @@ Se puede ejecutar de dos formas:
 
 Siempre deja el resultado en "prueba_compatibilidad.log" (al lado del programa).
 """
+import ast
 import importlib
 import io
 import os
@@ -186,6 +192,115 @@ MODULOS = ["control_general", "app_paths", "escaner", "escaner_movil", "clientes
            "modulo_compras", "modulo_ventas"]
 
 
+# =========================================================
+# 🔎 LLAMADAS QUE SOLO EXISTEN EN WINDOWS
+#    Se revisan TODOS los archivos .py del programa y se analiza el
+#    código real (AST), no el texto: así un "os.startfile" escrito en un
+#    comentario o en la documentación NO se cuenta como error.
+# =========================================================
+MARCAS_DE_GUARDA = ("win32", "darwin", "'platform'", "es_windows", "'nt'")
+
+
+def _mapa_de_padres(arbol):
+    padres = {}
+    for nodo in ast.walk(arbol):
+        for hijo in ast.iter_child_nodes(nodo):
+            padres[hijo] = nodo
+    return padres
+
+
+def _esta_protegido(nodo, padres):
+    """True si la llamada está dentro de un 'if sys.platform == ...' / es_windows()."""
+    actual = padres.get(nodo)
+    while actual is not None:
+        condicion = None
+        if isinstance(actual, (ast.If, ast.IfExp)):
+            condicion = actual.test
+        if condicion is not None:
+            texto = ast.dump(condicion)
+            es_solo_mac = ("darwin" in texto
+                           and "win32" not in texto
+                           and "es_windows" not in texto
+                           and "'nt'" not in texto)
+            # una rama "if sys.platform == 'darwin'" NO protege de Windows
+            if not es_solo_mac and any(marca in texto for marca in MARCAS_DE_GUARDA):
+                return True
+        actual = padres.get(actual)
+    return False
+
+
+def _ruta_llamada(nodo):
+    """'ctypes.windll.user32.ShowWindow' a partir de la llamada del AST."""
+    partes = []
+    actual = nodo.func
+    while isinstance(actual, ast.Attribute):
+        partes.append(actual.attr)
+        actual = actual.value
+    if isinstance(actual, ast.Name):
+        partes.append(actual.id)
+    return ".".join(reversed(partes))
+
+
+def _usos_solo_windows(arbol):
+    """[(nodo, etiqueta)] de las llamadas/imports que no existen en macOS."""
+    usos = []
+    for nodo in ast.walk(arbol):
+        etiqueta = ""
+        if isinstance(nodo, ast.Call):
+            ruta = _ruta_llamada(nodo)
+            argumento = ""
+            if nodo.args and isinstance(nodo.args[0], ast.Constant):
+                argumento = str(nodo.args[0].value)
+            if ruta.startswith("os.startfile"):
+                etiqueta = "os.startfile"
+            elif ruta.startswith("ctypes.windll"):
+                etiqueta = "ctypes.windll"
+            elif ruta.startswith("winreg."):
+                etiqueta = "winreg"
+            elif ruta.endswith(".state") and argumento == "zoomed":
+                etiqueta = "state('zoomed')"
+        elif isinstance(nodo, (ast.Import, ast.ImportFrom)):
+            nombres = [getattr(alias, "name", "") or "" for alias in nodo.names]
+            modulo = getattr(nodo, "module", "") or ""
+            if any(n.split(".")[0] == "winreg" for n in nombres) or modulo == "winreg":
+                etiqueta = "winreg"
+        if etiqueta:
+            usos.append((nodo, etiqueta))
+    return usos
+
+
+def revisar_solo_windows(carpeta):
+    """Revisa todos los .py del programa (menos copias y respaldos)."""
+    excluidos = ("copia", "BAK", "_Archivo", "prueba_compatibilidad")
+    archivos = sorted(n for n in os.listdir(carpeta)
+                      if n.endswith(".py") and not any(x in n for x in excluidos))
+    revisados = 0
+    con_usos = 0
+    for nombre in archivos:
+        ruta = os.path.join(carpeta, nombre)
+        try:
+            fuente = io.open(ruta, "r", encoding="utf-8").read()
+        except Exception:
+            continue
+        try:
+            arbol = ast.parse(fuente, filename=nombre)
+        except SyntaxError as error:
+            comprobar("%s: se puede analizar" % nombre, False, "linea %s" % error.lineno)
+            continue
+        padres = _mapa_de_padres(arbol)
+        usos = _usos_solo_windows(arbol)
+        if not usos:
+            continue
+        con_usos += 1
+        revisados += len(usos)
+        sueltos = ["%s (linea %d)" % (etiqueta, nodo.lineno)
+                   for nodo, etiqueta in usos if not _esta_protegido(nodo, padres)]
+        comprobar("%s: llamadas solo-Windows protegidas (%d)" % (nombre, len(usos)),
+                  not sueltos, ", ".join(sueltos[:3]))
+    comprobar("se revisaron las llamadas solo-Windows (%d)" % revisados, revisados > 0)
+    print("   (%d usos revisados en %d archivos)" % (revisados, con_usos))
+
+
 def main():
     print("=" * 62)
     print("PRUEBA DE COMPATIBILIDAD   (plataforma actual: %s)" % sys.platform)
@@ -212,25 +327,9 @@ def main():
 
     print()
     print("3) El codigo solo-Windows esta protegido")
-    import re
     # se revisan los archivos del programa (aunque no se hayan podido importar)
     carpeta = os.path.dirname(os.path.abspath(__file__))
-    archivos = []
-    for nombre in ("modulo_compras.py", "modulo_ventas.py", "clientes.py",
-                   "contratos_actas.py", "control_general.py"):
-        ruta = os.path.join(carpeta, nombre)
-        if os.path.isfile(ruta):
-            archivos.append((nombre, ruta))
-    for nombre, ruta in archivos:
-        try:
-            fuente = io.open(ruta, "r", encoding="utf-8").read()
-        except Exception:
-            continue
-        for coincidencia in re.finditer(r"os\.startfile", fuente):
-            contexto = fuente[max(0, coincidencia.start() - 400):coincidencia.start()]
-            protegido = ("win32" in contexto) or ("darwin" in contexto)
-            comprobar("%s: os.startfile protegido" % nombre, protegido,
-                      "linea %d" % (fuente[:coincidencia.start()].count("\n") + 1))
+    revisar_solo_windows(carpeta)
 
     print()
     print("=" * 62)

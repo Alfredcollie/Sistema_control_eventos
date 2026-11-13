@@ -699,6 +699,42 @@ def redondear_detraccion(monto):
     return float(entero + 1) if (valor - entero) >= 0.5 else float(entero)
 
 
+# =========================================================
+# 🔢 LECTURA DE NÚMEROS ESCRITOS A MANO
+#    Acepta "1,000.50", "1.000,50", "S/ 1200", vacío y 0.
+#    Se usa, entre otras cosas, para que la detracción pueda
+#    quedar en 0 % (operación no sujeta).
+# =========================================================
+def _texto_a_numero(texto):
+    """Convierte lo escrito por el usuario en número. Lanza ValueError si no es número."""
+    if isinstance(texto, (int, float)):
+        return float(texto)
+    limpio = str(texto if texto is not None else "").strip()
+    for simbolo in ("S/.", "S/", "s/.", "s/", "\u00a0", " "):
+        limpio = limpio.replace(simbolo, "")
+    if not limpio:
+        return 0.0
+    if "," in limpio and "." in limpio:
+        if limpio.rfind(",") > limpio.rfind("."):
+            limpio = limpio.replace(".", "").replace(",", ".")   # 1.234,56
+        else:
+            limpio = limpio.replace(",", "")                     # 1,234.56
+    elif "," in limpio:
+        partes = limpio.split(",")
+        if len(partes) == 2 and 1 <= len(partes[1]) <= 2:
+            limpio = limpio.replace(",", ".")     # 12,5  -> 12.5
+        else:
+            limpio = limpio.replace(",", "")      # 1,500 -> 1500
+    return float(limpio)
+
+
+def _a_numero(texto, por_defecto=0.0):
+    """Igual que _texto_a_numero, pero nunca falla: devuelve el valor por defecto."""
+    try:
+        return _texto_a_numero(texto)
+    except (TypeError, ValueError):
+        return float(por_defecto)
+
 
 # =========================================================
 # 📏 REGLA AUTOMÁTICA DE LA DETRACCIÓN (SPOT)
@@ -1794,14 +1830,25 @@ class FacturasEmitidasTab:
         ctk.CTkLabel(self.f_form, text="Monto Base (Sin IGV / Subtotal):", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.ent_subtotal = ctk.CTkEntry(self.f_form); self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 8)); self.ent_subtotal.bind("<KeyRelease>", self.actualizar_totales)
         self.lbl_titulo_det = ctk.CTkLabel(self.f_form, text="Detracción (%):", font=("Arial", 11, "bold")); self.lbl_titulo_det.pack(anchor="w", padx=10)
-        self.ent_detraccion = ctk.CTkEntry(self.f_form); self.ent_detraccion.pack(fill="x", padx=10, pady=(0, 8)); self.ent_detraccion.insert(0, "12"); self.ent_detraccion.bind("<KeyRelease>", self.actualizar_totales)
+        # ✍️ El % se puede escribir a mano (0 incluido). «↺ Auto» vuelve a la regla del SPOT.
+        f_det = ctk.CTkFrame(self.f_form, fg_color="transparent"); f_det.pack(fill="x", padx=10, pady=(0, 2))
+        self.ent_detraccion = ctk.CTkEntry(f_det); self.ent_detraccion.pack(side="left", fill="x", expand=True)
+        self.ent_detraccion.insert(0, "12")
+        self.ent_detraccion.bind("<KeyRelease>", self._marcar_detraccion_manual)
+        self.ent_detraccion.bind("<FocusOut>", self._marcar_detraccion_manual)
+        ctk.CTkButton(f_det, text="↺ Auto", width=62, height=26, fg_color="#95a5a6", hover_color="#7f8c8d",
+                      font=("Arial", 10, "bold"), command=self._detraccion_automatica).pack(side="right", padx=(6, 0))
+        self._det_manual = False
+        self.lbl_aviso_det = ctk.CTkLabel(self.f_form, text="", font=("Arial", 9), text_color="#b9770e",
+                                          justify="left", wraplength=290)
+        self.lbl_aviso_det.pack(anchor="w", padx=10, pady=(0, 8))
         # 🏷️ ¿La venta es de un EVENTO (servicio, 12 %) o de un PRODUCTO (pines, 0 %)?
         ctk.CTkLabel(self.f_form, text="Tipo de venta (detracción):",
                      font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.seg_tipo_venta = ctk.CTkSegmentedButton(
             self.f_form, values=["🎪 Evento / Servicio (12%)", "📦 Producto (0%)"],
             font=("Arial", 10, "bold"),
-            command=lambda _v: self.actualizar_totales())
+            command=lambda _v: self._cambiar_tipo_venta())
         self.seg_tipo_venta.pack(fill="x", padx=10, pady=(0, 8))
         self.seg_tipo_venta.set("🎪 Evento / Servicio (12%)")
 
@@ -1982,6 +2029,7 @@ class FacturasEmitidasTab:
         partes = choice.split(" | ")
         if len(partes) > 0: self.cargar_ordenes_compra(partes[0].strip())
     def on_tipo_change(self, choice):
+        self._det_manual = False          # al cambiar de documento vuelve la regla
         if hasattr(self, 'ent_detraccion'):
             self.ent_detraccion.configure(state="normal")
             if "Recibo" in choice:
@@ -2024,7 +2072,11 @@ class FacturasEmitidasTab:
     def _aplicar_datos_cliente(self, ruc_db, det_db, eventos_cliente):
         if not hasattr(self, 'ent_detraccion'): return
         self.ent_detraccion.configure(state="normal")
-        if "Factura" in getattr(self.combo_tipo, 'get', lambda: "")(): self.ent_detraccion.delete(0, tk.END); self.ent_detraccion.insert(0, det_db)
+        if "Factura" in getattr(self.combo_tipo, 'get', lambda: "")():
+            # 📌 El % guardado en el cliente manda: si está en 0 se respeta el 0.
+            valor_cli = _a_numero(det_db)
+            self._escribir_detraccion(valor_cli)
+            self._det_manual = (valor_cli <= 0.001)
         if not getattr(self, 'bloquear_autocompletado_ruc', False) and ruc_db: self.ent_ruc.configure(state="normal"); self.ent_ruc.delete(0, tk.END); self.ent_ruc.insert(0, str(ruc_db))
         if hasattr(self, 'actualizar_totales'): self.actualizar_totales()
         if hasattr(self, 'combo_evento'):
@@ -2110,31 +2162,116 @@ class FacturasEmitidasTab:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # 📏 DETRACCIÓN: la regla del SPOT sólo PROPONE; el usuario decide.
+    #    Se puede escribir 0 % (operación no sujeta) y se respeta.
+    # ------------------------------------------------------------------
+    def _total_con_igv(self):
+        """Total con IGV según el Monto Base escrito (sin reventar con texto raro)."""
+        sub = _a_numero(self.ent_subtotal.get())
+        return redondear_centavos(sub + redondear_centavos(sub * 0.18))
+
+    def _escribir_detraccion(self, valor):
+        """Escribe el % en la casilla sin disparar el evento de teclado."""
+        try:
+            texto = "" if valor is None else ("%g" % float(valor))
+            if self.ent_detraccion.get().strip() == texto:
+                return
+            self.ent_detraccion.delete(0, tk.END)
+            self.ent_detraccion.insert(0, texto)
+        except Exception:
+            pass
+
+    def _marcar_detraccion_manual(self, event=None):
+        """Recuerda si el % lo escribió el usuario (así se respeta el 0 %).
+
+        Si lo escrito coincide con la regla del SPOT se vuelve al modo automático;
+        si no coincide (0 %, 4 %, etc.) se conserva lo escrito.
+        """
+        if not hasattr(self, "combo_tipo") or not hasattr(self, "ent_detraccion"):
+            return
+        try:
+            texto = (self.ent_detraccion.get() or "").strip()
+            if not texto:
+                self._det_manual = False          # campo vacío -> vuelve la regla
+                self.actualizar_totales()
+                return
+            regla = porcentaje_detraccion_ventas(self._total_con_igv(),
+                                                 producto=self.venta_de_producto())
+            self._det_manual = abs(_a_numero(texto) - regla) > 0.001
+            self.actualizar_totales()
+        except Exception as error:
+            # al cerrar la ventana los controles pueden estar destruidos: no molestar
+            print("Aviso - detracción manual:", error)
+
+    def _detraccion_automatica(self):
+        """Botón «↺ Auto»: olvida lo escrito y aplica la regla del SPOT."""
+        self._det_manual = False
+        self.actualizar_totales()
+
+    def _cambiar_tipo_venta(self):
+        """Evento / Producto: se vuelve a la regla automática."""
+        self._det_manual = False
+        self.actualizar_totales()
+
+    def _actualizar_aviso_detraccion(self, total=None, pct_regla=None):
+        """Explica en una línea por qué se va a guardar ese porcentaje."""
+        lbl = getattr(self, "lbl_aviso_det", None)
+        if lbl is None:
+            return
+        try:
+            if "Factura" not in self.combo_tipo.get():
+                lbl.configure(text="")
+                return
+            if total is None:
+                total = self._total_con_igv()
+            if pct_regla is None:
+                pct_regla = porcentaje_detraccion_ventas(total, producto=self.venta_de_producto())
+            pct = _a_numero(self.ent_detraccion.get())
+            umbral = umbral_detraccion_ventas()
+            manual = getattr(self, "_det_manual", False)
+            if manual and pct <= 0.001 and pct_regla > 0.001:
+                lbl.configure(text=("⚠️ Se guardará 0 %% aunque el total (%s) supera %s. "
+                                    "Confirme que la operación no está sujeta a detracción."
+                                    % (formatear_moneda(total), formatear_moneda(umbral))),
+                              text_color="#b9770e")
+            elif manual and pct > 0.001 and pct_regla <= 0.001:
+                lbl.configure(text=("ℹ️ El total NO supera %s: la norma no exige detracción. "
+                                    "Se guardará el %.2f %% que usted escribió."
+                                    % (formatear_moneda(umbral), pct)),
+                              text_color="#1f538d")
+            elif manual:
+                lbl.configure(text="✍️ Porcentaje escrito a mano. «↺ Auto» vuelve a la regla.",
+                              text_color="#566573")
+            else:
+                lbl.configure(text="")
+        except Exception:
+            pass
+
     def actualizar_totales(self, *args):
         if not hasattr(self, 'combo_tipo') or not hasattr(self, 'ent_subtotal') or not hasattr(self, 'ent_detraccion'): return
         tipo = self.combo_tipo.get()
-        try:
-            sub, ui_pct = float(self.ent_subtotal.get() or 0), float(self.ent_detraccion.get() or 0)
-            if "Factura" in tipo:
-                igv = redondear_centavos(sub * 0.18); tot = redondear_centavos(sub + igv)
-                # 📏 Regla automática: hasta S/ 700 con IGV no corresponde detracción
-                pct_regla = porcentaje_detraccion_ventas(tot, producto=self.venta_de_producto())
-                if abs(pct_regla - ui_pct) > 0.001:
-                    ui_pct = pct_regla
-                    try:
-                        self.ent_detraccion.delete(0, tk.END)
-                        self.ent_detraccion.insert(0, "%g" % ui_pct)
-                    except Exception:
-                        pass
-                det = tot * (ui_pct / 100.0)
-                # 🧮 con el check activo se redondea al entero (0.01-0.49 baja, 0.50-0.99 sube)
-                det = redondear_detraccion(det) if self.detraccion_con_redondeo() else redondear_centavos(det)
-                neto = redondear_centavos(tot - det)
-                self.lbl_impuesto.configure(text=f"IGV (18%): {formatear_moneda(igv)}"); self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}"); self.lbl_total.configure(text=f"Neto a Cobrar: {formatear_moneda(neto)}")
-            elif "Recibo" in tipo:
-                ret = sub * (ui_pct / 100.0); neto = sub - ret
-                self.lbl_impuesto.configure(text=f"Retención ({ui_pct:g}%): -{formatear_moneda(ret)}"); self.lbl_detraccion.configure(text=f"Detracción (0%): -{formatear_moneda(0)}"); self.lbl_total.configure(text=f"Neto a Cobrar: {formatear_moneda(neto)}")
-        except ValueError: pass
+        sub = _a_numero(self.ent_subtotal.get())
+        ui_pct = _a_numero(self.ent_detraccion.get())
+        if "Factura" in tipo:
+            igv = redondear_centavos(sub * 0.18); tot = redondear_centavos(sub + igv)
+            # 📏 Regla del SPOT: hasta el umbral (S/ 700 con IGV) no corresponde detracción
+            pct_regla = porcentaje_detraccion_ventas(tot, producto=self.venta_de_producto())
+            if not getattr(self, "_det_manual", False):
+                # ✍️ sólo se completa sola cuando el usuario no escribió el %
+                ui_pct = pct_regla
+                self._escribir_detraccion(pct_regla)
+            ui_pct = max(0.0, min(100.0, ui_pct))
+            det = tot * (ui_pct / 100.0)
+            # 🧮 con el check activo se redondea al entero (0.01-0.49 baja, 0.50-0.99 sube)
+            det = redondear_detraccion(det) if self.detraccion_con_redondeo() else redondear_centavos(det)
+            neto = redondear_centavos(tot - det)
+            self.lbl_impuesto.configure(text=f"IGV (18%): {formatear_moneda(igv)}"); self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}"); self.lbl_total.configure(text=f"Neto a Cobrar: {formatear_moneda(neto)}")
+            self._actualizar_aviso_detraccion(tot, pct_regla)
+        elif "Recibo" in tipo:
+            ret = sub * (ui_pct / 100.0); neto = sub - ret
+            self.lbl_impuesto.configure(text=f"Retención ({ui_pct:g}%): -{formatear_moneda(ret)}"); self.lbl_detraccion.configure(text=f"Detracción (0%): -{formatear_moneda(0)}"); self.lbl_total.configure(text=f"Neto a Cobrar: {formatear_moneda(neto)}")
+            self._actualizar_aviso_detraccion()
     def guardar_registro(self):
         ruta_base = obtener_ruta_base_drive()
         if not ruta_base: return messagebox.showwarning("Configuración Requerida", "Configure la ruta de Google Drive.")
@@ -2152,19 +2289,29 @@ class FacturasEmitidasTab:
                                        "⚠️ No ha seleccionado una Orden de Compra para esta factura." +
                                        chr(10) + chr(10) + "¿Desea emitirla sin Orden de Compra?"):
                 return
-        try: subtotal, dias, ui_pct = float(self.ent_subtotal.get() or 0), int(self.ent_dias.get().strip() or 0), float(self.ent_detraccion.get() or 0)
-        except ValueError: return messagebox.showerror("Error", "Montos deben ser numéricos.")
+        # ✍️ El porcentaje escrito MANDA (0 % incluido). La regla del SPOT sólo
+        #    se aplica cuando la casilla quedó vacía.
+        try:
+            subtotal = _texto_a_numero(self.ent_subtotal.get())
+            dias = int(_texto_a_numero(self.ent_dias.get() or 0))
+            pct_txt = (self.ent_detraccion.get() or "").strip()
+            ui_pct = _texto_a_numero(pct_txt) if pct_txt else None
+        except (ValueError, OverflowError):
+            return messagebox.showerror("Error", "Montos deben ser numéricos.")
+        if ui_pct is not None and not (0.0 <= ui_pct <= 100.0):
+            return messagebox.showerror("Porcentaje inválido",
+                                        "La detracción/retención debe estar entre 0 % y 100 %.")
         if "Factura" in tipo:
             imp = redondear_centavos(subtotal * 0.18); tot_bruto = redondear_centavos(subtotal + imp)
-            # 📏 el % se decide solo según el total con IGV (hasta S/ 700 no hay)
-            det_pct = porcentaje_detraccion_ventas(tot_bruto,
-                                                   producto=self.venta_de_producto())
+            # 📏 Si no se escribió nada se aplica la regla (hasta S/ 700 no hay detracción).
+            det_pct = (porcentaje_detraccion_ventas(tot_bruto, producto=self.venta_de_producto())
+                       if ui_pct is None else ui_pct)
             det_monto = tot_bruto * (det_pct / 100.0)
             det_monto = (redondear_detraccion(det_monto) if self.detraccion_con_redondeo()
                          else redondear_centavos(det_monto))
             neto_nuevo = redondear_centavos(tot_bruto - det_monto)
-        elif "Recibo" in tipo: imp = subtotal * (ui_pct / 100.0); tot_bruto = subtotal; det_pct = 0.0; det_monto = 0.0; neto_nuevo = subtotal - imp  
-        else: imp = 0.0; tot_bruto = subtotal; det_pct = ui_pct; det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
+        elif "Recibo" in tipo: imp = subtotal * ((ui_pct or 0.0) / 100.0); tot_bruto = subtotal; det_pct = 0.0; det_monto = 0.0; neto_nuevo = subtotal - imp  
+        else: imp = 0.0; tot_bruto = subtotal; det_pct = (ui_pct or 0.0); det_monto = tot_bruto * (det_pct / 100.0); neto_nuevo = tot_bruto - det_monto
         conn = obtener_conexion_segura()
         if not conn: return
         try:
@@ -2219,6 +2366,9 @@ class FacturasEmitidasTab:
             self._ofrecer_cobro(id_factura_nueva, nro_doc)
             self.nro_desde_archivo = False
             self.ent_desc.delete(0, tk.END); self.ent_subtotal.delete(0, tk.END); self.ruta_archivo_temp = ""; self.combo_oc.set("--- Sin Orden de Compra ---")
+            # 🔄 El formulario queda limpio: la próxima venta vuelve a la regla automática
+            self._det_manual = False
+            self.actualizar_totales()
             self.cargar_datos_tabla(reset_pagina=True); self.sugerir_correlativo()
             if hasattr(self.app_padre, 'app_cobros'): self.app_padre.app_cobros.cargar_datos_cobrar(reset_pagina=True)
             if hasattr(self.app_padre, 'app_nc'): self.app_padre.app_nc.cargar_datos_nc(reset_pagina=True)
@@ -2811,13 +2961,20 @@ class FacturasEmitidasTab:
             else:
                 lbl_tit_det.configure(text="Detracción (%):")
                 ent_det.insert(0, ("%g" % float(reg[8] or 0)))   # se muestra lo guardado (0 incluido)
+            ctk.CTkLabel(f_cont, text="Escriba 0 para una operación NO sujeta a detracción (se guarda 0 %).",
+                         font=("Arial", 9), text_color="#7a7a7a", justify="left",
+                         wraplength=400).pack(anchor="w", pady=(0, 8))
 
             def guardar_cambios():
                 tipo, nro_doc, fecha = cmb_tipo.get(), ent_nro.get().strip(), ent_f.get().strip()
                 cli, desc, evento, oc_sel = ent_c.get().strip(), ent_desc.get().strip(), cmb_ev.get(), cmb_oc.get()
                 if oc_sel == "--- Sin Orden de Compra ---": oc_sel = ""
-                try: sub, dias, ui_pct = float(ent_s.get()), int(ent_d.get()), float(ent_det.get() if ent_det.get() else 0)
-                except ValueError: return messagebox.showerror("Error", "Monto, días y porcentaje deben ser numéricos.", parent=v_mod)
+                try: sub, dias = _texto_a_numero(ent_s.get()), int(_texto_a_numero(ent_d.get() or 0))
+                except (ValueError, OverflowError): return messagebox.showerror("Error", "Monto y días deben ser numéricos.", parent=v_mod)
+                try: ui_pct = _texto_a_numero(ent_det.get())
+                except ValueError: return messagebox.showerror("Error", "El porcentaje debe ser numérico.", parent=v_mod)
+                if not (0.0 <= ui_pct <= 100.0):
+                    return messagebox.showerror("Porcentaje inválido", "La detracción/retención debe estar entre 0 % y 100 %.", parent=v_mod)
                 # 🚀 CORTE DEL SISTEMA: no permitir mover una venta antes de la Fecha de Comienzo
                 if validar_fecha_registro:
                     fecha_ok, msg_fecha = validar_fecha_registro(fecha)

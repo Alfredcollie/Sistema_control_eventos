@@ -1040,6 +1040,31 @@ def normalizar_fecha(s):
     return s
 
 
+
+# ⏳ un solo letrero de carga para TODO el módulo (aunque lo llamen varias instancias)
+_LETRERO_CARGANDO = {"ventana": None}
+
+
+def _dias_entre_fechas(fecha_a, fecha_b):
+    """Diferencia en días entre dos fechas de texto (dd/mm/aaaa o aaaa-mm-dd)."""
+    def partes(valor):
+        texto = str(valor or "").strip()
+        try:
+            if "-" in texto and len(texto.split("-")[0]) == 4:      # AAAA-MM-DD
+                a, m, d = [int(x) for x in texto.split("-")[:3]]
+            else:                                                    # DD/MM/AAAA
+                d, m, a = [int(x) for x in texto.replace("-", "/").split("/")[:3]]
+                if a < 100:
+                    a += 2000
+            return datetime(a, m, d).date()
+        except Exception:
+            return None
+    fa, fb = partes(fecha_a), partes(fecha_b)
+    if not fa or not fb:
+        return 999
+    return abs((fa - fb).days)
+
+
 def fecha_para_mostrar(valor):
     """Devuelve la fecha como DD/MM/AAAA para mostrarla (aunque venga en ISO)."""
     f = normalizar_fecha(valor)
@@ -1243,6 +1268,14 @@ def parsear_movimientos(texto):
         fecha_raw = fechas[0][0]
         partes = fecha_raw.split("/")
         if len(partes) == 2 and anio:
+            fecha_raw = "%s/%s/%d" % (partes[0], partes[1], anio)
+        elif len(partes) == 3 and anio and str(partes[2]) != str(anio):
+            # 🛡️ Punto 4: el estado de cuenta trae un año equivocado -> se ajusta al del período
+            try:
+                print("[Conciliación] año corregido: %s -> %s/%s/%d"
+                      % (fecha_raw, partes[0], partes[1], anio))
+            except Exception:
+                pass
             fecha_raw = "%s/%s/%d" % (partes[0], partes[1], anio)
         seleccion = _seleccionar_monto(resto, montos)
         if seleccion is None:
@@ -1923,6 +1956,35 @@ class ModuloBancoApp:
         # para que el módulo abra al instante y no se congele.
         self._cargar_datos_iniciales()
 
+        # 🖥️ Refresco automático de la pantalla al entrar (el hilo inicial a veces no
+        #    repinta y quedaba "Cargando datos del banco..."). Equivale a pulsar
+        #    el botón 🔄 Actualizar un par de segundos después de abrir el módulo.
+        def _refrescar_pantalla_banco():
+            """Refresca los datos y FUERZA el repintado (igual que cambiar de pestaña)."""
+            try:
+                self.actualizar_saldos_boton()
+            except Exception as error:
+                print("[Banco] refresco de datos:", error)
+            try:
+                self.update_idletasks()
+                self.update()
+                # 🔁 re-seleccionar la pestaña obliga a Tkinter a redibujar el contenido
+                try:
+                    actual = self.tabview.get()
+                    self.tabview.set(actual)
+                except Exception:
+                    pass
+                self.update_idletasks()
+                self.update()
+            except Exception as error:
+                print("[Banco] refresco de pantalla:", error)
+
+        try:
+            self.after(2500, _refrescar_pantalla_banco)
+            self.after(5000, _refrescar_pantalla_banco)   # segunda pasada (internet lento)
+        except Exception as error:
+            print("[Banco] refresco automático:", error)
+
     # -----------------------------------------------------
     # BASE DE DATOS DE CONCILIACION
     # -----------------------------------------------------
@@ -2163,6 +2225,14 @@ class ModuloBancoApp:
         except Exception:
             pass
 
+    def _ocultar_cargando(self):
+        """Sin ventana flotante: no hay nada que cerrar (se conserva por compatibilidad)."""
+        try:
+            _LETRERO_CARGANDO["ventana"] = None
+        except Exception:
+            pass
+        return
+
     def _actualizar_combos_bancos(self):
         """Vuelca la lista de bancos (ya cargada) en los combos de las pestañas."""
         etiquetas = [construir_etiqueta_banco(b) for b in self.bancos]
@@ -2207,7 +2277,21 @@ class ModuloBancoApp:
             return
         self.bancos = estado.get("bancos") or []
         self._actualizar_combos_bancos()
-        self.refrescar_saldos(estado.get("datos"))
+        # 🛟 el pintado inicial no debe cortar el hilo: si falla, se informa y se sigue
+        try:
+            self.refrescar_saldos(estado.get("datos"))
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+        except Exception as _e_pintar:
+            import traceback as _tb_pintar
+            _tb_pintar.print_exc()
+            print("[Banco] ERROR al pintar los saldos:", _e_pintar)
+            try:
+                self._mostrar_cargando("⚠️ No se pudo mostrar la información del banco.")
+            except Exception:
+                pass
         self._pintar_transferencias(estado.get("transferencias") or [])
 
     def _al_cambiar_pestana(self, nombre=None):
@@ -2723,7 +2807,37 @@ class ModuloBancoApp:
                 copia["documento"] = ", ".join(unicos)
         return salida
 
+    def _avisar_ya_conciliados(self):
+
+        """Avisa cuántos movimientos ya estaban conciliados."""
+
+        pendientes = int(getattr(self, "_ya_conciliados", 0) or 0)
+
+        if pendientes <= 0:
+
+            return
+
+        self._ya_conciliados = 0
+
+        try:
+
+            messagebox.showinfo("Conciliación",
+
+                                "%d movimiento(s) ya estaban conciliados y no se "
+
+                                "volvieron a registrar." % pendientes,
+
+                                parent=self.parent_frame)
+
+        except Exception as error:
+
+            print("[Conciliación] aviso:", error)
+
+
     def cargar_movimientos_sistema(self, banco, mes=None, incluir_sin_cuenta=False):
+
+
+        self._avisar_ya_conciliados()
         """Movimientos del sistema para un banco (consulta la base de datos)."""
         return self._movimientos_de_banco(banco, mes=mes, incluir_sin_cuenta=incluir_sin_cuenta)
 
@@ -3838,6 +3952,21 @@ class ModuloBancoApp:
             return
         try:
             with conn.cursor() as c:
+                # 🛡️ ¿ya estaba cargado este mismo estado de cuenta? (mismas líneas y mismo total)
+                try:
+                    c.execute("""SELECT COUNT(*), COALESCE(SUM(monto), 0)
+                                 FROM conciliacion_movimientos_pdf WHERE banco = %s""",
+                              (banco.get("banco", ""),))
+                    fila_previa = c.fetchone() or (0, 0)
+                    total_nuevo = round(sum(float(m.get("monto") or 0) for m in movs), 2)
+                    if (int(fila_previa[0] or 0) == len(movs)
+                            and abs(float(fila_previa[1] or 0) - total_nuevo) < 0.01
+                            and len(movs) > 0):
+                        print("[Conciliación] El estado de cuenta ya estaba cargado "
+                              "(%d líneas · %.2f): se vuelve a guardar igual y se sigue "
+                              "con la conciliación." % (len(movs), total_nuevo))
+                except Exception as error_repetido:
+                    print("[Conciliación] revisión de estado repetido:", error_repetido)
                 c.execute("DELETE FROM conciliacion_movimientos_pdf WHERE banco = %s",
                           (banco.get("banco", ""),))
                 for m in movs:
@@ -4978,7 +5107,40 @@ class ModuloBancoApp:
                                  WHERE banco=%s AND origen=%s AND COALESCE(fecha,'')=%s
                                    AND ABS(COALESCE(monto,0)-%s) < 0.005""",
                               (banco_nombre, origen_persist, fecha, monto))
-                if c.fetchone()[0] == 0:
+                ya_existia = c.fetchone()[0] > 0
+                if ya_existia:
+                    # 🛡️ ya estaba conciliado: se cuenta para avisar al usuario
+                    try:
+                        self._ya_conciliados = getattr(self, "_ya_conciliados", 0) + 1
+                    except Exception:
+                        pass
+                reutilizado = 0
+                if not ya_existia:
+                    # 🛡️ Punto 1: mismo banco + monto y fecha ±2 días -> se reutiliza esa fila
+                    try:
+                        c.execute("""SELECT id, fecha FROM conciliacion_bancaria
+                                     WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                       AND ABS(ABS(COALESCE(monto,0)) - ABS(%s)) < 0.01
+                                     ORDER BY id LIMIT 25""", (banco_nombre, monto))
+                        for _id_reuso, _fecha_reuso in (c.fetchall() or []):
+                            # 🏦 el banco puede tardar hasta 4 días en reflejar la
+                            #    transacción en el estado de cuenta
+                            if _dias_entre_fechas(_fecha_reuso, fecha) <= 4:
+                                reutilizado = _id_reuso
+                                break
+                    except Exception as _e_reuso:
+                        print("[Conciliación] búsqueda de asiento equivalente:", _e_reuso)
+                    if reutilizado:
+                        c.execute("""UPDATE conciliacion_bancaria
+                                     SET estado='conciliado', fecha_conciliacion=%s
+                                     WHERE id=%s""",
+                                  (datetime.now().strftime("%d/%m/%Y"), reutilizado))
+                        conn.commit()
+                        try:
+                            self._ya_conciliados = getattr(self, "_ya_conciliados", 0) + 1
+                        except Exception:
+                            pass
+                if not ya_existia and not reutilizado:
                     c.execute("""INSERT INTO conciliacion_bancaria
                         (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado, fecha_conciliacion)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'conciliado',%s)""",

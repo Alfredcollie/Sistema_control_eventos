@@ -89,6 +89,73 @@ def tamano_natural_puntos(ruta_imagen):
         return None
 
 
+_DPI_MIN_VALIDO = 24.0
+_DPI_MAX_VALIDO = 1200.0
+
+
+def tamano_logo_puntos(ruta_imagen, ancho_max, alto_max):
+    """
+    Tamaño (ancho, alto) en PUNTOS para dibujar el logo DENTRO del área
+    disponible, conservando siempre la proporción original del archivo.
+
+    Por qué existe: antes se usaba el tamaño "natural" del archivo, es decir
+    píxeles convertidos con los DPI que declara la imagen. Cuando el archivo
+    NO declara DPI (muy común en imágenes guardadas o exportadas desde macOS,
+    o en JPG sin bloque JFIF) se aplicaba 1 píxel = 1 punto, así que un logo
+    de 2061 px se dibujaba de 2061 pt de ancho (3,4 veces el ancho de la
+    hoja): el logo salía "expandido". Con esta función cualquier logo se
+    acota a la caja (ancho_max, alto_max) y el resultado es el mismo en
+    Windows y en macOS.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        Image = None
+
+    try:
+        w_px = h_px = 0
+        dpi_x = dpi_y = None
+
+        if Image is not None:
+            try:
+                with Image.open(ruta_imagen) as im:
+                    w_px, h_px = im.size
+                    dpi = im.info.get("dpi")
+                    if dpi and len(dpi) >= 2 and dpi[0] and dpi[1]:
+                        dx, dy = float(dpi[0]), float(dpi[1])
+                        # Solo se confía en DPI dentro de un rango razonable.
+                        if _DPI_MIN_VALIDO <= dx <= _DPI_MAX_VALIDO and _DPI_MIN_VALIDO <= dy <= _DPI_MAX_VALIDO:
+                            dpi_x, dpi_y = dx, dy
+            except Exception:
+                w_px = h_px = 0
+
+        if not w_px or not h_px:
+            img = ImageReader(ruta_imagen)
+            w_px, h_px = img.getSize()
+
+        w_px = float(w_px or 0)
+        h_px = float(h_px or 0)
+        if w_px <= 0 or h_px <= 0:
+            return None
+
+        # El ancho se calcula con la densidad horizontal y el alto se deriva
+        # SIEMPRE de la proporción real en píxeles: así el logo nunca se
+        # deforma aunque el archivo declare DPI distintos en X e Y.
+        densidad = dpi_x if dpi_x else 96.0
+        ancho_pt = w_px * 72.0 / densidad
+        alto_pt = ancho_pt * (h_px / w_px)
+
+        escala = 1.0
+        if ancho_max and ancho_max > 0 and ancho_pt > ancho_max:
+            escala = min(escala, float(ancho_max) / ancho_pt)
+        if alto_max and alto_max > 0 and alto_pt > alto_max:
+            escala = min(escala, float(alto_max) / alto_pt)
+
+        return (ancho_pt * escala, alto_pt * escala)
+    except Exception:
+        return None
+
+
 _SCHEMA_PDF_OK = False
 
 def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
@@ -337,34 +404,33 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         offset = 0
         if mostrar_logo and ruta_usar:
             try:
-                nat = tamano_natural_puntos(ruta_usar)
-                if nat:
-                    final_w, final_h = nat
-                else:
-                    img = ImageReader(ruta_usar)
-                    iw, ih = img.getSize()
-                    final_w = float(iw)
-                    final_h = float(ih)
+                # El logo SIEMPRE se acota al ancho útil de la hoja y a una
+                # altura máxima, conservando su proporción. Así el PDF sale
+                # idéntico en Windows y en macOS, con cualquier archivo de
+                # logo (con o sin DPI declarados).
+                ALTO_MAX_LOGO = 100.0
+                tam = tamano_logo_puntos(ruta_usar, ancho_util, ALTO_MAX_LOGO)
+                if not tam:
+                    tam = (ancho_util, ancho_util * 0.25)
+                final_w, final_h = tam
                 if final_w <= 0: final_w = 1
                 if final_h <= 0: final_h = 1
                 y_logo = 792 - 40 - final_h
-                
-                # Logo a TAMAÑO NATURAL (sin escalar ni modificar), centrado
+
+                # Centrado horizontal dentro del área útil
                 x_logo = margen_izq + (ancho_util - final_w) / 2.0
                 if x_logo < margen_izq:
                     x_logo = margen_izq
-                c.drawImage(ruta_usar, x_logo, y_logo, width=final_w, height=final_h, preserveAspectRatio=True)
-                
+                c.drawImage(ruta_usar, x_logo, y_logo, width=final_w, height=final_h,
+                            mask='auto', preserveAspectRatio=True)
+
                 techo_textos = 685
                 margen_inferior_logo = y_logo - 25
                 offset = (margen_inferior_logo - techo_textos) if margen_inferior_logo < techo_textos else 0
             except Exception as e:
                 try:
-                    img_t = ImageReader(ruta_usar)
-                    wt_t, ht_t = img_t.getSize()
-                    if wt_t == 0: wt_t = 1
-                    if ht_t == 0: ht_t = 1
-                    c.drawImage(ruta_usar, 40, 685, width=wt_t, height=ht_t, preserveAspectRatio=True)
+                    c.drawImage(ruta_usar, margen_izq, 685, width=ancho_util, height=90,
+                                mask='auto', preserveAspectRatio=True)
                 except Exception:
                     pass
                 offset = 0

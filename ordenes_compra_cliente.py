@@ -5,7 +5,9 @@
 ORDENES_COMPRA_CLIENTE.PY (ENTERPRISE TURBO EDITION + SMART OCR)
 =========================================================
 Optimizaciones y Capacidades:
-1. 🧠 Motor OCR Multi-Estrategia: Lee cualquier Orden de Compra (Puma, Folios, Tablas, Fechas en texto, IGV/IVA).
+1. 🧠 Lector híbrido: PDF digital (pdfplumber) + OCR del sistema para escaneados.
+   Entiende el formato de NGR ("Pedido N°...", "SUB-TOTAL PEN", "IGV 18.00 %") y
+   formatos genéricos (Folios, Tablas, Fechas en texto, IGV/IVA).
 2. ⚡ Renderizado Instantáneo de UI (<50ms): Cero bloqueos visuales en __init__.
 3. 🚀 Inicialización Asíncrona: Esquema BD e índices en hilo daemon.
 4. 📂 I/O Asíncrono de Archivos: Verificación de PDF en hilo worker.
@@ -27,6 +29,7 @@ import re
 import subprocess
 import threading
 import queue
+import unicodedata
 
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
@@ -36,11 +39,6 @@ try:
     RUTA_CONFIG = str(CONFIG_FILE)
 except Exception:
     RUTA_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config_local.json")
-
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -170,6 +168,13 @@ def formatear_moneda(valor):
     valor_float = parsear_numero_seguro(valor)
     return f"{simbolo} {formatear_numero(valor_float)}"
 
+
+def _texto_busqueda(texto):
+    """Minúsculas y sin tildes, para comparar nombres de clientes/eventos."""
+    normal = unicodedata.normalize("NFD", str(texto or ""))
+    limpio = "".join(c for c in normal if unicodedata.category(c) != "Mn")
+    return limpio.lower().strip()
+
 FEE_PRODUCCION_PCT = 15.0
 
 
@@ -235,7 +240,15 @@ class OrdenesCompraClienteApp:
         self.ruta_archivo_temp = ""
         self._busqueda_job = None
         self._esta_destruido = False
-        
+        self._escaneando = False
+
+        # Estado del escaneo con la multifuncional (páginas y PDF temporal)
+        self._escaneo_paginas = []
+        self._escaneo_pdf = ""
+        self._escaneo_config = {}
+        self._escaneo_datos = {}
+        self._ventana_preview = None
+
         # Estado de Edición
         self.id_oc_en_edicion = None
         self.ruta_archivo_actual_en_edicion = ""
@@ -375,14 +388,24 @@ class OrdenesCompraClienteApp:
 
         self.btn_arch_cli = ctk.CTkButton(
             f_form, 
-            text="📄 Cargar y Escanear PDF (OCR)", 
+            text="📄 Escanear OC (PDF o imagen)",
             font=ctk.CTkFont(family=familia_fuente, size=12, weight="bold"), 
             fg_color="#1f538d", 
             hover_color="#163b65", 
             command=self.escanear_pdf
         )
-        self.btn_arch_cli.pack(fill="x", padx=15, pady=(0, 10))
-        
+        self.btn_arch_cli.pack(fill="x", padx=15, pady=(0, 6))
+
+        self.btn_escaner_multi = ctk.CTkButton(
+            f_form,
+            text="🖨️ Escanear con la Multifuncional",
+            font=ctk.CTkFont(family=familia_fuente, size=12, weight="bold"),
+            fg_color="#8e44ad",
+            hover_color="#6c3483",
+            command=self.escanear_con_multifuncional
+        )
+        self.btn_escaner_multi.pack(fill="x", padx=15, pady=(0, 10))
+
         ctk.CTkLabel(f_form, text="1. Nº Orden de Compra / Folio:", font=ctk.CTkFont(family=familia_fuente, size=11, weight="bold")).pack(anchor="w", padx=15)
         self.ent_oc_cli = ctk.CTkEntry(f_form, placeholder_text="Ej: 012898 u OC-998877")
         self.ent_oc_cli.pack(fill="x", padx=15, pady=(0, 10))
@@ -595,15 +618,13 @@ class OrdenesCompraClienteApp:
         self._busqueda_job = self.parent_frame.after(250, lambda: self.cargar_tabla(reset_pagina=True))
 
     # =======================================================
-    # 🧠 MOTOR OCR AVANZADO MULTI-ESTRATEGIA
+    # 📷 ESCANEO DE ÓRDENES DE COMPRA (PDF DIGITAL + OCR)
     # =======================================================
     def escanear_pdf(self):
-        if pdfplumber is None:
-            return messagebox.showerror(
-                "Librería Faltante", 
-                "El escáner requiere 'pdfplumber'.\nInstálalo ejecutando:\npip install pdfplumber"
-            )
-        
+        """Elige un PDF/imagen y lo lee en segundo plano, sin congelar la UI."""
+        if getattr(self, "_escaneando", False):
+            return
+
         try:
             ventana_top = self.parent_frame.winfo_toplevel()
         except Exception:
@@ -611,248 +632,838 @@ class OrdenesCompraClienteApp:
 
         ruta = filedialog.askopenfilename(
             parent=ventana_top,
-            title="Seleccionar PDF de la Orden de Compra", 
-            filetypes=[("Archivos PDF", "*.pdf"), ("Todos los archivos", "*.*")]
+            title="Seleccionar la Orden de Compra (PDF o imagen)",
+            filetypes=[
+                ("Órdenes de compra", "*.pdf *.png *.jpg *.jpeg *.tif *.tiff *.bmp"),
+                ("Archivos PDF", "*.pdf"),
+                ("Imágenes", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp"),
+                ("Todos los archivos", "*.*"),
+            ],
         )
         if not ruta:
             return
-            
-        self.ruta_archivo_temp = normalizar_ruta(ruta)
-        self.btn_arch_cli.configure(text="✅ PDF Escaneado (Memoria)", fg_color="#27ae60")
-        
-        try:
-            texto_partes = []
-            tablas_extraidas = []
-            
-            with pdfplumber.open(self.ruta_archivo_temp) as pdf:
-                for page in pdf.pages:
-                    # 1. Extracción de texto plano con espaciado
-                    t_extraido = page.extract_text(layout=False) or ""
-                    if t_extraido:
-                        texto_partes.append(t_extraido + "\n")
-                    
-                    # 2. Extracción de tablas estructuradas
-                    try:
-                        tabs = page.extract_tables() or []
-                        for t in tabs:
-                            if t:
-                                tablas_extraidas.append(t)
-                    except Exception:
-                        pass
-                        
-            texto_completo = "".join(texto_partes)
 
-            if not texto_completo.strip():
-                return messagebox.showwarning(
-                    "Aviso OCR", 
-                    "El PDF no contiene texto digital editable o está protegido como imagen pura."
+        self.ruta_archivo_temp = normalizar_ruta(ruta)
+        # Un archivo elegido a mano no tiene páginas de escáner para agregar.
+        self._escaneo_paginas = []
+        self._escaneo_pdf = ""
+        self._escaneando = True
+        try:
+            self.btn_arch_cli.configure(
+                text="⏳ Leyendo documento...", state="disabled", fg_color="#7f8c8d"
+            )
+            self.btn_escaner_multi.configure(state="disabled")
+        except Exception:
+            pass
+
+        ruta_para_leer = self.ruta_archivo_temp
+
+        def tarea():
+            try:
+                from lector_orden_compra import leer_orden_compra
+                resultado = leer_orden_compra(
+                    ruta_para_leer,
+                    idioma="Automático",
+                    igv_pct=obtener_porcentaje_igv(),
+                )
+            except Exception as e:
+                resultado = {
+                    "ok": False, "error": str(e), "datos": {},
+                    "texto": "", "motor": "", "paginas": 0,
+                }
+            self.ejecutar_en_ui(self._finalizar_escaneo, resultado)
+
+        threading.Thread(target=tarea, daemon=True).start()
+
+    def _finalizar_escaneo(self, resultado):
+        """Habilita el botón otra vez y muestra el resultado (siempre en el hilo UI)."""
+        if self._esta_destruido:
+            return
+        self._habilitar_botones_escaneo()
+
+        if not resultado or not resultado.get("ok"):
+            motivo = (resultado or {}).get("error") or "No se pudo leer el documento."
+            try:
+                self.btn_arch_cli.configure(
+                    text="⚠️ Documento adjuntado (sin lectura)", fg_color="#d35400"
+                )
+            except Exception:
+                pass
+            tiene_pdf = bool(
+                resultado
+                and resultado.get("ruta_archivo")
+                and isinstance(resultado.get("paginas"), (list, tuple))
+                and resultado.get("paginas")
+            )
+            if tiene_pdf:
+                messagebox.showwarning(
+                    "Lectura incompleta",
+                    "El documento quedó adjuntado, pero no se pudieron reconocer todos sus datos.\n\n"
+                    f"Detalle: {motivo}\n\n"
+                    "Puede agregar otra página o completar los datos a mano."
+                )
+                self._mostrar_resultado_escaneo(resultado)
+                return
+            messagebox.showwarning(
+                "No se pudo leer la OC",
+                "El documento quedó adjuntado, pero no se pudieron reconocer sus datos.\n\n"
+                f"Detalle: {motivo}\n\n"
+                "Puede completar los datos a mano o probar con un PDF de mejor calidad."
+            )
+            return
+
+        try:
+            self.btn_arch_cli.configure(
+                text="✅ Documento leído (en memoria)", fg_color="#27ae60"
+            )
+        except Exception:
+            pass
+        self._mostrar_resultado_escaneo(resultado)
+
+    def _habilitar_botones_escaneo(self):
+        """Vuelve a dejar listos los dos botones de escaneo."""
+        self._escaneando = False
+        try:
+            self.btn_arch_cli.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            self.btn_escaner_multi.configure(
+                state="normal", text="🖨️ Escanear con la Multifuncional"
+            )
+        except Exception:
+            pass
+
+    def _traer_al_frente(self):
+        """Devuelve el foco a la ventana del programa después del escaneo."""
+        try:
+            ventana = self.parent_frame.winfo_toplevel()
+            ventana.deiconify()
+            ventana.lift()
+            ventana.focus_force()
+        except Exception:
+            pass
+
+    def _cerrar_progreso_escaneo(self, v_prog):
+        try:
+            if v_prog is not None and v_prog.winfo_exists():
+                v_prog.grab_release()
+        except Exception:
+            pass
+        try:
+            if v_prog is not None and v_prog.winfo_exists():
+                v_prog.destroy()
+        except Exception:
+            pass
+
+    def _mostrar_progreso_escaneo(self, titulo, instruccion):
+        """Ventanita modal con barra mientras la multifuncional trabaja."""
+        familia = "Helvetica" if sys.platform == "darwin" else "Segoe UI"
+        try:
+            v_prog = ctk.CTkToplevel(self.parent_frame)
+            v_prog.title(titulo)
+            v_prog.geometry("480x200")
+            v_prog.minsize(430, 180)
+            try:
+                v_prog.transient(self.parent_frame.winfo_toplevel())
+            except Exception:
+                pass
+            try:
+                v_prog.grab_set()
+            except Exception:
+                pass
+
+            def _soltar(evento=None):
+                try:
+                    if evento is None or getattr(evento, "widget", None) is v_prog:
+                        v_prog.grab_release()
+                except Exception:
+                    pass
+
+            try:
+                v_prog.bind("<Destroy>", _soltar, add="+")
+                v_prog.bind("<Unmap>", _soltar, add="+")
+            except Exception:
+                pass
+
+            ctk.CTkLabel(
+                v_prog, text="🖨️ Escaneando la Orden de Compra...",
+                font=ctk.CTkFont(family=familia, size=14, weight="bold"),
+                text_color="#1f538d",
+            ).pack(pady=(18, 4))
+            ctk.CTkLabel(
+                v_prog, text=instruccion,
+                font=ctk.CTkFont(family=familia, size=10),
+                text_color="#7f8c8d", justify="center", wraplength=420,
+            ).pack(pady=(0, 10))
+            barra = ctk.CTkProgressBar(v_prog, width=380, mode="indeterminate")
+            barra.pack(pady=4)
+            barra.start()
+            ctk.CTkLabel(
+                v_prog, text="Esto puede tardar unos segundos.",
+                font=ctk.CTkFont(family=familia, size=9),
+                text_color="#7f8c8d",
+            ).pack(pady=(4, 0))
+            self._centrar_ventana(v_prog, 480, 200)
+            try:
+                v_prog.lift()
+                v_prog.focus_force()
+            except Exception:
+                pass
+            return v_prog
+        except Exception as e:
+            print("[Escáner OC] No se pudo mostrar el progreso:", e)
+            return None
+
+    def _carpeta_escaneos_oc(self, config):
+        """Carpeta donde se guardan los escaneos de las órdenes de compra."""
+        base = str((config or {}).get("escaner_carpeta") or "").strip()
+        if not base:
+            base = str((config or {}).get("ruta_drive") or "").strip()
+        if not base:
+            try:
+                from app_paths import CONFIG_DIR
+                base = str(CONFIG_DIR)
+            except Exception:
+                base = os.path.join(os.path.expanduser("~"), "BlackCube_Seguro")
+        destino = os.path.join(base, "ordenes_compra_recibidas", "escaneos")
+        try:
+            os.makedirs(destino, exist_ok=True)
+        except Exception:
+            import tempfile
+            destino = tempfile.mkdtemp(prefix="oc_escaneos_")
+        return destino
+
+    def _resultado_escaneo_oc(self, paginas, pdf, texto, motor, aviso=""):
+        """Arma el resultado que entiende la vista previa del escaneo."""
+        from lector_orden_compra import parsear_orden_compra
+        datos_oc = parsear_orden_compra(texto or "", [], obtener_porcentaje_igv()) if texto else {}
+        relevante = any(
+            datos_oc.get(k) for k in ("numero_oc", "fecha", "cliente", "descripcion", "total")
+        )
+        return {
+            "ok": bool(relevante),
+            "error": "" if relevante else (
+                "El OCR no reconoció los datos de la OC."
+                if texto else "El OCR no reconoció texto en el escaneo."
+            ),
+            "datos": datos_oc,
+            "texto": texto or "",
+            "motor": motor or "Escáner",
+            "paginas": list(paginas or []),
+            "ruta_archivo": pdf,
+            "aviso": aviso or "",
+        }
+
+    def escanear_con_multifuncional(self):
+        """Escanea la OC con la multifuncional y la lee con OCR."""
+        if getattr(self, "_escaneando", False):
+            return
+        try:
+            import escaner
+        except Exception as e:
+            return messagebox.showerror(
+                "Escáner", f"No se pudo cargar el módulo de escaneo:\n{e}"
+            )
+        try:
+            if not escaner.sistema_soportado():
+                return messagebox.showinfo(
+                    "Escáner",
+                    "El escaneo con la multifuncional está disponible en Windows y macOS (M1/M2).",
+                )
+        except Exception:
+            pass
+
+        try:
+            try:
+                from app_paths import cargar_config_local
+                config = cargar_config_local()
+            except Exception:
+                config = cargar_configuracion_regional()
+            datos = escaner.config_escaner(config)
+        except Exception as e:
+            return messagebox.showerror(
+                "Escáner", f"No se pudo leer la configuración del escáner:\n{e}"
+            )
+
+        modo = str(datos.get("escaner_modo", "Automático (sin ventanas)"))
+        if modo.lower().startswith("con la ventana"):
+            instruccion = "Se abrirá el cuadro de escaneo del sistema."
+        else:
+            instruccion = (
+                f"Coloque la OC en el escáner (cristal) — "
+                f"{datos.get('escaner_dpi', '300')} ppp, "
+                f"{datos.get('escaner_color', 'Escala de grises')}.\n"
+                f"Páginas a escanear: {datos.get('escaner_paginas', '1')}."
+            )
+            if not datos.get("escaner_dispositivo"):
+                instruccion += (
+                    "\n(Si hay varios escáneres, elíjalo en Ajustes → "
+                    "Configuración General → Escáner.)"
                 )
 
-            num_oc_detectado = ""
-            fecha_detectada = ""
-            subtotal_detectado = 0.0
-            igv_detectado = 0.0
-            total_detectado = 0.0
-            descripcion_detectada = ""
-            cliente_detectado = ""
+        self._escaneando = True
+        self._escaneo_config = config
+        self._escaneo_paginas = []
+        self._escaneo_pdf = ""
+        self._escaneo_datos = {}
+        try:
+            self.btn_arch_cli.configure(state="disabled")
+            self.btn_escaner_multi.configure(state="disabled", text="⏳ Escaneando...")
+        except Exception:
+            pass
 
-            # 1. NÚMERO DE ORDEN / FOLIO
-            patrones_oc = [
-                r"(?:Folio|FOLIO)\s*[:#\.\-]?\s*([0-9A-Za-z\-_/]+)",
-                r"(?:ORDEN\s+DE\s+COMPRA|ORDEN\s+DE\s+SERVICIO|ORDEN\s+COMPRA|O/?C|PO|P\.O\.|PURCHASE\s+ORDER)\s*[:#\.\-N°º\s]*([0-9A-Za-z\-_/]{3,30})",
-                r"(?:N[°ºoO]\.?|Nro\.?|Número|Numero|No\.)\s*[:#\.\-]?\s*([0-9A-Za-z\-_/]{4,30})",
-                r"(?:PEDIDO|CÓDIGO|CODIGO)\s*[:#\.\-]?\s*([0-9A-Za-z\-_/]{4,30})",
-                r"([A-Z]{1,4}-\d{4,12})",
-            ]
-            for pat in patrones_oc:
-                m_oc = re.search(pat, texto_completo, re.IGNORECASE)
-                if m_oc:
-                    cand = m_oc.group(1).strip()
-                    if cand and not any(pal in cand.upper() for pal in ["COMPRA", "SERVICIO", "FECHA", "CLIENTE", "PAGINA", "PAGE"]):
-                        num_oc_detectado = cand
-                        break
+        v_prog = self._mostrar_progreso_escaneo("Escaneando Orden de Compra", instruccion)
+        threading.Thread(
+            target=self._worker_escanear_multifuncional,
+            args=(config, v_prog, datos),
+            daemon=True,
+        ).start()
 
-            # 2. FECHA DE EMISIÓN
-            meses_dict = {
-                "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
-                "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
-                "septiembre": "09", "setiembre": "09", "octubre": "10",
-                "noviembre": "11", "diciembre": "12",
-                "january": "01", "february": "02", "march": "03", "april": "04",
-                "may": "05", "june": "06", "july": "07", "august": "08",
-                "september": "09", "october": "10", "november": "11", "december": "12",
-                "ene": "01", "feb": "02", "mar": "03", "abr": "04", "may": "05", "jun": "06",
-                "jul": "07", "ago": "08", "sep": "09", "oct": "10", "nov": "11", "dic": "12"
-            }
-            m_fec_txt = re.search(r"(\d{1,2})\s+de\s+([a-zA-ZáéíóúÁÉÍÓÚ]+)\s+(?:de|del)\s+(\d{4})", texto_completo, re.IGNORECASE)
-            if m_fec_txt:
-                d_val = int(m_fec_txt.group(1))
-                m_txt = m_fec_txt.group(2).lower()
-                y_val = m_fec_txt.group(3)
-                m_num = meses_dict.get(m_txt, "01")
-                fecha_detectada = f"{d_val:02d}/{m_num}/{y_val}"
-            else:
-                m_fec_std = re.search(r"(\d{2})[/\-.](\d{2})[/\-.](\d{4})", texto_completo)
-                if m_fec_std:
-                    fecha_detectada = f"{m_fec_std.group(1)}/{m_fec_std.group(2)}/{m_fec_std.group(3)}"
-                else:
-                    m_fec_iso = re.search(r"(\d{4})[/\-](\d{2})[/\-](\d{2})", texto_completo)
-                    if m_fec_iso:
-                        fecha_detectada = f"{m_fec_iso.group(3)}/{m_fec_iso.group(2)}/{m_fec_iso.group(1)}"
-
-            # 3. TABLAS E IMPORTES
-            for tabla in tablas_extraidas:
-                for fila in tabla:
-                    if not fila:
-                        continue
-                    fila_str = " ".join([str(c) for c in fila if c])
-                    
-                    if re.search(r"(?:Sub\s*Total|Subtotal|Neto|Base)", fila_str, re.IGNORECASE):
-                        for celda in reversed(fila):
-                            val_p = parsear_numero_seguro(celda)
-                            if val_p > 0 and subtotal_detectado == 0.0:
-                                subtotal_detectado = val_p
-                                break
-                                
-                    if re.search(r"(?:IVA|IGV|I\.G\.V\.)", fila_str, re.IGNORECASE):
-                        for celda in reversed(fila):
-                            val_p = parsear_numero_seguro(celda)
-                            if val_p > 0 and igv_detectado == 0.0:
-                                igv_detectado = val_p
-                                break
-                                
-                    if re.search(r"(?:Total|Monto\s*Total)", fila_str, re.IGNORECASE) and not re.search(r"Sub", fila_str, re.IGNORECASE):
-                        for celda in reversed(fila):
-                            val_p = parsear_numero_seguro(celda)
-                            if val_p > 0 and total_detectado == 0.0:
-                                total_detectado = val_p
-                                break
-
-            # Respaldo Regex si faltó algún valor
-            if total_detectado == 0.0:
-                m_tot_re = re.findall(r"(?:IMPORTE\s*TOTAL|MONTO\s*TOTAL|TOTAL\s*A\s*PAGAR|TOTAL\s*\(?S/?\.?\)?|TOTAL)[\s:S/$\|]+([\d\,\.]+)", texto_completo, re.IGNORECASE)
-                if m_tot_re:
-                    for t_c in reversed(m_tot_re):
-                        val_t = parsear_numero_seguro(t_c)
-                        if val_t > 0:
-                            total_detectado = val_t
-                            break
-
-            if subtotal_detectado == 0.0:
-                m_sub_re = re.findall(r"(?:SUB\s*TOTAL|SUBTOTAL|VALOR\s*VENTA|NETO|OP\.\s*GRAVADAS)[\s:S/$\|]+([\d\,\.]+)", texto_completo, re.IGNORECASE)
-                if m_sub_re:
-                    for s_c in reversed(m_sub_re):
-                        val_s = parsear_numero_seguro(s_c)
-                        if val_s > 0:
-                            subtotal_detectado = val_s
-                            break
-
-            if igv_detectado == 0.0:
-                m_igv_re = re.findall(r"(?:IGV|I\.G\.V\.|IVA|IMPUESTO\s*\(?18%?\)?)[\s:S/$\|%]+([\d\,\.]+)", texto_completo, re.IGNORECASE)
-                if m_igv_re:
-                    for i_c in reversed(m_igv_re):
-                        val_i = parsear_numero_seguro(i_c)
-                        if val_i > 0:
-                            igv_detectado = val_i
-                            break
-
-            # Conciliación matemática inteligente
-            if total_detectado > 0 and subtotal_detectado == 0.0:
-                subtotal_detectado = round(total_detectado / 1.18, 2)
-                igv_detectado = round(total_detectado - subtotal_detectado, 2)
-            elif subtotal_detectado > 0 and total_detectado == 0.0:
-                igv_detectado = round(subtotal_detectado * 0.18, 2)
-                total_detectado = round(subtotal_detectado + igv_detectado, 2)
-            elif total_detectado > 0 and subtotal_detectado > 0 and igv_detectado == 0.0:
-                igv_detectado = round(total_detectado - subtotal_detectado, 2)
-
-            # 4. DESCRIPCIÓN / ARTÍCULOS
-            m_art = re.search(r"(?:ART[ÍI]CULO|DESCRIPCI[ÓO]N|DETALLE|CONCEPTO|PRODUCTO|SERVICIO)\s*[:\n\r|]+\s*([^\n\r]+)", texto_completo, re.IGNORECASE)
-            if m_art:
-                cand_desc = m_art.group(1).strip()
-                if cand_desc and not any(h in cand_desc.upper() for h in ["PROVEEDOR", "PRECIO", "CANTIDAD", "FECHA", "UNIDAD"]):
-                    descripcion_detectada = cand_desc
-
-            if not descripcion_detectada:
-                m_extra = re.search(r"([A-Za-z0-9\s]+\s*//\s*[^\n\r]+)", texto_completo)
-                if m_extra:
-                    descripcion_detectada = m_extra.group(1).strip()
-
-            # 5. RAZÓN SOCIAL DEL CLIENTE (COMPRADOR)
-            lineas = [l.strip() for l in texto_completo.split("\n") if l.strip()]
-            for l in lineas[:8]:
-                l_up = l.upper()
-                if any(ext in l_up for ext in ["S.A.C.", "SAC", "S.A.", "S.R.L.", "SRL", "E.I.R.L.", "EIRL", "CORP", "CORPORATION", "COMPANY", "DISTRIBUIDORA"]):
-                    if "BLACK CUBE" not in l_up:
-                        cliente_detectado = l
-                        break
-
-            # 6. ASIGNACIÓN EN INTERFAZ
-            self._pintar_desglose_cotizacion(None)
-            if num_oc_detectado:
-                self.ent_oc_cli.delete(0, tk.END)
-                self.ent_oc_cli.insert(0, num_oc_detectado)
-                
-            if fecha_detectada:
-                self.ent_fec_cli.delete(0, tk.END)
-                self.ent_fec_cli.insert(0, fecha_detectada)
-                
-            if subtotal_detectado > 0:
-                self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, f"{subtotal_detectado:.2f}")
-                
-            if igv_detectado > 0:
-                self.ent_igv.delete(0, tk.END)
-                self.ent_igv.insert(0, f"{igv_detectado:.2f}")
-                
-            if total_detectado > 0:
-                self.ent_monto_cli.delete(0, tk.END)
-                self.ent_monto_cli.insert(0, f"{total_detectado:.2f}")
-
-            if descripcion_detectada:
-                self.ent_desc.delete(0, tk.END)
-                self.ent_desc.insert(0, descripcion_detectada)
-
-            self._intentar_auto_asignar_cotizacion(total_detectado, cliente_detectado, num_oc_detectado)
-
-            resumen_msg = (
-                f"✅ Lectura OCR Exitosa:\n\n"
-                f"• Nº de Orden: {num_oc_detectado or 'Detectado en blanco'}\n"
-                f"• Fecha Emisión: {fecha_detectada or 'No detectada'}\n"
-                f"• Subtotal: S/. {formatear_numero(subtotal_detectado)}\n"
-                f"• IGV (18%): S/. {formatear_numero(igv_detectado)}\n"
-                f"• Total OC: S/. {formatear_numero(total_detectado)}\n"
-                f"• Descripción: {descripcion_detectada[:45] + '...' if len(descripcion_detectada) > 45 else (descripcion_detectada or 'General')}\n"
+    def _worker_escanear_multifuncional(self, config, v_prog, datos):
+        """Escanea, arma el PDF, hace el OCR y devuelve los datos leídos."""
+        try:
+            import escaner
+            carpeta = self._carpeta_escaneos_oc(config)
+            try:
+                paginas_pedidas = max(1, int(str(datos.get("escaner_paginas") or 1)))
+            except Exception:
+                paginas_pedidas = 1
+            escaneo = escaner.escanear(
+                carpeta,
+                dispositivo=datos.get("escaner_dispositivo", ""),
+                dpi=datos.get("escaner_dpi", "300"),
+                color=datos.get("escaner_color", "Escala de grises"),
+                origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+                paginas=paginas_pedidas,
+                optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
+                modo=datos.get("escaner_modo", "Automático (sin ventanas)"),
             )
-            messagebox.showinfo("Escaneo Completado", resumen_msg)
-            
-        except Exception as e:
-            messagebox.showerror("Error de Escaneo", f"Ocurrió un error al procesar el PDF con el motor OCR:\n{e}")
+            if not escaneo.get("ok"):
+                self.ejecutar_en_ui(
+                    self._finalizar_escaneo_multifuncional,
+                    {"ok": False, "error": escaneo.get("error") or "No se pudo escanear."},
+                    v_prog,
+                )
+                return
 
-    def _intentar_auto_asignar_cotizacion(self, total_pdf, cliente_pdf, num_oc):
+            paginas = [str(p) for p in (escaneo.get("paginas") or []) if os.path.exists(str(p))]
+            if not paginas:
+                self.ejecutar_en_ui(
+                    self._finalizar_escaneo_multifuncional,
+                    {"ok": False, "error": "El escáner no devolvió ninguna imagen."},
+                    v_prog,
+                )
+                return
+
+            marca = datetime.now().strftime("%Y%m%d_%H%M%S")
+            pdf = os.path.join(carpeta, f"OC_Escaneada_{marca}.pdf")
+            try:
+                escaner.imagenes_a_pdf(paginas, pdf)
+            except Exception as e_pdf:
+                print("[Escáner OC] Aviso - no se pudo armar el PDF:", e_pdf)
+                pdf = paginas[0]
+
+            texto, motor = "", "Escáner"
+            if str(datos.get("escaner_ocr", "Sí")).lower().startswith("s"):
+                try:
+                    ocr = escaner.ocr_paginas(paginas, datos.get("escaner_idioma_ocr", "Automático"))
+                    texto = escaner.texto_de_resultados(ocr) or ""
+                    motor = str(ocr.get("motor") or "OCR")
+                except Exception as e_ocr:
+                    print("[Escáner OC] Aviso - OCR:", e_ocr)
+
+            resultado = self._resultado_escaneo_oc(
+                paginas, pdf, texto, motor, escaneo.get("aviso", "")
+            )
+            self.ejecutar_en_ui(self._finalizar_escaneo_multifuncional, resultado, v_prog)
+        except Exception as e:
+            self.ejecutar_en_ui(
+                self._finalizar_escaneo_multifuncional,
+                {"ok": False, "error": str(e)},
+                v_prog,
+            )
+
+    def _finalizar_escaneo_multifuncional(self, resultado, v_prog):
+        """Cierra el progreso y aplica/muestra lo escaneado (hilo UI)."""
+        self._cerrar_progreso_escaneo(v_prog)
+        if self._esta_destruido:
+            return
+        self._traer_al_frente()
+        resultado = resultado or {}
+        paginas = []
+        if isinstance(resultado.get("paginas"), (list, tuple)):
+            paginas = [str(p) for p in resultado.get("paginas") if os.path.exists(str(p))]
+        ruta = str(resultado.get("ruta_archivo") or "")
+        if not paginas or not ruta or not os.path.exists(ruta):
+            self._habilitar_botones_escaneo()
+            try:
+                self.btn_arch_cli.configure(
+                    text="📄 Escanear OC (PDF o imagen)", fg_color="#1f538d"
+                )
+            except Exception:
+                pass
+            messagebox.showerror(
+                "Escáner",
+                "No se pudo escanear la Orden de Compra.\n\n"
+                + str(resultado.get("error") or
+                      "Revise que la multifuncional esté encendida y conectada."),
+            )
+            return
+        self._escaneo_paginas = paginas
+        self._escaneo_pdf = ruta
+        self._escaneo_datos = resultado.get("datos") or {}
+        self.ruta_archivo_temp = ruta
+        self._finalizar_escaneo(resultado)
+
+    def _agregar_pagina_escaneo(self):
+        """Escanea una página más y la agrega al PDF de la OC actual."""
+        if getattr(self, "_escaneando", False):
+            return
+        if not self._escaneo_pdf or not os.path.exists(self._escaneo_pdf):
+            return messagebox.showinfo(
+                "Escáner", "Primero escanee la OC con la multifuncional."
+            )
+        try:
+            import escaner
+        except Exception as e:
+            return messagebox.showerror(
+                "Escáner", f"No se pudo cargar el módulo de escaneo:\n{e}"
+            )
+
+        config = self._escaneo_config or {}
+        try:
+            datos = escaner.config_escaner(config)
+        except Exception:
+            datos = {}
+        modo = str(datos.get("escaner_modo", "Automático (sin ventanas)"))
+        if modo.lower().startswith("con la ventana"):
+            instruccion = "Coloque la página siguiente y confirme en el cuadro del sistema."
+        else:
+            instruccion = (
+                "Coloque la página siguiente en el escáner (cristal).\n"
+                "Se agregará al PDF que ya tiene la OC."
+            )
+
+        self._escaneando = True
+        try:
+            self.btn_arch_cli.configure(state="disabled")
+            self.btn_escaner_multi.configure(state="disabled", text="⏳ Escaneando...")
+        except Exception:
+            pass
+
+        v_prog = self._mostrar_progreso_escaneo("Agregando página a la OC", instruccion)
+        threading.Thread(
+            target=self._worker_agregar_pagina,
+            args=(config, list(self._escaneo_paginas), self._escaneo_pdf, v_prog),
+            daemon=True,
+        ).start()
+
+    def _worker_agregar_pagina(self, config, paginas_previas, pdf_actual, v_prog):
+        """Escanea una página, rehace el PDF y vuelve a leer todo con OCR."""
+        try:
+            import escaner
+            datos = escaner.config_escaner(config)
+            carpeta = self._carpeta_escaneos_oc(config)
+            escaneo = escaner.escanear(
+                carpeta,
+                dispositivo=datos.get("escaner_dispositivo", ""),
+                dpi=datos.get("escaner_dpi", "300"),
+                color=datos.get("escaner_color", "Escala de grises"),
+                origen=datos.get("escaner_origen", "Cristal (una página a la vez)"),
+                paginas=1,
+                optimizar=str(datos.get("escaner_optimizar", "Sí")).lower().startswith("s"),
+                modo=datos.get("escaner_modo", "Automático (sin ventanas)"),
+            )
+            if not escaneo.get("ok"):
+                self.ejecutar_en_ui(
+                    self._finalizar_agregar_pagina,
+                    {"ok": False, "error": escaneo.get("error") or "No se pudo escanear la página."},
+                    v_prog,
+                )
+                return
+
+            nuevas = [str(p) for p in (escaneo.get("paginas") or []) if os.path.exists(str(p))]
+            if not nuevas:
+                self.ejecutar_en_ui(
+                    self._finalizar_agregar_pagina,
+                    {"ok": False, "error": "El escáner no devolvió la página."},
+                    v_prog,
+                )
+                return
+
+            paginas = list(paginas_previas or []) + nuevas
+            pdf = str(pdf_actual or "")
+            if not pdf.lower().endswith(".pdf"):
+                pdf = os.path.join(
+                    carpeta,
+                    "OC_Escaneada_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".pdf",
+                )
+            try:
+                escaner.imagenes_a_pdf(paginas, pdf)
+            except Exception as e_pdf:
+                self.ejecutar_en_ui(
+                    self._finalizar_agregar_pagina,
+                    {"ok": False, "error": f"No se pudo actualizar el PDF:\n{e_pdf}"},
+                    v_prog,
+                )
+                return
+
+            texto, motor = "", "Escáner"
+            if str(datos.get("escaner_ocr", "Sí")).lower().startswith("s"):
+                try:
+                    ocr = escaner.ocr_paginas(paginas, datos.get("escaner_idioma_ocr", "Automático"))
+                    texto = escaner.texto_de_resultados(ocr) or ""
+                    motor = str(ocr.get("motor") or "OCR")
+                except Exception as e_ocr:
+                    print("[Escáner OC] Aviso - OCR al agregar página:", e_ocr)
+
+            resultado = self._resultado_escaneo_oc(
+                paginas, pdf, texto, motor, escaneo.get("aviso", "")
+            )
+            self.ejecutar_en_ui(self._finalizar_agregar_pagina, resultado, v_prog)
+        except Exception as e:
+            self.ejecutar_en_ui(
+                self._finalizar_agregar_pagina,
+                {"ok": False, "error": str(e)},
+                v_prog,
+            )
+
+    def _finalizar_agregar_pagina(self, resultado, v_prog):
+        """Cierra el progreso y vuelve a mostrar la OC con la página nueva."""
+        self._cerrar_progreso_escaneo(v_prog)
+        if self._esta_destruido:
+            return
+        self._traer_al_frente()
+        resultado = resultado or {}
+        paginas = []
+        if isinstance(resultado.get("paginas"), (list, tuple)):
+            paginas = [str(p) for p in resultado.get("paginas") if os.path.exists(str(p))]
+        ruta = str(resultado.get("ruta_archivo") or "")
+        if not paginas or not ruta or not os.path.exists(ruta):
+            self._habilitar_botones_escaneo()
+            messagebox.showerror(
+                "Escáner",
+                "No se pudo agregar la página.\n\n" + str(resultado.get("error") or ""),
+            )
+            # Se vuelve a mostrar la OC que ya estaba escaneada.
+            if self._escaneo_pdf and os.path.exists(self._escaneo_pdf):
+                previo = {
+                    "ok": True, "motor": "Escáner",
+                    "paginas": list(self._escaneo_paginas),
+                    "texto": "", "datos": self._escaneo_datos,
+                    "ruta_archivo": self._escaneo_pdf, "error": "",
+                }
+                self.ruta_archivo_temp = self._escaneo_pdf
+                self._finalizar_escaneo(previo)
+            return
+        self._escaneo_paginas = paginas
+        self._escaneo_pdf = ruta
+        self._escaneo_datos = resultado.get("datos") or {}
+        self.ruta_archivo_temp = ruta
+        self._finalizar_escaneo(resultado)
+
+    def _mostrar_resultado_escaneo(self, resultado):
+        """Vista previa de los datos leídos antes de pasarlos al formulario."""
+        if self._esta_destruido:
+            return
+        datos = (resultado or {}).get("datos") or {}
+        familia = "Helvetica" if sys.platform == "darwin" else "Segoe UI"
+
+        # Si había otra vista previa abierta (p. ej. al agregar una página),
+        # se cierra antes de mostrar la nueva.
+        try:
+            if self._ventana_preview is not None and self._ventana_preview.winfo_exists():
+                self._ventana_preview.destroy()
+        except Exception:
+            pass
+
+        ventana = ctk.CTkToplevel(self.parent_frame)
+        self._ventana_preview = ventana
+        ventana.title("Resultado del escaneo de la OC")
+        ventana.geometry("680x620")
+        ventana.minsize(600, 520)
+        try:
+            ventana.transient(self.parent_frame.winfo_toplevel())
+        except Exception:
+            pass
+
+        ctk.CTkLabel(
+            ventana,
+            text="📷 DATOS LEÍDOS DE LA ORDEN DE COMPRA",
+            font=ctk.CTkFont(family=familia, size=15, weight="bold"),
+            text_color="#1f538d",
+        ).pack(pady=(14, 2))
+        paginas_resultado = resultado.get("paginas")
+        if isinstance(paginas_resultado, (list, tuple)):
+            total_paginas = len(paginas_resultado)
+        else:
+            try:
+                total_paginas = int(paginas_resultado or 1)
+            except Exception:
+                total_paginas = 1
+        partes_motor = [
+            f"Motor: {resultado.get('motor') or 'PDF'}",
+            f"Páginas: {total_paginas}",
+        ]
+        if datos.get("items_count"):
+            partes_motor.append(f"Artículos detectados: {datos['items_count']}")
+        ctk.CTkLabel(
+            ventana,
+            text="  ·  ".join(partes_motor),
+            font=ctk.CTkFont(family=familia, size=10),
+            text_color="#7f8c8d",
+        ).pack(pady=(0, 8))
+
+        # El pie se reserva PRIMERO: así los botones nunca quedan fuera de la
+        # ventana cuando el contenido crece (p. ej. al agregar páginas).
+        f_pie = ctk.CTkFrame(ventana, fg_color="transparent")
+        f_pie.pack(side="bottom", fill="x", padx=16, pady=(0, 14))
+
+        cuerpo = ctk.CTkScrollableFrame(ventana, fg_color="transparent")
+        cuerpo.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        campos = [
+            ("N° Orden / Pedido", datos.get("numero_oc")),
+            ("Fecha de emisión", datos.get("fecha")),
+            ("Cliente", datos.get("cliente")),
+            ("Descripción / Evento", datos.get("descripcion")),
+            ("Subtotal sin IGV", formatear_moneda(datos.get("subtotal")) if datos.get("subtotal") else ""),
+            ("IGV", formatear_moneda(datos.get("igv")) if datos.get("igv") else ""),
+            ("Total OC", formatear_moneda(datos.get("total")) if datos.get("total") else ""),
+        ]
+        for etiqueta, valor in campos:
+            fila = ctk.CTkFrame(cuerpo, fg_color="#f8f9fa", corner_radius=6)
+            fila.pack(fill="x", pady=3)
+            ctk.CTkLabel(
+                fila, text=etiqueta, width=190, anchor="w",
+                font=ctk.CTkFont(family=familia, size=11, weight="bold"),
+            ).pack(side="left", padx=(10, 4), pady=6)
+            texto = str(valor or "").strip()
+            ctk.CTkLabel(
+                fila, text=texto or "— no detectado —", anchor="w",
+                font=ctk.CTkFont(family=familia, size=11),
+                text_color="#1e8449" if texto else "#c0392b",
+            ).pack(side="left", fill="x", expand=True, padx=(0, 10))
+
+        detalle = []
+        if datos.get("ruc_cliente"):
+            detalle.append(f"RUC cliente: {datos['ruc_cliente']}")
+        if datos.get("proveedor"):
+            detalle.append(f"Proveedor: {datos['proveedor']}")
+        if detalle:
+            ctk.CTkLabel(
+                cuerpo, text="  ·  ".join(detalle),
+                font=ctk.CTkFont(family=familia, size=10),
+                text_color="#7f8c8d",
+            ).pack(anchor="w", padx=4, pady=(6, 0))
+
+        if self._escaneo_paginas and self._escaneo_pdf:
+            ctk.CTkButton(
+                f_pie, text="➕ Escanear otra página de la OC",
+                fg_color="#8e44ad", hover_color="#6c3483",
+                font=ctk.CTkFont(family=familia, size=11, weight="bold"),
+                command=self._agregar_pagina_escaneo,
+            ).pack(fill="x", pady=(0, 6))
+
+        botones = ctk.CTkFrame(f_pie, fg_color="transparent")
+        botones.pack(fill="x")
+
+        def aplicar():
+            self._aplicar_lectura_oc(datos)
+            ventana.destroy()
+
+        def ver_texto():
+            self._ver_texto_escaneado((resultado or {}).get("texto") or "")
+
+        ctk.CTkButton(
+            botones, text="✅ Aplicar al formulario", fg_color="#27ae60",
+            hover_color="#1e8449",
+            font=ctk.CTkFont(family=familia, size=12, weight="bold"),
+            command=aplicar,
+        ).pack(side="left")
+        ctk.CTkButton(
+            botones, text="📝 Ver texto leído", fg_color="#1f538d",
+            hover_color="#163b65",
+            font=ctk.CTkFont(family=familia, size=11, weight="bold"),
+            width=150, command=ver_texto,
+        ).pack(side="left", padx=8)
+        ctk.CTkButton(
+            botones, text="Cancelar", fg_color="#7f8c8d", hover_color="#636e72",
+            font=ctk.CTkFont(family=familia, size=11, weight="bold"),
+            width=90, command=ventana.destroy,
+        ).pack(side="right")
+
+        self._centrar_ventana(ventana, 680, 620)
+        try:
+            ventana.lift()
+            ventana.focus_force()
+        except Exception:
+            pass
+
+    def _ver_texto_escaneado(self, texto):
+        """Muestra el texto reconocido para revisarlo o copiarlo."""
+        familia = "Helvetica" if sys.platform == "darwin" else "Segoe UI"
+        ventana = ctk.CTkToplevel(self.parent_frame)
+        ventana.title("Texto leído del documento")
+        ventana.geometry("780x620")
+        try:
+            ventana.transient(self.parent_frame.winfo_toplevel())
+        except Exception:
+            pass
+        ctk.CTkLabel(
+            ventana, text="Texto reconocido (para revisar o copiar)",
+            font=ctk.CTkFont(family=familia, size=13, weight="bold"),
+        ).pack(pady=(12, 6))
+        caja = ctk.CTkTextbox(
+            ventana, wrap="word", font=ctk.CTkFont(family=familia, size=10)
+        )
+        caja.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        caja.insert("1.0", str(texto or "(sin texto)"))
+        caja.configure(state="disabled")
+        ctk.CTkButton(ventana, text="Cerrar", command=ventana.destroy).pack(pady=(0, 12))
+        self._centrar_ventana(ventana, 780, 620)
+        try:
+            ventana.lift()
+        except Exception:
+            pass
+
+    def _aplicar_lectura_oc(self, datos):
+        """Pasa los datos leídos al formulario (la OC manda sobre la cotización)."""
+        datos = datos or {}
+
+        # Primero se intenta vincular la cotización con el total/evento leídos;
+        # después se escriben los valores de la OC para que el documento manda.
+        try:
+            self._intentar_auto_asignar_cotizacion(
+                parsear_numero_seguro(datos.get("total")),
+                str(datos.get("cliente") or ""),
+                str(datos.get("numero_oc") or ""),
+                str(datos.get("descripcion") or ""),
+            )
+        except Exception:
+            pass
+
+        def poner(entrada, valor):
+            valor = str(valor or "").strip()
+            if not valor:
+                return
+            entrada.delete(0, tk.END)
+            entrada.insert(0, valor)
+
+        if datos.get("numero_oc"):
+            poner(self.ent_oc_cli, datos["numero_oc"])
+        if datos.get("fecha"):
+            poner(self.ent_fec_cli, datos["fecha"])
+        if datos.get("cliente"):
+            self.ent_cliente_cli.configure(state="normal")
+            poner(self.ent_cliente_cli, datos["cliente"])
+            self.ent_cliente_cli.configure(state="disabled")
+        if datos.get("descripcion"):
+            poner(self.ent_desc, datos["descripcion"])
+        if datos.get("subtotal", 0) > 0:
+            poner(self.ent_subtotal, f"{datos['subtotal']:.2f}")
+        if datos.get("igv", 0) > 0:
+            poner(self.ent_igv, f"{datos['igv']:.2f}")
+        if datos.get("total", 0) > 0:
+            poner(self.ent_monto_cli, f"{datos['total']:.2f}")
+        self._pintar_desglose_cotizacion(None)
+
+    def _centrar_ventana(self, ventana, ancho=None, alto=None):
+        """Centra la ventana y la achica si no cabe en la pantalla."""
+        try:
+            ventana.update_idletasks()
+            pantalla_ancho = ventana.winfo_screenwidth()
+            pantalla_alto = ventana.winfo_screenheight()
+            if not ancho:
+                ancho = ventana.winfo_width()
+            if not alto:
+                alto = ventana.winfo_height()
+            ancho = min(max(320, int(ancho)), max(320, pantalla_ancho - 40))
+            alto = min(max(240, int(alto)), max(240, pantalla_alto - 80))
+            x = max(10, (pantalla_ancho - ancho) // 2)
+            y = max(10, (pantalla_alto - alto) // 2 - 30)
+            ventana.geometry(f"{ancho}x{alto}+{x}+{y}")
+        except Exception:
+            pass
+
+    def _intentar_auto_asignar_cotizacion(self, total_pdf, cliente_pdf, num_oc, descripcion_pdf=""):
+        """Vincula la cotización aprobada que mejor coincide con la OC leída."""
         try:
             valores_combo = self.cmb_cot_cli.cget("values")
             if not valores_combo or len(valores_combo) <= 1:
                 return
 
+            def seleccionar(item):
+                self.cmb_cot_cli.set(item)
+                self.al_seleccionar_cotizacion(item)
+
+            # 1. Por importe total (lo más directo). Se compara contra la
+            #    columna del importe para no confundir 1,000.00 con 11,000.00.
             if total_pdf > 0:
                 total_str_fmt = f"{formatear_numero(total_pdf)}"
                 for item in valores_combo:
+                    partes = str(item).split(" | ")
+                    if len(partes) >= 3 and partes[2].strip() == total_str_fmt:
+                        seleccionar(item)
+                        return
+                for item in valores_combo:
                     if total_str_fmt in item:
-                        self.cmb_cot_cli.set(item)
-                        self.al_seleccionar_cotizacion(item)
+                        seleccionar(item)
                         return
 
+            # 2. Por nombre del evento/descripción. Sirve cuando el total de la
+            #    OC incluye o excluye el Fee y no coincide exactamente.
+            item_evento = self._cotizacion_por_texto(descripcion_pdf)
+            if item_evento:
+                seleccionar(item_evento)
+                return
+
+            # 3. Por razón social del cliente.
             if cliente_pdf:
-                cli_limpio = cliente_pdf.lower().split()[0]
-                if len(cli_limpio) >= 4:
+                genericas = {"SAC", "EIRL", "SRL", "DEL", "LAS", "LOS", "POR",
+                             "CON", "PARA", "SOCIEDAD", "ANONIMA", "CERRADA"}
+                palabras = [p for p in re.findall(r"[a-z0-9]{4,}", _texto_busqueda(cliente_pdf))
+                            if p.upper() not in genericas]
+                for palabra in palabras[:2]:
                     for item in valores_combo:
-                        if cli_limpio in item.lower():
-                            self.cmb_cot_cli.set(item)
-                            self.al_seleccionar_cotizacion(item)
+                        if palabra in item.lower():
+                            seleccionar(item)
                             return
         except Exception:
             pass
+
+    def _cotizacion_por_texto(self, texto):
+        """Devuelve la etiqueta de la cotización cuyo evento/cliente coincide."""
+        try:
+            datos = self._datos_cotizaciones or {}
+            stop = {"para", "con", "del", "los", "las", "por", "una", "uno",
+                    "servicio", "servicios", "evento", "eventos", "cliente",
+                    "cotizacion", "aprobacion", "aprobo"}
+            palabras = {p for p in re.findall(r"[a-z0-9]{4,}", _texto_busqueda(texto))
+                        if p not in stop}
+            if len(palabras) < 2:
+                return ""
+
+            puntajes = []
+            for codigo, registro in datos.items():
+                registro = registro or {}
+                base = _texto_busqueda(f"{registro.get('evento', '')} {registro.get('cliente', '')}")
+                puntos = sum(1 for p in palabras if p in base)
+                if puntos >= 2:
+                    puntajes.append((puntos, str(codigo)))
+            if not puntajes:
+                return ""
+            puntajes.sort(reverse=True)
+            if len(puntajes) > 1 and puntajes[0][0] == puntajes[1][0]:
+                return ""   # empate: es mejor que el usuario elija
+            codigo = puntajes[0][1]
+            for item in self.cmb_cot_cli.cget("values") or []:
+                if str(item).split(" | ")[0].strip() == codigo:
+                    return item
+        except Exception:
+            pass
+        return ""
 
     def calcular_totales_math(self, event=None):
         try:
@@ -1353,7 +1964,7 @@ class OrdenesCompraClienteApp:
             hover_color="#1e8449"
         )
         self.btn_cancelar_edicion.pack_forget()
-        self.btn_arch_cli.configure(text="📄 Cargar y Escanear PDF (OCR)", fg_color="#1f538d")
+        self.btn_arch_cli.configure(text="📄 Escanear OC (PDF o imagen)", fg_color="#1f538d")
         
         self.limpiar_formulario()
         self.cargar_cotizaciones_aprobadas()
@@ -1371,6 +1982,18 @@ class OrdenesCompraClienteApp:
         self.ent_fec_cli.insert(0, datetime.now().strftime("%d/%m/%Y"))
         self.cmb_cot_cli.set("--- Seleccione ---")
         self._pintar_desglose_cotizacion(None)
+
+        # Al terminar una OC, el siguiente registro empieza sin PDF adjunto.
+        self.ruta_archivo_temp = ""
+        self._escaneo_paginas = []
+        self._escaneo_pdf = ""
+        self._escaneo_datos = {}
+        try:
+            self.btn_arch_cli.configure(
+                text="📄 Escanear OC (PDF o imagen)", fg_color="#1f538d"
+            )
+        except Exception:
+            pass
 
     def cargar_tabla(self, reset_pagina=False):
         if self._esta_destruido:

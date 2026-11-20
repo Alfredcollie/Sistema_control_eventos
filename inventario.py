@@ -28,6 +28,7 @@ from datetime import datetime
 import shutil
 import subprocess
 
+from formato_numeros import formatear_numero
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
 from buffer_memoria import cache_sistema
 from app_paths import CONFIG_DIR, cargar_config_local
@@ -593,7 +594,7 @@ class CatalogoEquiposTab:
         
         try:
             cantidad = int(self.ent_cantidad.get().strip())
-            costo = float(self.ent_costo.get().replace(",", ".").strip())
+            costo = desformatear_numero(self.ent_costo.get())
             depr = float(depr_str.split('%')[0].strip())
         except ValueError:
             return messagebox.showerror("Error", "La cantidad debe ser entera, y el costo numérico.")
@@ -755,7 +756,7 @@ class CatalogoEquiposTab:
         self.cmb_estado.set(valores[7])
         
         costo_limpio = desformatear_numero(valores[8])
-        self.ent_costo.delete(0, tk.END); self.ent_costo.insert(0, f"{costo_limpio:.2f}")
+        self.ent_costo.delete(0, tk.END); self.ent_costo.insert(0, formatear_numero(costo_limpio))
         
         depr_bd = str(valores[9]).replace("%", "").strip()
         try:

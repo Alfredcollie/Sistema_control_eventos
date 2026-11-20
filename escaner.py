@@ -115,8 +115,8 @@ def carpeta_escaneos(config=None):
         base = str(config.get("ruta_drive") or "").strip()
     if not base:
         try:
-            from app_paths import CONFIG_DIR
-            base = str(CONFIG_DIR)
+            from app_paths import DATA_DIR
+            base = str(DATA_DIR)
         except Exception:
             base = os.path.join(os.path.expanduser("~"), "BlackCube_Seguro")
     destino = os.path.join(base, "facturas_recibidas", "escaneos")

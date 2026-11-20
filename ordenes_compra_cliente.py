@@ -1362,11 +1362,11 @@ class OrdenesCompraClienteApp:
         if datos.get("descripcion"):
             poner(self.ent_desc, datos["descripcion"])
         if datos.get("subtotal", 0) > 0:
-            poner(self.ent_subtotal, f"{datos['subtotal']:.2f}")
+            poner(self.ent_subtotal, formatear_numero(datos['subtotal']))
         if datos.get("igv", 0) > 0:
-            poner(self.ent_igv, f"{datos['igv']:.2f}")
+            poner(self.ent_igv, formatear_numero(datos['igv']))
         if datos.get("total", 0) > 0:
-            poner(self.ent_monto_cli, f"{datos['total']:.2f}")
+            poner(self.ent_monto_cli, formatear_numero(datos['total']))
         self._pintar_desglose_cotizacion(None)
 
     def _centrar_ventana(self, ventana, ancho=None, alto=None):
@@ -1472,9 +1472,9 @@ class OrdenesCompraClienteApp:
             igv = sub * igv_pct / 100.0
             tot = sub + igv
             self.ent_igv.delete(0, tk.END)
-            self.ent_igv.insert(0, f"{igv:.2f}")
+            self.ent_igv.insert(0, formatear_numero(igv))
             self.ent_monto_cli.delete(0, tk.END)
-            self.ent_monto_cli.insert(0, f"{tot:.2f}")
+            self.ent_monto_cli.insert(0, formatear_numero(tot))
             # El importe ya no corresponde al desglose de la cotización seleccionada.
             self._pintar_desglose_cotizacion(None)
         except Exception:
@@ -1710,11 +1710,11 @@ class OrdenesCompraClienteApp:
             try:
                 if not self.ent_monto_cli.get().strip() or self.id_oc_en_edicion is None:
                     self.ent_monto_cli.delete(0, tk.END)
-                    self.ent_monto_cli.insert(0, f"{registro.get('total', 0.0):.2f}")
+                    self.ent_monto_cli.insert(0, formatear_numero(registro.get('total', 0.0)))
                     self.ent_subtotal.delete(0, tk.END)
-                    self.ent_subtotal.insert(0, f"{registro.get('sin_igv', 0.0):.2f}")
+                    self.ent_subtotal.insert(0, formatear_numero(registro.get('sin_igv', 0.0)))
                     self.ent_igv.delete(0, tk.END)
-                    self.ent_igv.insert(0, f"{registro.get('igv', 0.0):.2f}")
+                    self.ent_igv.insert(0, formatear_numero(registro.get('igv', 0.0)))
                     self._pintar_desglose_cotizacion(registro)
                 elif abs(parsear_numero_seguro(self.ent_monto_cli.get()) - registro.get("total", 0.0)) <= 0.01:
                     # Registro en edición cuyo importe sí proviene de la cotización elegida.
@@ -1853,13 +1853,13 @@ class OrdenesCompraClienteApp:
         self.ent_desc.insert(0, str(desc))
         
         self.ent_subtotal.delete(0, tk.END)
-        self.ent_subtotal.insert(0, f"{parsear_numero_seguro(subtotal_str):.2f}")
+        self.ent_subtotal.insert(0, formatear_numero(parsear_numero_seguro(subtotal_str)))
         
         self.ent_igv.delete(0, tk.END)
-        self.ent_igv.insert(0, f"{parsear_numero_seguro(igv_str):.2f}")
+        self.ent_igv.insert(0, formatear_numero(parsear_numero_seguro(igv_str)))
         
         self.ent_monto_cli.delete(0, tk.END)
-        self.ent_monto_cli.insert(0, f"{parsear_numero_seguro(monto_str):.2f}")
+        self.ent_monto_cli.insert(0, formatear_numero(parsear_numero_seguro(monto_str)))
         
         if ruta_real:
             self.btn_arch_cli.configure(text="📄 Reemplazar PDF (Opcional)", fg_color="#7f8c8d")

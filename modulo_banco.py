@@ -1,19 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-MODULO_BANCO.PY - MODULO DE BANCOS (SALDOS Y CONCILIACION BANCARIA)
-Adaptado al SISTEMA DE CONTROL GENERAL DE EVENTOS:
-
-- Saldo de cada cuenta bancaria configurada en:
-    Ajustes de Sistema -> Configuracion General -> "Cuentas Bancarias"
-    Saldo = Saldo Inicial + Ingresos Cobrados - Egresos Pagados.
+MODULO_BANCO.PY - MODULO DE BANCO (SALDOS Y CONCILIACION BANCARIA)
+- Saldo de cada cuenta bancaria configurada en "Configuracion General":
+    Saldo = Saldo Inicial + movimientos del banco. En los meses con estado de
+    cuenta cargado se usan sus lineas (conciliadas o no); en los meses sin
+    estado se usan los cobros/pagos/transferencias y los movimientos manuales.
 - Conciliacion bancaria: subir el PDF del estado de cuenta del banco,
   extraer sus movimientos, compararlos contra los movimientos registrados
-  en el sistema (cobros de Ventas y pagos de Compras) y generar un reporte.
+  en el sistema (cobros y pagos) y generar un reporte en pantalla.
 - Permite conciliar, corregir montos/fechas y agregar movimientos faltantes
   (tanto ajustes manuales como cobros/pagos reales en el sistema).
-- Cada movimiento se clasifica por CATEGORIA/CONCEPTO y por EVENTO
-  (codigo de cotizacion), que es la dimension de trabajo de este sistema:
-  aqui NO se manejan vehiculos, placas ni choferes.
 - Registro unificado de pagos ("Registrar Pago / Compra Cruzada"): al marcar el
   check "Es compra cruzada" el pago a un tercero se registra tambien como factura
   pagada por tercero en el modulo de Compras, adjuntando el PDF del soporte.
@@ -21,6 +17,8 @@ Adaptado al SISTEMA DE CONTROL GENERAL DE EVENTOS:
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import customtkinter as ctk
+
+FAMILIA = "Helvetica" if __import__("sys").platform == "darwin" else "Arial"
 import os
 import re
 import json
@@ -28,28 +26,49 @@ import shutil
 import calendar
 import sys
 import subprocess
+import tempfile
 import threading
+import transferencias_soporte as tx_soporte
 from datetime import datetime
 
+from colores_montos import preparar as preparar_colores_montos, filtrar_todas as filtrar_montos_negativos
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
-from app_paths import CONFIG_FILE, CONFIG_DIR
-from bancos import cargar_bancos, CLAVE_CUENTAS
-import transferencias_soporte as tx_soporte
-
-# 🚀 CORTE DEL SISTEMA: impide registrar movimientos anteriores a la fecha de
-# comienzo configurada en Configuración General (igual que Compras y Ventas).
-# 'obtener_fecha_comienzo' se usa para conciliar desde esa fecha hasta hoy.
+from dialogos_seguros import (seleccionar_archivo_dialogo, seleccionar_archivos_dialogo,
+                              guardar_archivo_dialogo)
+from app_paths import (CONFIG_FILE, DATA_DIR, ruta_para_guardar, eliminar_archivo,
+                       ruta_utilizable)
+# 🏦 En el programa de EVENTOS las cuentas bancarias viven en bancos.py
+#    (tabla configuracion_sistema). Si no está, se usa la configuración en la nube.
 try:
-    from fecha_sistema import validar_fecha_registro, obtener_fecha_comienzo
+    from bancos import cargar_bancos
 except Exception:
-    validar_fecha_registro = None
-    obtener_fecha_comienzo = None
+    from config_nube import cargar_bancos
+from tareas_seguras import ejecutar_en_hilo
+
+try:
+    import pdfplumber
+except ImportError:
+    pdfplumber = None
+
+try:
+    from pypdf import PdfReader as _PypdfReader
+except ImportError:
+    try:
+        from PyPDF2 import PdfReader as _PypdfReader
+    except ImportError:
+        _PypdfReader = None
+
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+ctk.set_appearance_mode("Light")
+ctk.set_default_color_theme("blue")
 
 
 # =========================================================
-# UTILIDADES DE INTEGRACION CON EL SISTEMA DE EVENTOS
-# (reemplazan a los modulos externos dialogos_seguros, tareas_seguras,
-#  politica_almacenamiento y config_nube del programa original)
+# CONFIGURACION Y UTILIDADES
 # =========================================================
 def _numero_peru(txt):
     """Convierte '1,340.78' / '1.340,78' / '1340.78' a float (0.0 si no se puede)."""
@@ -72,65 +91,6 @@ def _numero_peru(txt):
         return float(t)
     except Exception:
         return 0.0
-
-
-# =========================================================
-# 📄 COMPROBANTES: facturas que cancela un mismo pago
-# =========================================================
-def facturas_que_cancela_comprobante(archivo_ruta="", numero_operacion=""):
-    """Facturas (número y proveedor) canceladas por el MISMO comprobante u operación."""
-    filas = []
-    try:
-        conn = conectar_db(silencioso=True)
-        if not conn:
-            return filas
-        try:
-            with conn.cursor() as cur:
-                # 🌍 La base puede guardar la ruta RELATIVA y la app maneja la ABSOLUTA:
-                #    se comparan ambas formas y, como respaldo, el nombre del archivo.
-                ruta_txt = str(archivo_ruta or "").replace("\\", "/").strip()
-                nombre = ruta_txt.split("/")[-1] if ruta_txt else ""
-                relativa = ruta_txt
-                try:
-                    from app_paths import partir_ruta_guardada
-                    sub, nom = partir_ruta_guardada(ruta_txt)
-                    if nom:
-                        relativa = (sub + "/" + nom) if sub else nom
-                except Exception:
-                    pass
-                cur.execute("""
-                    SELECT DISTINCT f.numero_documento, COALESCE(f.proveedor, ''),
-                                    COALESCE(pc.monto_pagado, 0), COALESCE(pc.fecha_pago, '')
-                    FROM pagos_comprobantes pc
-                    JOIN facturas_recibidas f ON f.id = pc.id_factura
-                    WHERE (%s <> '' AND (
-                              COALESCE(pc.archivo_ruta, '') = %s
-                           OR COALESCE(pc.archivo_ruta, '') = %s
-                           OR COALESCE(pc.archivo_ruta, '') LIKE %s))
-                       OR (%s <> '' AND COALESCE(pc.numero_operacion, '') = %s)
-                    ORDER BY f.numero_documento
-                """, (ruta_txt, ruta_txt, relativa, ("%" + nombre) if nombre else "\x00",
-                      str(numero_operacion or ""), str(numero_operacion or "")))
-                filas = cur.fetchall()
-        finally:
-            liberar_conexion(conn)
-    except Exception as e:
-        print("Aviso - facturas del comprobante:", e)
-    return filas
-
-
-def texto_facturas_canceladas(filas, formatear=None):
-    """Texto listo para mostrar con las facturas que cancela un comprobante."""
-    if not filas:
-        return ""
-    lineas = []
-    for numero, proveedor, monto, fecha in filas:
-        try:
-            monto_txt = formatear(monto) if formatear else ("%.2f" % float(monto or 0))
-        except Exception:
-            monto_txt = str(monto)
-        lineas.append("• %s  %s  %s  (%s)" % (numero, str(proveedor)[:28], monto_txt, fecha))
-    return "\n".join(lineas)
 
 
 def monto_del_comprobante(texto):
@@ -194,166 +154,17 @@ def monto_del_comprobante(texto):
 
 
 
-def seleccionar_archivo_dialogo(titulo="Seleccionar archivo", tipos=None, **kwargs):
-    """Selector de un solo archivo (usa los dialogos nativos del sistema)."""
-    try:
-        return filedialog.askopenfilename(
-            title=titulo, filetypes=tipos or [("Todos los archivos", "*.*")]) or ""
-    except Exception:
-        return ""
-
-
-def seleccionar_archivos_dialogo(titulo="Seleccionar archivos", tipos=None, **kwargs):
-    """Selector de varios archivos; devuelve una lista (vacia si se cancela)."""
-    try:
-        return list(filedialog.askopenfilenames(
-            title=titulo, filetypes=tipos or [("Todos los archivos", "*.*")]) or [])
-    except Exception:
-        return []
-
-
-def guardar_archivo_dialogo(titulo="Guardar archivo", defaultextension="", tipos=None,
-                            nombre_inicial="", **kwargs):
-    """Cuadro 'Guardar como...'; devuelve la ruta elegida o ''."""
-    try:
-        return filedialog.asksaveasfilename(
-            title=titulo, defaultextension=defaultextension,
-            filetypes=tipos or [("Todos los archivos", "*.*")],
-            initialfile=nombre_inicial) or ""
-    except Exception:
-        return ""
-
-
-def ejecutar_en_hilo(parent, trabajo, al_terminar=None):
-    """Ejecuta 'trabajo(estado)' en segundo plano y devuelve el resultado al hilo
-    principal de Tk (llamar a la interfaz desde otro hilo la congela en macOS).
-
-    Si el trabajo falla, el error viaja en estado['error'] y la pantalla lo muestra.
-    """
-    estado = {}
-
-    def _correr():
-        try:
-            trabajo(estado)
-        except Exception as e:
-            estado["error"] = str(e)
-        if al_terminar is None:
-            return
-
-        def _aplicar():
-            try:
-                al_terminar(estado)
-            except Exception as e:
-                print("[Banco] Error al mostrar el resultado:", e)
-        try:
-            parent.after(0, _aplicar)
-        except Exception as e:
-            print("[Banco] No se pudo actualizar la pantalla desde el hilo:", e)
-
-    threading.Thread(target=_correr, daemon=True).start()
-
-
-def ruta_para_guardar(ruta):
-    """Ruta tal como queda guardada en la base de datos.
-
-    Se guarda RELATIVA a la carpeta sincronizada (ej. 'facturas_emitidas/x.pdf')
-    para que la misma fila sirva en Windows y en Mac.
-    """
-    if not ruta:
-        return ""
-    try:
-        from app_paths import ruta_para_guardar as _portable
-        return _portable(ruta) or os.path.normpath(str(ruta))
-    except Exception:
-        return os.path.normpath(str(ruta))
-
-
-def eliminar_archivo(ruta):
-    """Borra un archivo del disco sin lanzar error si ya no existe."""
-    try:
-        if ruta and os.path.isfile(ruta):
-            os.remove(ruta)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def resolver_ruta_archivo(ruta):
-    """Devuelve una ruta existente del archivo.
-
-    Si el equipo cambio (por ejemplo Mac <-> Windows) la ruta guardada ya no
-    existe: en ese caso se busca el mismo nombre dentro de las carpetas del
-    programa (facturas recibidas y soportes de pago).
-    """
-    if not ruta:
-        return None
-    ruta = str(ruta)
-    if os.path.isfile(ruta):
-        return ruta
-    try:
-        from app_paths import resolver_ruta_archivo as _portable
-        encontrada = _portable(ruta)
-        if encontrada:
-            return encontrada
-    except Exception:
-        pass
-    try:
-        nombre = os.path.basename(ruta.replace("\\", "/"))
-        if not nombre:
-            return None
-        for base in (obtener_ruta_base(), str(CONFIG_DIR)):
-            if not base:
-                continue
-            for sub in ("comprobantes_transferencias", "facturas_recibidas", "soportes_pagos_terceros", ""):
-                candidato = os.path.join(base, sub, nombre) if sub else os.path.join(base, nombre)
-                if os.path.isfile(candidato):
-                    return candidato
-    except Exception:
-        pass
-    return None
-
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
-
-try:
-    from pypdf import PdfReader as _PypdfReader
-except ImportError:
-    try:
-        from PyPDF2 import PdfReader as _PypdfReader
-    except ImportError:
-        _PypdfReader = None
-
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    fitz = None
-
-ctk.set_appearance_mode("Light")
-ctk.set_default_color_theme("blue")
-
-
-# =========================================================
-# CONFIGURACION Y UTILIDADES
-# =========================================================
 def cargar_config():
-    """Configuracion regional del sistema (moneda, formatos, ruta de archivos).
-
-    Es la MISMA configuracion que usan Compras, Ventas y Configuracion General:
-    config_local.json (valores por defecto) + configuracion.json del equipo.
-    """
     config = {
         "simbolo_moneda": "S/.",
         "formato_numero": "1,000.00",
         "formato_fecha": "DD/MM/AAAA",
-        "ruta_drive": "",
-        CLAVE_CUENTAS: [],
+        "cuentas_bancarias": [],
     }
     try:
-        from app_paths import cargar_config_local
-        config.update(cargar_config_local() or {})
+        if os.path.exists(str(CONFIG_FILE)):
+            with open(str(CONFIG_FILE), "r", encoding="utf-8") as f:
+                config.update(json.load(f))
     except Exception:
         pass
     return config
@@ -363,23 +174,36 @@ CONFIG = cargar_config()
 
 
 def obtener_ruta_base():
-    """Carpeta de archivos del programa (misma lógica que Compras y Ventas).
+    """Carpeta de archivos del programa (misma lógica que Compras/Ventas).
 
-    Usa la ruta de Google Drive configurada en Configuración General y, si no
-    existe o no se puede escribir, la carpeta segura de datos del usuario.
+    Devuelve "" si el equipo NO está autorizado (equipo secundario sin la cuenta
+    Rclone del principal): así ningún flujo del Banco guarda archivos.
     """
-    ruta = str(CONFIG.get("ruta_drive", "") or "").strip()
-    if ruta:
-        ruta = os.path.expanduser(ruta)
-        try:
-            os.makedirs(ruta, exist_ok=True)
-            return ruta
-        except Exception:
-            pass
     try:
-        return str(CONFIG_DIR)
+        from politica_almacenamiento import estado_almacenamiento, ruta_base_autorizada
+        if not estado_almacenamiento().get("autorizado"):
+            return ""
+        ruta = ruta_base_autorizada(mostrar_alerta=False)
+        if ruta and os.path.isdir(ruta):
+            return ruta
     except Exception:
-        return os.path.dirname(os.path.abspath(__file__))
+        pass
+    ruta = ruta_utilizable(CONFIG.get("ruta_drive", ""))
+    if ruta and os.path.isdir(ruta):
+        return ruta
+    # Respaldo junto al programa: SOLO en modo monousuario (local)
+    try:
+        from politica_almacenamiento import permitir_respaldo_local
+        if not permitir_respaldo_local():
+            return ""
+    except Exception:
+        pass
+    if sys.platform == "darwin":
+        # 🍎 Dentro del .app esta carpeta es de SOLO LECTURA (y desaparece al
+        #    actualizar el programa): el respaldo local va a la carpeta de datos
+        #    del usuario, que siempre es escribible.
+        return str(DATA_DIR)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def eliminar_gasto_vinculado(cursor, id_gasto):
@@ -428,8 +252,6 @@ def borrar_soporte_si_huerfano(ruta):
                 usos += int(c.fetchone()[0] or 0)
                 c.execute("SELECT COUNT(*) FROM pagos_comprobantes WHERE archivo_ruta = %s", (ruta,))
                 usos += int(c.fetchone()[0] or 0)
-                c.execute("SELECT COUNT(*) FROM transferencias_bancarias WHERE archivo_ruta = %s", (ruta,))
-                usos += int(c.fetchone()[0] or 0)
         finally:
             liberar_conexion(conn)
         if not usos:
@@ -455,7 +277,11 @@ def abrir_documento(ruta, titulo="Documento"):
 def abrir_documento_externo(ruta):
     try:
         # Resuelve rutas guardadas en otro equipo/SO (Mac <-> Windows)
-        ruta = resolver_ruta_archivo(ruta) or ruta
+        try:
+            from app_paths import resolver_ruta_archivo
+            ruta = resolver_ruta_archivo(ruta) or ruta
+        except Exception:
+            pass
         ruta_abs = os.path.abspath(ruta)
         if sys.platform == "win32":
             os.startfile(ruta_abs)
@@ -467,9 +293,6 @@ def abrir_documento_externo(ruta):
         messagebox.showerror("Error", f"No se pudo abrir el archivo:\n{e}")
 
 
-# Categorías de gastos por defecto para una empresa de EVENTOS.
-# Son las que comparten el módulo de Bancos, Compras y los reportes; el usuario
-# puede agregar/quitar categorías desde "⚙️ Gestionar Categorías".
 CATEGORIAS_GASTOS_DEFAULT = {
     "Gastos Fijos": ["Alquiler de Oficina / Almacén", "Planilla / Sueldos",
                      "Servicios (Luz, Agua, Internet)", "Seguros", "Préstamos / Cuotas"],
@@ -489,7 +312,7 @@ COMISION_INTERBANCARIA_DEFAULT = "4.80"
 # Marca local: indica que las tablas/columnas del Banco ya se verificaron en este
 # equipo. Cada sentencia DDL es un viaje a Supabase (~0,3 s) y son ~24 seguidas,
 # así que sólo se ejecutan la primera vez (o cuando cambie esta clave).
-CLAVE_ESQUEMA_BANCO = "banco_esquema_ok_v5"
+CLAVE_ESQUEMA_BANCO = "banco_esquema_ok_v7"
 CLAVE_PERMISOS_BANCO = "banco_permisos_ok_v1"
 
 
@@ -542,8 +365,7 @@ def guardar_categorias_gastos(cats):
     """Guarda las categorías principales y sus subcategorías en la configuración.
 
     Es la MISMA lista que comparten Banco, Compras y las estadísticas financieras,
-    por eso se guarda en la configuración del sistema (configuracion.json)
-    igual que el resto de parámetros.
+    por eso se guarda en config_local.json igual que el resto de parámetros.
     Devuelve True si se pudo escribir en el disco.
     """
     try:
@@ -566,12 +388,11 @@ def guardar_categorias_gastos(cats):
 def abrir_gestion_categorias_gastos(parent=None, al_guardar=None):
     """Ventana "Gestionar Categorías de Gastos" (principales y subcategorías).
 
-    Es la lista con la que el módulo de Bancos clasifica cada movimiento
-    (Conciliación → Registrar Pago → "⚙️ Gestionar Categorías"). Se guarda en la
-    configuración del sistema, así que se mantiene entre equipos y actualizaciones.
-    La categoría elegida viaja a Compras como la categoría del gasto cuando el
-    movimiento es un egreso. Si se indica "al_guardar", se ejecuta tras guardar y
-    cerrar (para refrescar los combos del módulo que la abrió).
+    Es la MISMA ventana que usa el módulo de Banco (Conciliación → Agregar
+    Movimiento → "⚙️ Gestionar Categorías") y ahora también el módulo de Compras,
+    de modo que ambos módulos comparten exactamente la misma lista guardada en la
+    configuración. Si se indica "al_guardar", se ejecuta tras guardar y cerrar
+    (para refrescar los combos del módulo que la abrió).
     """
     cats = cargar_categorias_gastos()
     v = ctk.CTkToplevel(parent)
@@ -597,13 +418,14 @@ def abrir_gestion_categorias_gastos(parent=None, al_guardar=None):
     except Exception:
         pass
 
-    ctk.CTkLabel(v, text="⚙️ Categorías (principales y subcategorías)", font=("Arial", 14, "bold"),
+    ctk.CTkLabel(v, text="⚙️ Categorías (principales y subcategorías)", font=(FAMILIA, 14, "bold"),
                  text_color="#1f538d").pack(pady=(15, 5))
 
     f_tabla = ctk.CTkFrame(v, fg_color="transparent")
     f_tabla.pack(fill="both", expand=True, padx=15, pady=10)
     columnas = ("principal", "categoria")
     tree = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="browse")
+    preparar_colores_montos(tree)
     tree.heading("principal", text="Principal")
     tree.heading("categoria", text="Categoría")
     tree.column("principal", width=220, anchor="w")
@@ -735,28 +557,6 @@ def guardar_comision_interbancaria(valor):
     return guardar_config_disco(cfg)
 
 
-# =========================================================
-# CACHE DE LISTAS (las consultas a Supabase tardan entre 0,5 s y 5 s)
-# =========================================================
-def leer_cache(clave):
-    """Devuelve una lista guardada en la caché del sistema ( [] si no está o caducó)."""
-    try:
-        from buffer_memoria import cache_sistema
-        return list(cache_sistema.obtener(clave) or [])
-    except Exception:
-        return []
-
-
-def guardar_cache(clave, valores):
-    """Guarda una lista en la caché del sistema (5 minutos, igual que el resto)."""
-    try:
-        from buffer_memoria import cache_sistema
-        if valores:
-            cache_sistema.guardar(clave, list(valores))
-    except Exception:
-        pass
-
-
 def cargar_eventos(usar_cache=True):
     """Eventos a los que se puede asociar un movimiento bancario.
 
@@ -764,11 +564,18 @@ def cargar_eventos(usar_cache=True):
     dashboard ('CODIGO | Nombre del Evento'), con la opción OFICINA para los
     gastos internos que no pertenecen a ningún evento.
 
-    (En el programa original este desplegable mostraba las PLACAS de la flota:
-    este sistema trabaja por eventos, no por vehículos.)
+    (Este sistema trabaja por eventos, no por vehículos.)
     """
-    # 1) Caché del sistema: control_general ya trae esta lista al iniciar sesión.
-    eventos = leer_cache("lista_eventos_aprobados") if usar_cache else []
+    try:
+        from buffer_memoria import leer_cache, guardar_cache
+    except Exception:
+        leer_cache = guardar_cache = None
+    eventos = []
+    if usar_cache and leer_cache:
+        try:
+            eventos = leer_cache("lista_eventos_aprobados") or []
+        except Exception:
+            eventos = []
     if not eventos:
         conn = conectar_db(silencioso=True)
         if conn:
@@ -781,77 +588,56 @@ def cargar_eventos(usar_cache=True):
                         ORDER BY id DESC
                     """)
                     eventos = [f"{r[0]} | {r[1]}".strip(" |") for r in c.fetchall() if r[0]]
-            except Exception:
+            except Exception as error:
+                print("[Banco] eventos:", error)
                 eventos = []
             finally:
                 liberar_conexion(conn)
         if "OFICINA | Trabajos Internos" not in eventos:
             eventos = ["OFICINA | Trabajos Internos"] + eventos
-        guardar_cache("lista_eventos_aprobados", eventos)
+        try:
+            if guardar_cache:
+                guardar_cache("lista_eventos_aprobados", eventos)
+        except Exception:
+            pass
     elif "OFICINA | Trabajos Internos" not in eventos:
         eventos.insert(0, "OFICINA | Trabajos Internos")
     return eventos
 
-
-def es_categoria_personal(texto):
-    """True si la categoría corresponde a planilla, sueldos o personal del evento.
-
-    Con estas categorías el formulario de pago pide el NOMBRE del personal /
-    beneficiario que recibe el dinero.
-    """
+def es_categoria_planilla(texto):
+    """True si el texto de categoría corresponde a planilla / sueldos."""
     t = (texto or "").lower()
-    return any(p in t for p in ("planilla", "sueldo", "personal", "staff", "beneficiario",
-                                "trabajador", "honorario"))
+    return "planilla" in t or "sueldo" in t
 
 
-def cargar_personal_eventos():
-    """Personal que ya trabaja en los eventos del sistema.
-
-    Se toma de las personas registradas en las Solicitudes a Proveedores
-    (personal propuesto para cada evento), que es la nómina que maneja este
-    sistema de eventos.
-
-    (En el programa original este desplegable mostraba los CHOFERES de la flota.)
-    """
-    en_cache = leer_cache("banco_lista_personal")
-    if en_cache:
-        return en_cache
+def cargar_choferes():
+    """Choferes registrados en el módulo de Choferes (activos primero)."""
     conn = conectar_db(silencioso=True)
     if not conn:
         return []
     try:
         with conn.cursor() as c:
             c.execute("""
-                SELECT DISTINCT nombre_completo
-                FROM personal_proveedor
-                WHERE nombre_completo IS NOT NULL AND TRIM(nombre_completo) != ''
-                ORDER BY nombre_completo ASC
+                SELECT nombres FROM choferes
+                WHERE nombres IS NOT NULL AND TRIM(nombres) != ''
+                ORDER BY (COALESCE(estado, '') = 'Activo') DESC, nombres ASC
             """)
-            nombres = [str(r[0]).strip() for r in c.fetchall() if str(r[0]).strip()]
-        guardar_cache("banco_lista_personal", nombres)
-        return nombres
+            return [str(r[0]) for r in c.fetchall()]
     except Exception:
         return []
     finally:
         liberar_conexion(conn)
 
 
-def cargar_proveedores(usar_cache=True):
+def cargar_proveedores():
     """Proveedores registrados en el módulo de Proveedores."""
-    # control_general ya deja esta lista en la caché al iniciar sesión.
-    if usar_cache:
-        en_cache = leer_cache("lista_proveedores_combobox")
-        if en_cache:
-            return en_cache
     conn = conectar_db(silencioso=True)
     if not conn:
         return []
     try:
         with conn.cursor() as c:
             c.execute("SELECT nombre FROM proveedores WHERE nombre IS NOT NULL AND TRIM(nombre) != '' ORDER BY nombre ASC")
-            proveedores = [str(r[0]) for r in c.fetchall()]
-        guardar_cache("lista_proveedores_combobox", proveedores)
-        return proveedores
+            return [str(r[0]) for r in c.fetchall()]
     except Exception:
         return []
     finally:
@@ -1041,8 +827,20 @@ def normalizar_fecha(s):
 
 
 
-# ⏳ un solo letrero de carga para TODO el módulo (aunque lo llamen varias instancias)
-_LETRERO_CARGANDO = {"ventana": None}
+def periodo_de_movimientos(movs):
+    """Período (AAAA-MM) de un estado de cuenta: el mes con más líneas.
+
+    Un estado puede traer algún movimiento del mes anterior; se toma el mes
+    dominante y, si no hay fechas, el mes actual.
+    """
+    conteo = {}
+    for m in (movs or []):
+        fecha = normalizar_fecha(m.get("fecha"))
+        if fecha and len(fecha) >= 7:
+            conteo[fecha[:7]] = conteo.get(fecha[:7], 0) + 1
+    if conteo:
+        return max(conteo.items(), key=lambda par: par[1])[0]
+    return datetime.now().strftime("%Y-%m")
 
 
 def _dias_entre_fechas(fecha_a, fecha_b):
@@ -1063,6 +861,112 @@ def _dias_entre_fechas(fecha_a, fecha_b):
     if not fa or not fb:
         return 999
     return abs((fa - fb).days)
+
+
+def _monto_coincide_banco(monto_banco, monto_asiento, comision=0.0):
+    """¿El importe del asiento corresponde a la línea del banco?
+
+    Acepta el mismo importe o el importe del sistema + la comisión que el banco
+    muestra incluida en una sola línea (ej.: 1,200.00 + 4.80 = 1,204.80).
+    """
+    try:
+        bm = float(monto_banco)
+        mm = float(monto_asiento)
+    except (TypeError, ValueError):
+        return False
+    if abs(bm - mm) <= 0.02:
+        return True
+    if bm * mm > 0 and abs(abs(bm) - abs(mm) - float(comision or 0)) <= 0.02:
+        return True
+    return False
+
+
+def _es_duplicado_manual_claro(asiento, linea, principal=None, comision=0.0):
+    """¿El asiento manual es una COPIA clara de una línea del banco?
+
+    Se exige que la descripción coincida con la línea (el manual se creó desde
+    el estado de cuenta) o que sea el caso de una transferencia donde el sistema
+    registra el principal y el manual el total con comisión. Así no se borran
+    manuales que sólo coinciden en importe pero son movimientos distintos.
+    """
+    if str((asiento or {}).get("origen", "")) != "manual":
+        return False
+    if (_norm_texto(asiento.get("descripcion"))
+            == _norm_texto((linea or {}).get("descripcion"))):
+        return True
+    if principal is None or not str(principal.get("origen", "")).startswith("s:"):
+        return False
+    try:
+        return (abs(abs(float(asiento.get("monto") or 0))
+                    - abs(float((linea or {}).get("monto") or 0))) <= 0.02
+                and abs(abs(float((linea or {}).get("monto") or 0))
+                        - abs(float(principal.get("monto") or 0))
+                        - float(comision or 0)) <= 0.02)
+    except (TypeError, ValueError):
+        return False
+
+
+def _mejor_linea_banco(asiento, lineas, usados, comision=0.0, solo_usadas=False):
+    """Índice de la mejor línea del banco para un asiento (o None)."""
+    mejor = None
+    for j, linea in enumerate(lineas):
+        if solo_usadas:
+            if j not in usados:
+                continue
+        elif j in usados:
+            continue
+        if not _monto_coincide_banco(linea.get("monto"), asiento.get("monto"), comision):
+            continue
+        dias = _dias_entre_fechas(asiento.get("fecha"), linea.get("fecha"))
+        if dias > 31:
+            continue
+        exacto_fecha = (dias == 0)
+        try:
+            exacto_monto = abs(float(linea.get("monto") or 0)
+                              - float(asiento.get("monto") or 0)) <= 0.02
+        except (TypeError, ValueError):
+            exacto_monto = False
+        categoria = 0 if (exacto_fecha and exacto_monto) else (
+            1 if exacto_fecha else (2 if exacto_monto else 3))
+        candidato = (categoria, dias, j)
+        if mejor is None or candidato < mejor:
+            mejor = candidato
+    return mejor[2] if mejor else None
+
+
+def emparejar_asientos_banco(asientos, lineas, comision=0.0):
+    """Empareja asientos (sistema/manuales) con líneas del estado de cuenta.
+
+    Cada línea del banco se usa UNA sola vez. Devuelve:
+      * match:      {indice_asiento: indice_linea}  (asiento único)
+      * duplicados: [(indice_asiento, indice_linea)] (la línea ya estaba usada)
+      * sobrantes:  [indice_asiento]  (asiento sin línea en el banco)
+      * faltantes:  [indice_linea]    (línea del banco sin asiento)
+
+    El orden de prioridad se toma de 'asiento["_prioridad"]' (menor = primero):
+    así el asiento del sistema gana sobre el manual y no se cuenta dos veces.
+    """
+    asientos = list(asientos or [])
+    lineas = list(lineas or [])
+    orden = sorted(range(len(asientos)),
+                   key=lambda i: (asientos[i].get("_prioridad", 9),
+                                  normalizar_fecha(asientos[i].get("fecha")) or ""))
+    usados = set()
+    match = {}
+    duplicados = []
+    for i in orden:
+        j = _mejor_linea_banco(asientos[i], lineas, usados, comision)
+        if j is not None:
+            usados.add(j)
+            match[i] = j
+            continue
+        j = _mejor_linea_banco(asientos[i], lineas, usados, comision, solo_usadas=True)
+        if j is not None:
+            duplicados.append((i, j))
+    dup_idx = {i for i, _ in duplicados}
+    sobrantes = [i for i in range(len(asientos)) if i not in match and i not in dup_idx]
+    faltantes = [j for j in range(len(lineas)) if j not in usados]
+    return match, duplicados, sobrantes, faltantes
 
 
 def fecha_para_mostrar(valor):
@@ -1114,6 +1018,43 @@ def banco_matchea(banco, texto_cuenta):
     return False
 
 
+def cuenta_transferencia_matchea(banco, nombre, cuenta):
+    """Transferencias: identifica banco Y cuenta, nunca por nombre parcial."""
+    return bool(_norm_texto(cuenta) and _norm_texto(banco.get("cuenta", ""))) and (
+        _norm_texto(banco.get("banco", "")) == _norm_texto(nombre)
+        and _norm_texto(banco.get("cuenta", "")) == _norm_texto(cuenta))
+
+
+def traer_al_frente(ventana, retardo_ms=500):
+    """Pone una ventana emergente DELANTE y le da el foco.
+
+    En Windows y macOS una CTkToplevel puede nacer DETRÁS de la ventana
+    principal (sobre todo si la principal está maximizada). Se usa «-topmost»
+    sólo un instante: si quedara fijo, la ventana taparía siempre al resto.
+    """
+    try:
+        ventana.lift()
+    except Exception:
+        pass
+    try:
+        ventana.attributes("-topmost", True)
+
+        def _soltar():
+            try:
+                if ventana.winfo_exists():
+                    ventana.attributes("-topmost", False)
+            except Exception:
+                pass
+
+        ventana.after(retardo_ms, _soltar)
+    except Exception:
+        pass
+    try:
+        ventana.focus_force()
+    except Exception:
+        pass
+
+
 def aplicar_estilo_treeview():
     style = ttk.Style()
     try:
@@ -1122,71 +1063,117 @@ def aplicar_estilo_treeview():
         pass
     style.configure("Treeview", background="#ffffff", foreground="#000000",
                     fieldbackground="#ffffff", bordercolor="#e0e0e0",
-                    borderwidth=1, rowheight=26, font=("Arial", 10))
+                    borderwidth=1, rowheight=26, font=(FAMILIA, 10))
     style.map("Treeview", background=[("selected", "#1f538d")],
               foreground=[("selected", "#ffffff")])
     style.configure("Treeview.Heading", background="#f0f0f0", foreground="#000000",
-                    relief="flat", font=("Arial", 10, "bold"),
+                    relief="flat", font=(FAMILIA, 10, "bold"),
                     bordercolor="#e0e0e0", borderwidth=1)
 
 
 # =========================================================
 # EXTRACCION Y ANALISIS DE PDF (ESTADO DE CUENTA)
 # =========================================================
+def _pdf_limpio(ruta):
+    """Devuelve (ruta_para_abrir, temporal_a_borrar).
+
+    🏦 Algunos estados de cuenta vienen con bytes de más DELANTE del PDF: por
+    ejemplo los del banco empiezan con «$BOP$» y el PDF real arranca en el byte 5.
+    Sin quitarlos, ninguna librería lo abre («invalid pdf header») y el programa
+    ni siquiera detecta que el archivo pide contraseña.
+    """
+    try:
+        with open(ruta, "rb") as f:
+            cabecera = f.read(2048)
+    except Exception:
+        return ruta, None
+    posicion = cabecera.find(b"%PDF")
+    if posicion <= 0:
+        return ruta, None
+    try:
+        with open(ruta, "rb") as f:
+            contenido = f.read()[posicion:]
+    except Exception:
+        return ruta, None
+    try:
+        temporal = os.path.join(tempfile.gettempdir(), "estado_cuenta_limpio.pdf")
+        with open(temporal, "wb") as f:
+            f.write(contenido)
+        return temporal, temporal
+    except Exception:
+        return ruta, None
+
+
 def pdf_esta_cifrado(ruta):
     """True si el PDF exige contraseña para abrirse."""
-    if _PypdfReader is not None:
-        try:
-            return bool(getattr(_PypdfReader(ruta), "is_encrypted", False))
-        except Exception:
-            pass
-    if fitz is not None:
-        try:
-            doc = fitz.open(ruta)
+    ruta_ok, temporal = _pdf_limpio(ruta)
+    try:
+        if _PypdfReader is not None:
             try:
-                return bool(doc.needs_pass)
-            finally:
-                doc.close()
-        except Exception:
-            pass
-    return False
+                return bool(getattr(_PypdfReader(ruta_ok), "is_encrypted", False))
+            except Exception:
+                pass
+        if fitz is not None:
+            try:
+                doc = fitz.open(ruta_ok)
+                try:
+                    return bool(doc.needs_pass)
+                finally:
+                    doc.close()
+            except Exception:
+                pass
+        return False
+    finally:
+        if temporal:
+            try:
+                os.remove(temporal)
+            except Exception:
+                pass
 
 
 def extraer_texto_pdf(ruta, password=None):
     texto = ""
-    if pdfplumber is not None:
-        try:
-            with pdfplumber.open(ruta, password=password or "") as pdf:
-                partes = [p.extract_text() or "" for p in pdf.pages]
-            texto = "\n".join(partes).strip()
-        except Exception:
-            texto = ""
-    if not texto and fitz is not None:
-        try:
-            doc = fitz.open(ruta)
-            if getattr(doc, "needs_pass", False):
-                if not doc.authenticate(password or ""):
-                    doc.close()
-                    doc = None
-            if doc is not None:
-                partes = [page.get_text() or "" for page in doc]
-                doc.close()
+    ruta_ok, temporal = _pdf_limpio(ruta)
+    try:
+        if pdfplumber is not None:
+            try:
+                with pdfplumber.open(ruta_ok, password=password or "") as pdf:
+                    partes = [p.extract_text() or "" for p in pdf.pages]
                 texto = "\n".join(partes).strip()
-        except Exception:
-            texto = ""
-    if not texto and _PypdfReader is not None:
-        try:
-            reader = _PypdfReader(ruta)
-            if getattr(reader, "is_encrypted", False):
-                if reader.decrypt(password or ""):
+            except Exception:
+                texto = ""
+        if not texto and fitz is not None:
+            try:
+                doc = fitz.open(ruta_ok)
+                if getattr(doc, "needs_pass", False):
+                    if not doc.authenticate(password or ""):
+                        doc.close()
+                        doc = None
+                if doc is not None:
+                    partes = [page.get_text() or "" for page in doc]
+                    doc.close()
+                    texto = "\n".join(partes).strip()
+            except Exception:
+                texto = ""
+        if not texto and _PypdfReader is not None:
+            try:
+                reader = _PypdfReader(ruta_ok)
+                if getattr(reader, "is_encrypted", False):
+                    if reader.decrypt(password or ""):
+                        partes = [(p.extract_text() or "") for p in reader.pages]
+                        texto = "\n".join(partes).strip()
+                else:
                     partes = [(p.extract_text() or "") for p in reader.pages]
                     texto = "\n".join(partes).strip()
-            else:
-                partes = [(p.extract_text() or "") for p in reader.pages]
-                texto = "\n".join(partes).strip()
-        except Exception:
-            texto = ""
-    return texto
+            except Exception:
+                texto = ""
+        return texto
+    finally:
+        if temporal:
+            try:
+                os.remove(temporal)
+            except Exception:
+                pass
 
 
 FECHA_RE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b")
@@ -1244,6 +1231,13 @@ def parsear_movimientos(texto):
     if not texto:
         return movimientos
     anio = _anio_del_estado(texto)
+    # 🏦 BCP («BCB»): formato propio (fecha DD-MM, importe con el signo al final).
+    if _es_estado_bcp(texto):
+        movimientos = _parsear_movimientos_bcp(texto, anio)
+        if movimientos:
+            print("[Conciliación] estado de cuenta BCP: %d movimiento(s) detectado(s)"
+                  % len(movimientos))
+            return movimientos
     for linea in texto.splitlines():
         linea = linea.strip()
         if not linea:
@@ -1303,6 +1297,53 @@ def parsear_movimientos(texto):
     return movimientos
 
 
+def _es_estado_bcp(texto):
+    """True si el texto es un estado de cuenta del BCP (formato «BCB»)."""
+    t = (texto or "").upper()
+    return ("VIABCP" in t or "ESTADO DE CUENTA CORRIENTE" in t)
+
+
+_BCP_RENGLON = re.compile(r"^(\d{1,2})-(\d{1,2})\s+(.+)$")
+_BCP_NUMERO = re.compile(r"^([\d,]*\.\d{2})(-?)$")
+
+
+def _parsear_movimientos_bcp(texto, anio):
+    """Estado de cuenta BCP: «01-09  DESCRIPCIÓN … 176.54- 11,218.42».
+
+    Tres cosas propias de este formato:
+      * la fecha viene sin año («01-09»), el año sale del encabezado;
+      * el signo va PEGADO al final del importe («176.54-» = cargo);
+      * el último número de la línea es el SALDO corrido, no el movimiento.
+    """
+    movimientos = []
+    for linea in (texto or "").splitlines():
+        linea = " ".join(linea.split())
+        encaje = _BCP_RENGLON.match(linea)
+        if not encaje:
+            continue
+        dia, mes, resto = encaje.groups()
+        tokens = resto.split()
+        if len(tokens) < 2:
+            continue
+        saldo_tok = _BCP_NUMERO.match(tokens[-1])
+        if not saldo_tok or saldo_tok.group(2):
+            continue                      # el saldo nunca lleva «-»
+        monto_tok = _BCP_NUMERO.match(tokens[-2])
+        if not monto_tok:
+            continue
+        monto = normalizar_monto(monto_tok.group(1))
+        monto = -abs(monto) if monto_tok.group(2) else abs(monto)
+        fecha = "%s/%s/%s" % (dia.zfill(2), mes.zfill(2),
+                              anio or datetime.now().year)
+        movimientos.append({
+            "fecha": normalizar_fecha(fecha) or fecha,
+            "descripcion": " ".join(tokens[:-2]).strip() or "Movimiento sin descripción",
+            "monto": monto,
+            "saldo": normalizar_monto(saldo_tok.group(1)),
+        })
+    return movimientos
+
+
 def detectar_saldo_final(texto):
     """Intenta detectar el saldo final del estado de cuenta.
 
@@ -1311,6 +1352,11 @@ def detectar_saldo_final(texto):
     """
     if not texto:
         return None
+    # 🏦 BCP: el saldo final es el saldo corrido del último movimiento.
+    if _es_estado_bcp(texto):
+        movs = _parsear_movimientos_bcp(texto, _anio_del_estado(texto))
+        if movs and movs[-1].get("saldo") is not None:
+            return movs[-1]["saldo"]
     for ln in texto.splitlines():
         if re.search(r"saldo\s+final", ln.lower()):
             montos = [(m.group(0), m.start()) for m in MONTO_DECIMAL_RE.finditer(ln)]
@@ -1379,11 +1425,6 @@ def extraer_datos_factura_pdf(ruta):
 
 NOMBRES_MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
                  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-
-
-# 🗓️ Periodo especial de la conciliación: desde la "Fecha de Comienzo del Sistema"
-# configurada en Configuración General hasta el día de hoy.
-ETIQUETA_DESDE_COMIENZO = "Desde la Fecha de Comienzo"
 
 
 def construir_valores_mes():
@@ -1470,7 +1511,7 @@ class CalendarioNativo(ctk.CTkToplevel):
         header.pack(fill="x")
 
         ctk.CTkButton(header, text="<", width=28, fg_color="transparent", text_color="white",
-                      hover_color="#163b65", font=("Arial", 14, "bold"),
+                      hover_color="#163b65", font=(FAMILIA, 14, "bold"),
                       command=self.mes_anterior).pack(side="left", padx=5, pady=10)
 
         self.cmb_mes = ctk.CTkComboBox(header, values=NOMBRES_MESES, width=105,
@@ -1483,22 +1524,22 @@ class CalendarioNativo(ctk.CTkToplevel):
         self.cmb_anio.pack(side="left", padx=2, pady=10)
 
         ctk.CTkButton(header, text=">", width=28, fg_color="transparent", text_color="white",
-                      hover_color="#163b65", font=("Arial", 14, "bold"),
+                      hover_color="#163b65", font=(FAMILIA, 14, "bold"),
                       command=self.mes_siguiente).pack(side="right", padx=5, pady=10)
 
         self.days_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.days_frame.pack(fill="both", expand=True, padx=10, pady=(10, 4))
 
         for i, dia in enumerate(["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]):
-            ctk.CTkLabel(self.days_frame, text=dia, font=("Arial", 11, "bold"),
+            ctk.CTkLabel(self.days_frame, text=dia, font=(FAMILIA, 11, "bold"),
                          text_color="#1f538d").grid(row=0, column=i, padx=5, pady=5)
 
         f_pie = ctk.CTkFrame(self, fg_color="transparent")
         f_pie.pack(fill="x", padx=10, pady=(0, 10))
-        ctk.CTkButton(f_pie, text="📅 Hoy", width=90, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_pie, text="📅 Hoy", width=90, font=(FAMILIA, 11, "bold"),
                       fg_color="#27ae60", hover_color="#1e8449",
                       command=self.ir_a_hoy).pack(side="left")
-        ctk.CTkButton(f_pie, text="✖ Cerrar", width=90, font=("Arial", 11),
+        ctk.CTkButton(f_pie, text="✖ Cerrar", width=90, font=(FAMILIA, 11),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=self.destroy).pack(side="right")
 
@@ -1532,7 +1573,7 @@ class CalendarioNativo(ctk.CTkToplevel):
                     color, texto_color = "transparent", "black"
                 btn = ctk.CTkButton(self.days_frame, text=str(dia), width=30, height=30,
                                     fg_color=color, text_color=texto_color,
-                                    hover_color="#e0e0e0", font=("Arial", 11),
+                                    hover_color="#e0e0e0", font=(FAMILIA, 11),
                                     command=lambda d=dia: self.seleccionar(d))
                 btn.grid(row=fila, column=col, padx=3, pady=2)
 
@@ -1604,9 +1645,9 @@ def _escanear_con_progreso(parent, etiqueta, mod_escaner, *args, **kwargs):
         except Exception:
             pass
         ctk.CTkLabel(prog, text="🖨️ Escaneando %s..." % (etiqueta or "el documento"),
-                     font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(20, 4))
+                     font=(FAMILIA, 13, "bold"), text_color="#1f538d").pack(pady=(20, 4))
         ctk.CTkLabel(prog, text="Coloque el documento en el escáner (cristal).\nEspere unos segundos…",
-                     font=("Arial", 10), text_color="gray", justify="center").pack()
+                     font=(FAMILIA, 10), text_color="gray", justify="center").pack()
         barra = ctk.CTkProgressBar(prog, width=350, mode="indeterminate")
         barra.pack(pady=12)
         barra.start()
@@ -1665,12 +1706,12 @@ class VentanaDiferenciales(ctk.CTkToplevel):
         f_top = ctk.CTkFrame(self, fg_color="transparent")
         f_top.pack(fill="x", padx=14, pady=(12, 4))
         ctk.CTkLabel(f_top, text="🧾 Diferenciales encontrados (%d)" % len(self.filas),
-                     font=("Arial", 15, "bold"), text_color="#1f538d").pack(side="left")
+                     font=(FAMILIA, 15, "bold"), text_color="#1f538d").pack(side="left")
         ctk.CTkLabel(f_top, text="   Banco: " + construir_etiqueta_banco(self.banco),
-                     font=("Arial", 11), text_color="#555555").pack(side="left")
+                     font=(FAMILIA, 11), text_color="#555555").pack(side="left")
         ctk.CTkLabel(self, text="Marcá los que querés incluir y escribí la descripción. "
                                 "Los del «Sistema» se marcan como conciliados.",
-                     font=("Arial", 10), text_color="#7f8c8d").pack(anchor="w", padx=16)
+                     font=(FAMILIA, 10), text_color="#7f8c8d").pack(anchor="w", padx=16)
 
         # encabezado de columnas
         f_cab = ctk.CTkFrame(self, fg_color="#eaf2f8", corner_radius=4)
@@ -1678,7 +1719,7 @@ class VentanaDiferenciales(ctk.CTkToplevel):
         for texto, ancho in (("Incluir", 70), ("Fecha", 95), ("Origen", 120),
                              ("Descripción del banco/sistema", 330),
                              ("Descripción a guardar", 250), ("Monto", 110)):
-            ctk.CTkLabel(f_cab, text=texto, font=("Arial", 11, "bold"), width=ancho,
+            ctk.CTkLabel(f_cab, text=texto, font=(FAMILIA, 11, "bold"), width=ancho,
                          anchor="w").pack(side="left", padx=4, pady=4)
 
         self.f_scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", height=420)
@@ -1695,38 +1736,38 @@ class VentanaDiferenciales(ctk.CTkToplevel):
             ctk.CTkCheckBox(f_fila, text="", variable=var, width=70, checkbox_width=18,
                             checkbox_height=18).pack(side="left", padx=(6, 0))
             ctk.CTkLabel(f_fila, text=fecha_para_mostrar(fila.get("fecha", "")), width=95,
-                         anchor="w", font=("Arial", 10)).pack(side="left", padx=4)
+                         anchor="w", font=(FAMILIA, 10)).pack(side="left", padx=4)
             color_origen = "#b9770e" if item["origen"] == "Estado de cuenta" else "#1f538d"
             ctk.CTkLabel(f_fila, text=item["origen"], width=120, anchor="w",
-                         font=("Arial", 10, "bold"), text_color=color_origen).pack(side="left", padx=4)
+                         font=(FAMILIA, 10, "bold"), text_color=color_origen).pack(side="left", padx=4)
             ctk.CTkLabel(f_fila, text=str(fila.get("descripcion") or "")[:60], width=330,
-                         anchor="w", font=("Arial", 10)).pack(side="left", padx=4)
-            entrada = ctk.CTkEntry(f_fila, width=250, font=("Arial", 10),
+                         anchor="w", font=(FAMILIA, 10)).pack(side="left", padx=4)
+            entrada = ctk.CTkEntry(f_fila, width=250, font=(FAMILIA, 10),
                                    placeholder_text="descripción…")
             entrada.insert(0, str(fila.get("descripcion") or ""))
             entrada.pack(side="left", padx=4)
             color_monto = "#1e8449" if monto >= 0 else "#c0392b"
             ctk.CTkLabel(f_fila, text=formatear_monto(monto), width=110, anchor="e",
-                         font=("Arial", 10, "bold"), text_color=color_monto).pack(side="left", padx=6)
+                         font=(FAMILIA, 10, "bold"), text_color=color_monto).pack(side="left", padx=6)
             self.widgets.append({"item": item, "var": var, "entrada": entrada})
 
         # pie con acciones
         f_pie = ctk.CTkFrame(self, fg_color="transparent")
         f_pie.pack(fill="x", padx=14, pady=(4, 12))
-        ctk.CTkButton(f_pie, text="☑ Todos", width=90, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_pie, text="☑ Todos", width=90, font=(FAMILIA, 11, "bold"),
                       fg_color="#5d6d7e", hover_color="#4a5967",
                       command=lambda: self.marcar(True)).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(f_pie, text="☐ Ninguno", width=100, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_pie, text="☐ Ninguno", width=100, font=(FAMILIA, 11, "bold"),
                       fg_color="#5d6d7e", hover_color="#4a5967",
                       command=lambda: self.marcar(False)).pack(side="left", padx=6)
-        ctk.CTkButton(f_pie, text="📊 Exportar a Excel", width=170, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_pie, text="📊 Exportar a Excel", width=170, font=(FAMILIA, 11, "bold"),
                       fg_color="#1e8449", hover_color="#196f3d",
                       command=self.exportar).pack(side="left", padx=6)
-        ctk.CTkButton(f_pie, text="❌ Cerrar", width=110, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_pie, text="❌ Cerrar", width=110, font=(FAMILIA, 11, "bold"),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=self.destroy).pack(side="right")
         ctk.CTkButton(f_pie, text="➕ Incluir seleccionados", width=200,
-                      font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
+                      font=(FAMILIA, 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
                       command=self.incluir).pack(side="right", padx=6)
 
     # ---------------------------------------------------------------- acciones
@@ -1916,6 +1957,7 @@ class ModuloBancoApp:
         self.usuario_activo = usuario_activo or "Desconocido"
         self.config = cargar_config()
         self.bancos = []               # se cargan enseguida, en segundo plano
+        self._cache_saldos_extra = {}  # estados de cuenta/manuales por cuenta
         self.movimientos_pdf = []
         self.texto_pdf = ""
         self.filas_conciliacion = []
@@ -1930,7 +1972,7 @@ class ModuloBancoApp:
         header = ctk.CTkFrame(self.frame_main, fg_color="transparent")
         header.pack(fill="x")
         ctk.CTkLabel(header, text="🏦 MÓDULO DE BANCO (SALDOS Y CONCILIACIÓN BANCARIA)",
-                     font=("Arial", 18, "bold"), text_color="#1f538d").pack(side="left")
+                     font=(FAMILIA, 18, "bold"), text_color="#1f538d").pack(side="left")
 
         self.tabview = ctk.CTkTabview(self.frame_main, segmented_button_selected_color="#1f538d")
         self.tabview.pack(fill="both", expand=True, pady=(10, 0))
@@ -1939,9 +1981,9 @@ class ModuloBancoApp:
         self.tab_transferencias = self.tabview.add(" 🔄 Transferencias ")
 
         # 🖱️ Al pulsar una pestaña (sin romper el cambio de pestaña del Tabview)
+        # 👀 Vigila la pestaña: al entrar a Conciliación pone el mes en curso y carga
         try:
-            self.tabview._segmented_button.bind(
-                "<ButtonRelease-1>", lambda e: self.frame_main.after(150, self._cargar_si_conciliacion), add="+")
+            self.frame_main.after(400, self._vigilar_tab_conciliacion)
         except Exception:
             pass
         self.construir_tab_saldos()
@@ -1955,35 +1997,6 @@ class ModuloBancoApp:
         # Los datos (varias consultas a Supabase) se traen aparte, en un hilo,
         # para que el módulo abra al instante y no se congele.
         self._cargar_datos_iniciales()
-
-        # 🖥️ Refresco automático de la pantalla al entrar (el hilo inicial a veces no
-        #    repinta y quedaba "Cargando datos del banco..."). Equivale a pulsar
-        #    el botón 🔄 Actualizar un par de segundos después de abrir el módulo.
-        def _refrescar_pantalla_banco():
-            """Refresca los datos y FUERZA el repintado (igual que cambiar de pestaña)."""
-            try:
-                self.actualizar_saldos_boton()
-            except Exception as error:
-                print("[Banco] refresco de datos:", error)
-            try:
-                self.update_idletasks()
-                self.update()
-                # 🔁 re-seleccionar la pestaña obliga a Tkinter a redibujar el contenido
-                try:
-                    actual = self.tabview.get()
-                    self.tabview.set(actual)
-                except Exception:
-                    pass
-                self.update_idletasks()
-                self.update()
-            except Exception as error:
-                print("[Banco] refresco de pantalla:", error)
-
-        try:
-            self.after(2500, _refrescar_pantalla_banco)
-            self.after(5000, _refrescar_pantalla_banco)   # segunda pasada (internet lento)
-        except Exception as error:
-            print("[Banco] refresco automático:", error)
 
     # -----------------------------------------------------
     # BASE DE DATOS DE CONCILIACION
@@ -2020,7 +2033,7 @@ class ModuloBancoApp:
                 pass
         conn = conectar_db(silencioso=True)
         if not conn:
-            return
+            raise RuntimeError("No se pudo conectar para verificar el esquema del Banco.")
         todo_ok = True
         try:
             with conn.cursor() as c:
@@ -2063,6 +2076,58 @@ class ModuloBancoApp:
                         creado VARCHAR(20) DEFAULT ''
                     )
                 """)
+                # 🧾 Diferenciales detectados al subir cada estado de cuenta
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS conciliacion_diferenciales (
+                        id SERIAL PRIMARY KEY,
+                        banco VARCHAR(255),
+                        cuenta VARCHAR(120) DEFAULT '',
+                        fecha VARCHAR(20) DEFAULT '',
+                        descripcion TEXT,
+                        monto NUMERIC DEFAULT 0,
+                        origen VARCHAR(20) DEFAULT '',
+                        descripcion_guardada TEXT DEFAULT '',
+                        incluido BOOLEAN DEFAULT FALSE,
+                        creado VARCHAR(30) DEFAULT ''
+                    )
+                """)
+                # 🧠 Auditoría de la Conciliación Inteligente. Se creaba a mano en la
+                #    base; el programa NUNCA la creaba y, en un equipo/base nuevos,
+                #    «Conciliar inteligente» fallaba sin explicación (el historial y
+                #    la aprobación dependen de esta tabla).
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS conciliacion_auditoria (
+                        id SERIAL PRIMARY KEY,
+                        id_conciliacion INTEGER DEFAULT 0,
+                        id_movimiento_banco INTEGER DEFAULT 0,
+                        id_asiento INTEGER,
+                        banco VARCHAR(255) DEFAULT '',
+                        cuenta VARCHAR(255) DEFAULT '',
+                        fecha_contable VARCHAR(20) DEFAULT '',
+                        fecha_banco VARCHAR(20) DEFAULT '',
+                        dias_desfase INTEGER DEFAULT 0,
+                        descripcion_contable TEXT DEFAULT '',
+                        descripcion_banco TEXT DEFAULT '',
+                        importe_contable NUMERIC DEFAULT 0,
+                        importe_banco NUMERIC DEFAULT 0,
+                        diferencia NUMERIC DEFAULT 0,
+                        moneda VARCHAR(10) DEFAULT 'PEN',
+                        sentido VARCHAR(20) DEFAULT '',
+                        referencia VARCHAR(120) DEFAULT '',
+                        pagina_pdf INTEGER DEFAULT 0,
+                        nivel INTEGER DEFAULT 1,
+                        estado VARCHAR(20) DEFAULT '',
+                        confianza NUMERIC DEFAULT 0,
+                        reglas TEXT DEFAULT '',
+                        observacion TEXT DEFAULT '',
+                        accion_sugerida TEXT DEFAULT '',
+                        origen_decision VARCHAR(20) DEFAULT 'manual',
+                        aprobado_por VARCHAR(150) DEFAULT '',
+                        creado VARCHAR(30) DEFAULT '',
+                        modificado VARCHAR(30) DEFAULT '',
+                        activo BOOLEAN DEFAULT TRUE
+                    )
+                """)
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS transferencias_bancarias (
                         id SERIAL PRIMARY KEY,
@@ -2075,6 +2140,13 @@ class ModuloBancoApp:
                         monto NUMERIC
                     )
                 """)
+                # 🏦 Comisión interbancaria, Nro. de referencia y comprobante adjunto
+                for _sql_tx in (
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS comision NUMERIC DEFAULT 0",
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS referencia VARCHAR(120) DEFAULT ''",
+                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS archivo_ruta TEXT DEFAULT ''",
+                ):
+                    c.execute(_sql_tx)
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS facturas_recibidas (
                         id SERIAL PRIMARY KEY, tipo_documento VARCHAR(100), fecha VARCHAR(50),
@@ -2085,11 +2157,7 @@ class ModuloBancoApp:
                         categoria VARCHAR(255) DEFAULT 'GENERAL / NO ASIGNADO'
                     )
                 """)
-                conn.commit()
                 for col_sql in (
-                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS comision NUMERIC DEFAULT 0",
-                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS referencia VARCHAR(120) DEFAULT ''",
-                    "ALTER TABLE transferencias_bancarias ADD COLUMN IF NOT EXISTS archivo_ruta TEXT DEFAULT ''",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS ruc VARCHAR(50)",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS pagado_por_tercero VARCHAR(255) DEFAULT ''",
                     "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS soporte_pago_tercero TEXT DEFAULT ''",
@@ -2097,10 +2165,8 @@ class ModuloBancoApp:
                     # Datos del pago manual, para poder reabrirlo y editarlo completo
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS categoria VARCHAR(120) DEFAULT ''",
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS subcategoria VARCHAR(120) DEFAULT ''",
-                    # 🎪 Dimensión de este sistema de EVENTOS (no hay vehículos ni placas):
-                    # 'evento' = CÓDIGO | Nombre del Evento y 'personal' = quién cobra la planilla.
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS evento VARCHAR(255) DEFAULT ''",
-                    "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS personal VARCHAR(150) DEFAULT ''",
+                    "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS chofer VARCHAR(150) DEFAULT ''",
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS comision NUMERIC DEFAULT 0",
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS interbancario BOOLEAN DEFAULT FALSE",
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS es_cruzada BOOLEAN DEFAULT FALSE",
@@ -2111,18 +2177,33 @@ class ModuloBancoApp:
                     "ALTER TABLE conciliacion_bancaria ADD COLUMN IF NOT EXISTS tabla VARCHAR(60) DEFAULT ''",
                     "ALTER TABLE pagos_comprobantes ADD COLUMN IF NOT EXISTS cuenta_origen VARCHAR(255) DEFAULT ''",
                     "ALTER TABLE pagos_comprobantes ADD COLUMN IF NOT EXISTS numero_operacion VARCHAR(100) DEFAULT ''",
-                    # 💳 Cuenta bancaria donde entró el dinero de cada cobro de Ventas:
-                    # es lo que permite que el saldo de cada banco cuadre (lo llena Ventas).
-                    "ALTER TABLE pagos_clientes ADD COLUMN IF NOT EXISTS cuenta_destino VARCHAR(255) DEFAULT ''",
+                    # 🏦 El estado de cuenta se guardaba SOLO por banco: subir el PDF
+                    #    de la segunda cuenta borraba el de la primera.
+                    "ALTER TABLE conciliacion_movimientos_pdf ADD COLUMN IF NOT EXISTS cuenta VARCHAR(255) DEFAULT ''",
+                    # 📅 Período (AAAA-MM) del estado de cuenta: permite tener
+                    #    guardados VARIOS meses del mismo banco/cuenta a la vez.
+                    "ALTER TABLE conciliacion_movimientos_pdf ADD COLUMN IF NOT EXISTS periodo VARCHAR(7) DEFAULT ''",
+                    # 📎 Respaldo del PDF del estado de cuenta en la carpeta sincronizada.
+                    "ALTER TABLE conciliacion_movimientos_pdf ADD COLUMN IF NOT EXISTS archivo_ruta TEXT DEFAULT ''",
+                ):
+                    c.execute(col_sql)
+                # 🚀 Índices: la conciliación consulta por banco en cada repintado.
+                for _sql_idx in (
+                    "CREATE INDEX IF NOT EXISTS idx_conc_bancaria_banco ON conciliacion_bancaria (banco, estado)",
+                    "CREATE INDEX IF NOT EXISTS idx_conc_pdf_banco ON conciliacion_movimientos_pdf (banco, cuenta)",
+                    "CREATE INDEX IF NOT EXISTS idx_conc_auditoria_banco ON conciliacion_auditoria (banco, estado)",
                 ):
                     try:
-                        c.execute(col_sql)
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        todo_ok = False
-        except Exception:
+                        c.execute(_sql_idx)
+                    except Exception as _e_idx:
+                        # Un índice es una mejora, no un requisito: no se aborta el esquema.
+                        print("[Banco] índice:", _e_idx)
+                # Un solo commit: nunca publicar un esquema parcialmente migrado.
+                conn.commit()
+        except Exception as exc:
+            conn.rollback()
             todo_ok = False
+            raise RuntimeError("No se pudo actualizar el esquema del Banco; no se guardó ningún cambio.") from exc
         finally:
             liberar_conexion(conn)
 
@@ -2220,18 +2301,10 @@ class ModuloBancoApp:
         try:
             for w in self.scroll_saldos.winfo_children():
                 w.destroy()
-            ctk.CTkLabel(self.scroll_saldos, text=texto, font=("Arial", 13),
+            ctk.CTkLabel(self.scroll_saldos, text=texto, font=(FAMILIA, 13),
                          text_color="#7f8c8d").pack(pady=30)
         except Exception:
             pass
-
-    def _ocultar_cargando(self):
-        """Sin ventana flotante: no hay nada que cerrar (se conserva por compatibilidad)."""
-        try:
-            _LETRERO_CARGANDO["ventana"] = None
-        except Exception:
-            pass
-        return
 
     def _actualizar_combos_bancos(self):
         """Vuelca la lista de bancos (ya cargada) en los combos de las pestañas."""
@@ -2252,16 +2325,35 @@ class ModuloBancoApp:
             except Exception:
                 pass
 
+    def _cargar_extras_saldos(self, bancos=None):
+        """Líneas de estado de cuenta y manuales por cuenta, para el saldo.
+
+        Se llama en segundo plano: así el saldo puede usar el banco sin
+        congelar la ventana con consultas a Supabase.
+        """
+        extras = {}
+        for b in (bancos or self.bancos or []):
+            clave = (str(b.get("banco", "")), str(b.get("cuenta", "") or ""))
+            try:
+                extras[clave] = {
+                    "pdf": self._cargar_movimientos_pdf(b) or [],
+                    "manuales": self.cargar_manuales(b) or [],
+                }
+            except Exception as error:
+                print("[Saldos] no se pudieron cargar los extras:", error)
+                extras[clave] = {"pdf": [], "manuales": []}
+        return extras
+
     def _cargar_datos_iniciales(self):
         """Trae de Supabase lo pesado SIN congelar la ventana."""
         self._mostrar_cargando()
 
         def _trabajo(estado):
             self.inicializar_db()                      # sólo la primera vez por equipo
-            # 🔗 Las cuentas se leen de la BASE DE DATOS (fuente compartida por los
-            # equipos), no de la copia local.
-            bancos = cargar_bancos(usar_cache=False)
+            bancos = cargar_bancos()
             estado["bancos"] = bancos
+            # Estados de cuenta y manuales de cada cuenta (para el saldo real).
+            estado["extras_saldos"] = self._cargar_extras_saldos(bancos)
             # 3 consultas para TODOS los bancos; el reparto por banco y el filtro
             # del periodo elegido se aplican después, al dibujar las tarjetas.
             estado["datos"] = self._cargar_movimientos_crudos()
@@ -2272,36 +2364,57 @@ class ModuloBancoApp:
     def _aplicar_datos_iniciales(self, estado):
         """Se ejecuta en el hilo principal cuando terminó la carga."""
         if estado.get("error"):
-            self._mostrar_cargando("No se pudieron cargar los saldos. Revise conexión y esquema de Eventos.")
-            messagebox.showerror("Banco", estado["error"], parent=self.parent_frame)
+            self._mostrar_cargando("❌ No se pudieron cargar los datos del Banco.")
+            messagebox.showerror("Banco", str(estado["error"]), parent=self.parent_frame)
             return
         self.bancos = estado.get("bancos") or []
+        self._cache_saldos_extra = estado.get("extras_saldos") or {}
         self._actualizar_combos_bancos()
-        # 🛟 el pintado inicial no debe cortar el hilo: si falla, se informa y se sigue
+        # 🔄 Si la pestaña de Conciliación ya está abierta, se carga ahora que hay bancos
         try:
-            self.refrescar_saldos(estado.get("datos"))
+            if "conciliaci" in str(self.tabview.get()).lower():
+                self._tab_conc_visto = None
+                self.frame_main.after(120, self._vigilar_tab_conciliacion)
+        except Exception:
+            pass
+        self.refrescar_saldos(estado.get("datos"))
+        # 🔄 Ahora que hay bancos, se carga la conciliación del mes en curso
+        try:
+            # 🚀 no se bloquea la pestaña: la conciliación se carga un instante después
+            self.frame_main.after(600, self._cargar_conciliacion_cuando_haya_bancos)
+        except Exception:
             try:
-                self.update_idletasks()
-            except Exception:
-                pass
-        except Exception as _e_pintar:
-            import traceback as _tb_pintar
-            _tb_pintar.print_exc()
-            print("[Banco] ERROR al pintar los saldos:", _e_pintar)
-            try:
-                self._mostrar_cargando("⚠️ No se pudo mostrar la información del banco.")
+                self._cargar_conciliacion_cuando_haya_bancos()
             except Exception:
                 pass
         self._pintar_transferencias(estado.get("transferencias") or [])
 
-    def _al_cambiar_pestana(self, nombre=None):
-        """Al entrar a una pestaña se traen los datos que le corresponden.
+    def actualizar_conciliacion_banco(self):
+        """Recarga la pestaña visible al pulsar el 🔄 Actualizar de la ventana.
 
-        * Saldo de Bancos: recalcula los saldos (en otro módulo pueden haber
-          eliminado una factura emitida con sus cobros, o una compra con sus pagos).
-        * Conciliación Bancaria: carga los movimientos del sistema del periodo
-          elegido (desde la Fecha de Comienzo hasta hoy) la primera vez que se entra.
+        Antes el botón solo recargaba saldos/la tabla, pero NO volvía a calcular
+        el cruce: el aviso naranja y la barra de diferencia quedaban viejos.
         """
+        try:
+            pestana = str(self.tabview.get())
+        except Exception:
+            pestana = ""
+        try:
+            if "Conciliaci" in pestana:
+                self.generar_reporte()
+            elif "Transferencia" in pestana:
+                self.refrescar_transferencias()
+            else:
+                self.actualizar_saldos_boton()
+        except Exception as error:
+            print("[Banco] actualizar pestaña:", error)
+
+    def _al_cambiar_pestana(self, nombre=None):
+        """Recalcula los saldos cada vez que se entra a la pestaña de saldos.
+
+        Así el saldo no se queda con datos viejos cuando en otro módulo se
+        elimina una factura emitida (con sus cobros) o una factura de compra
+        (con sus pagos)."""
         # Esta versión de customtkinter llama al comando SIN argumentos, por eso
         # se consulta la pestaña activa directamente.
         if not nombre:
@@ -2309,20 +2422,21 @@ class ModuloBancoApp:
                 nombre = self.tabview.get()
             except Exception:
                 nombre = ""
-        nombre = nombre or ""
-        if "Saldo de Bancos" in nombre:
-            try:
-                self.actualizar_saldos_boton()
-            except Exception:
-                pass
-            return
-        if "Conciliación" in nombre and not self.filas_conciliacion:
-            # Solo la primera vez: si el usuario ya tiene la lista cargada (con su
-            # PDF y sus marcas de conciliado) no se le borra al volver a la pestaña.
+        if "Conciliaci" in (nombre or ""):
+            # 🔄 Al entrar a Conciliación se recarga sola: en Compras/Cobranza
+            #    pudieron registrarse pagos o borrarse facturas. Así el botón
+            #    «Cargar Movimientos» queda sólo para forzar la actualización.
             try:
                 self.generar_reporte()
-            except Exception:
-                pass
+            except Exception as error:
+                print("Aviso - refresco de conciliación al entrar:", error)
+            return
+        if "Saldo de Bancos" not in (nombre or ""):
+            return
+        try:
+            self.actualizar_saldos_boton()
+        except Exception:
+            pass
 
     def actualizar_saldos_boton(self):
         """Botón 🔄 Actualizar: recalcula sin congelar la ventana."""
@@ -2333,12 +2447,15 @@ class ModuloBancoApp:
 
         def _trabajo(estado):
             estado["datos"] = self._cargar_movimientos_crudos()
+            estado["extras_saldos"] = self._cargar_extras_saldos(self.bancos)
 
         def _terminar(estado):
             if estado.get("error"):
-                self._mostrar_cargando("No se pudieron cargar los saldos; revise la conexión y el esquema.")
+                self._mostrar_cargando("❌ No se pudieron actualizar los saldos.")
+                messagebox.showerror("Banco", str(estado["error"]), parent=self.parent_frame)
                 return
-            self.refrescar_saldos(estado.get("datos"))
+            self._cache_saldos_extra = estado.get("extras_saldos") or {}
+            self.refrescar_saldos(estado["datos"])
 
         ejecutar_en_hilo(self.parent_frame, _trabajo, al_terminar=_terminar)
 
@@ -2348,9 +2465,9 @@ class ModuloBancoApp:
     def construir_tab_saldos(self):
         f_top = ctk.CTkFrame(self.tab_saldos, fg_color="transparent")
         f_top.pack(fill="x", pady=(5, 10))
-        ctk.CTkLabel(f_top, text="Saldo calculado como: Saldo Inicial + Ingresos Cobrados − Egresos Pagados.",
-                     font=("Arial", 12, "italic"), text_color="gray").pack(side="left")
-        ctk.CTkButton(f_top, text="🔄 Actualizar", width=130, font=("Arial", 12, "bold"),
+        ctk.CTkLabel(f_top, text="Saldo según banco: estados de cuenta cargados + movimientos de meses sin estado.",
+                     font=(FAMILIA, 11, "italic"), text_color="gray").pack(side="left")
+        ctk.CTkButton(f_top, text="🔄 Actualizar", width=130, font=(FAMILIA, 12, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=self.actualizar_saldos_boton).pack(side="right")
 
@@ -2360,7 +2477,7 @@ class ModuloBancoApp:
         self.cmb_mes_saldos = ctk.CTkComboBox(f_top, values=construir_valores_mes(), width=170,
                                               state="readonly", command=self._cambiar_mes_saldos)
         self.cmb_mes_saldos.pack(side="right", padx=(10, 12))
-        ctk.CTkLabel(f_top, text="Periodo:", font=("Arial", 12, "bold")).pack(side="right", padx=(0, 6))
+        ctk.CTkLabel(f_top, text="Periodo:", font=(FAMILIA, 12, "bold")).pack(side="right", padx=(0, 6))
         self.mes_saldos = None
         self.mes_saldos_etiqueta = ""
         self.cmb_mes_saldos.set("Todos los meses")
@@ -2370,6 +2487,25 @@ class ModuloBancoApp:
         # La ventana aparece de inmediato; los saldos se calculan aparte para no
         # congelarla (cada consulta a Supabase tarda ~0,3 s).
         self._mostrar_cargando()
+
+    def _aplicar_filtro_montos(self, modo):
+        """Filtra todas las tablas: todos, solo negativos o solo positivos."""
+        if modo == "negativos":
+            if self.var_solo_negativos.get():
+                self.var_solo_positivos.set(False)
+            activo = "negativos" if self.var_solo_negativos.get() else "todos"
+        elif modo == "positivos":
+            if self.var_solo_positivos.get():
+                self.var_solo_negativos.set(False)
+            activo = "positivos" if self.var_solo_positivos.get() else "todos"
+        else:
+            self.var_solo_negativos.set(False)
+            self.var_solo_positivos.set(False)
+            activo = "todos"
+        try:
+            filtrar_montos_negativos(activo)
+        except Exception:
+            pass
 
     def _cambiar_mes_saldos(self, etiqueta=None):
         """Cambia el periodo visible (un mes o todos) y redibuja las tarjetas.
@@ -2404,7 +2540,7 @@ class ModuloBancoApp:
             f_aviso.pack(fill="x", pady=10, padx=5)
             ctk.CTkLabel(f_aviso, text="⚠️ No hay cuentas bancarias configuradas.\n"
                                        "Agréguelas en: Ajustes de Sistema → ⚙️ Configuración General → Cuentas Bancarias.",
-                         font=("Arial", 13), text_color="#856404", justify="left").pack(padx=15, pady=15)
+                         font=(FAMILIA, 13), text_color="#856404", justify="left").pack(padx=15, pady=15)
             return
 
         if datos is None:
@@ -2422,80 +2558,10 @@ class ModuloBancoApp:
         ctk.CTkLabel(f_total,
                      text=("TOTAL DISPONIBLE EN BANCOS" if not mes_txt
                            else f"TOTAL AL CIERRE DE {mes_txt.upper()}"),
-                     font=("Arial", 14, "bold"),
+                     font=(FAMILIA, 14, "bold"),
                      text_color="white").pack(side="left", padx=15, pady=12)
-        ctk.CTkLabel(f_total, text=formatear_monto(total_general), font=("Arial", 16, "bold"),
+        ctk.CTkLabel(f_total, text=formatear_monto(total_general), font=(FAMILIA, 16, "bold"),
                      text_color="white").pack(side="right", padx=15, pady=12)
-
-        # ⚠️ Movimientos SIN cuenta bancaria asignada: no se suman a ninguna
-        # cuenta, por eso el saldo puede verse "sin ingresos ni egresos".
-        try:
-            sin_cuenta = self._contar_movimientos_sin_cuenta(datos)
-        except Exception:
-            sin_cuenta = 0
-        if sin_cuenta:
-            f_sc = ctk.CTkFrame(self.scroll_saldos, corner_radius=10, fg_color="#fff3cd",
-                                border_width=1, border_color="#ffeeba")
-            f_sc.pack(fill="x", pady=(10, 5), padx=5)
-            ctk.CTkLabel(
-                f_sc,
-                text=(f"⚠️ Hay {sin_cuenta} movimiento(s) SIN cuenta bancaria asignada"
-                      + (f" en {mes_txt}" if mes_txt else "") +
-                      ".\nNo se suman al saldo de ninguna cuenta (por eso puede ver 0.00 en "
-                      "ingresos/egresos).\nAsígneles su cuenta con el botón de abajo "
-                      "o desde la pestaña Conciliación Bancaria."),
-                font=("Arial", 12, "bold"), text_color="#856404", justify="left",
-                wraplength=900).pack(anchor="w", padx=15, pady=(12, 4))
-            ctk.CTkButton(f_sc, text="🛠️ Asignar cuentas a estos movimientos",
-                          font=("Arial", 12, "bold"), fg_color="#e67e22", hover_color="#b9651a",
-                          command=self._ir_a_conciliacion_sin_cuenta,
-                          width=320).pack(anchor="w", padx=15, pady=(0, 12))
-
-    def _contar_movimientos_sin_cuenta(self, datos):
-        """Cuenta los cobros/pagos del periodo visible que no tienen cuenta asignada."""
-        mes = getattr(self, "mes_saldos", None)
-        total = 0
-        for clave, idx_cuenta in (("cobros", 4), ("pagos", 4)):
-            for fila in (datos.get(clave) or []):
-                try:
-                    cuenta = str(fila[idx_cuenta] or "").strip()
-                    if cuenta:
-                        continue
-                    # 🔁 Los pagos ESPEJO (los crea este mismo módulo y se ven como
-                    #    MANUAL en la conciliación) no cuentan como "sin cuenta".
-                    if clave == "pagos" and len(fila) > 8 and bool(fila[8]):
-                        continue
-                    fecha = str(fila[1] or "")
-                    if mes and not clave_fecha(fecha).startswith(mes):
-                        continue
-                    total += 1
-                except Exception:
-                    continue
-        return total
-
-    def _ir_a_conciliacion_sin_cuenta(self):
-        """Lleva a Conciliación, carga los movimientos y asigna la cuenta que falta."""
-        try:
-            self.tabview.set(" 🧾 Conciliación Bancaria ")
-        except Exception:
-            pass
-
-        def _asignar(_estado=None):
-            try:
-                self.asignar_cuenta_a_movimientos()
-            except Exception as e:
-                messagebox.showinfo("Conciliación",
-                                    "Use el botón «Asignar cuenta» de la pestaña "
-                                    "Conciliación Bancaria para dar cuenta a los movimientos "
-                                    f"sin asignar.\n\nDetalle: {e}")
-
-        # Primero se cargan los movimientos del sistema (el botón de asignar
-        # trabaja sobre esa lista).
-        try:
-            self.generar_reporte()
-            self.parent_frame.after(2500, _asignar)
-        except Exception:
-            _asignar()
 
     def _crear_tarjeta_banco(self, banco, resumen, idx):
         etiqueta = construir_etiqueta_banco(banco) or f"Banco {idx + 1}"
@@ -2508,25 +2574,55 @@ class ModuloBancoApp:
         es_mes = bool(resumen.get("es_mes"))
         etiqueta_periodo = resumen.get("etiqueta_mes") or ""
         ctk.CTkLabel(fila_titulo, text=f"🏦 {etiqueta}",
-                     font=("Arial", 15, "bold"),
+                     font=(FAMILIA, 15, "bold"),
                      text_color="#1f538d").pack(side="left")
         if es_mes:
             ctk.CTkLabel(fila_titulo, text=f"Al cierre de {etiqueta_periodo} ►",
-                         font=("Arial", 11, "italic"), text_color="#7f8c8d").pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(fila_titulo, text=resumen["saldo_actual_txt"], font=("Arial", 16, "bold"),
+                         font=(FAMILIA, 11, "italic"), text_color="#7f8c8d").pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(fila_titulo, text=resumen["saldo_actual_txt"], font=(FAMILIA, 16, "bold"),
                      text_color="#27ae60" if resumen["saldo_actual"] >= 0 else "#c0392b").pack(side="right")
 
         fila_det = ctk.CTkFrame(card, fg_color="transparent")
         fila_det.pack(fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(fila_det, text=f"Saldo inicial: {formatear_monto(resumen['saldo_inicial'])}",
-                     font=("Arial", 11), text_color="gray").pack(side="left", padx=(0, 15))
+                     font=(FAMILIA, 11), text_color="gray").pack(side="left", padx=(0, 15))
         sufijo = f" ({etiqueta_periodo})" if es_mes else ""
         ctk.CTkLabel(fila_det, text=f"+ Ingresos{sufijo}: {formatear_monto(resumen['ingresos'])}",
-                     font=("Arial", 11), text_color="#27ae60").pack(side="left", padx=(0, 15))
+                     font=(FAMILIA, 11), text_color="#27ae60").pack(side="left", padx=(0, 15))
         ctk.CTkLabel(fila_det, text=f"− Egresos{sufijo}: {formatear_monto(resumen['egresos'])}",
-                     font=("Arial", 11), text_color="#c0392b").pack(side="left", padx=(0, 15))
+                     font=(FAMILIA, 11), text_color="#c0392b").pack(side="left", padx=(0, 15))
         ctk.CTkLabel(fila_det, text=f"({resumen['n_movimientos']} movimientos{sufijo})",
-                     font=("Arial", 10, "italic"), text_color="#7f8c8d").pack(side="left")
+                     font=(FAMILIA, 10, "italic"), text_color="#7f8c8d").pack(side="left")
+
+        # 🏦 Si el saldo corrido del estado de cuenta no coincide con la suma de
+        #    los movimientos leídos, se explica el ajuste (el banco es la verdad).
+        _ajuste = float(resumen.get("ajuste_estado") or 0)
+        if abs(_ajuste) >= 0.005:
+            ctk.CTkLabel(card,
+                         text=(f"🏦 Saldo según estado de cuenta del banco: ajuste de "
+                               f"{formatear_monto(_ajuste)} sobre la suma de movimientos."),
+                         font=(FAMILIA, 10, "italic"), text_color="#b9770e",
+                         justify="left", wraplength=900).pack(anchor="w", padx=12, pady=(0, 4))
+
+        # 📄 Qué estados de cuenta están CARGADOS para esta cuenta (a la vista).
+        try:
+            _periodos = sorted(self._periodos_cargados(banco))
+            _meses = {"01": "ene", "02": "feb", "03": "mar", "04": "abr", "05": "may",
+                      "06": "jun", "07": "jul", "08": "ago", "09": "sep", "10": "oct",
+                      "11": "nov", "12": "dic"}
+            if _periodos:
+                _txt_pdf = ", ".join("%s %s" % (_meses.get(p[5:7], p[5:7]), p[:4])
+                                     for p in _periodos)
+                _color_pdf = "#7d6608"
+            else:
+                _txt_pdf = "ninguno cargado todavía"
+                _color_pdf = "#c0392b"
+            _fila_pdf = ctk.CTkFrame(card, fg_color="transparent")
+            _fila_pdf.pack(fill="x", padx=12, pady=(0, 8))
+            ctk.CTkLabel(_fila_pdf, text="📄 Estados de cuenta cargados: " + _txt_pdf,
+                         font=(FAMILIA, 11), text_color=_color_pdf).pack(side="left")
+        except Exception as _e_pdf_card:
+            print("[Banco] estados cargados en la tarjeta:", _e_pdf_card)
 
         # Fecha desde la que rige el saldo inicial de la cuenta
         fecha_inicio = resumen.get("fecha_inicio") or ""
@@ -2539,21 +2635,128 @@ class ModuloBancoApp:
             else:
                 aviso = f"Movimientos considerados desde el {d}/{m_}/{a} (fecha del saldo inicial)."
                 color_aviso = "#7f8c8d"
-            ctk.CTkLabel(card, text=aviso, font=("Arial", 10, "italic"),
+            ctk.CTkLabel(card, text=aviso, font=(FAMILIA, 10, "italic"),
                          text_color=color_aviso, justify="left").pack(anchor="w", padx=12, pady=(0, 4))
 
         fila_btn = ctk.CTkFrame(card, fg_color="transparent")
         fila_btn.pack(fill="x", padx=12, pady=(0, 10))
-        ctk.CTkButton(fila_btn, text="👁 Ver Movimientos", width=160, font=("Arial", 11, "bold"),
+        ctk.CTkButton(fila_btn, text="👁 Ver Movimientos", width=160, font=(FAMILIA, 11, "bold"),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=lambda b=banco: self.ver_movimientos(b)).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(fila_btn, text="🧾 Conciliar este Banco", width=180, font=("Arial", 11, "bold"),
+        ctk.CTkButton(fila_btn, text="🧾 Conciliar este Banco", width=180, font=(FAMILIA, 11, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=lambda b=banco: self.ir_a_conciliacion(b)).pack(side="left")
+
+    def _movimientos_para_saldo(self, banco, movs_sistema):
+        """Movimientos que debe sumar la tarjeta de saldo.
+
+        En los meses con estado de cuenta cargado manda el BANCO: se usan sus
+        líneas tal cual, estén o no conciliadas, porque el saldo bancario incluye
+        efectivo, transferencias, comisiones, etc. En los meses sin estado (por
+        ejemplo, el mes en curso) se usan los movimientos del sistema y los
+        manuales que no dupliquen uno del sistema.
+        """
+        movs_sistema = list(movs_sistema or [])
+
+        # 🚫 Los asientos que el usuario eliminó de la conciliación NO deben
+        #    seguir sumando al saldo (antes se ocultaban de la tabla pero el
+        #    saldo los seguía contando: al borrar uno, el saldo no cambiaba).
+        try:
+            _ignorados = self.cargar_ignorados(banco)
+        except Exception:
+            _ignorados = {"sistema": set(), "estado_cuenta": set()}
+        _ign_sistema = _ignorados.get("sistema", set())
+        _ign_pdf = _ignorados.get("estado_cuenta", set())
+        movs_sistema = [
+            m for m in movs_sistema
+            if self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
+                                    m.get("id", 0), m.get("fecha"), m.get("monto"),
+                                    m.get("descripcion", "")) not in _ign_sistema
+        ]
+
+        # 0) Lo cargado en segundo plano (si está) evita consultar Supabase aquí.
+        clave_cache = (str(banco.get("banco", "")), str(banco.get("cuenta", "") or ""))
+        extras = (getattr(self, "_cache_saldos_extra", None) or {}).get(clave_cache) or {}
+        lineas_pdf = extras.get("pdf")
+        if lineas_pdf is None:
+            try:
+                lineas_pdf = self._cargar_movimientos_pdf(banco) or []
+            except Exception as error:
+                print("[Saldos] no se pudieron leer los estados de cuenta:", error)
+                lineas_pdf = []
+
+        # 1) Líneas del estado de cuenta, agrupadas por período (AAAA-MM).
+        pdf_por_mes = {}
+        try:
+            for linea in lineas_pdf:
+                monto = float(linea.get("monto") or 0)
+                if abs(monto) < 0.0001:
+                    continue
+                # 🚫 Línea descartada en la conciliación: no suma al saldo
+                if self._clave_ignorado("estado_cuenta", "", 0, linea.get("fecha"),
+                                        monto, linea.get("descripcion", "")) in _ign_pdf:
+                    continue
+                mes = str(linea.get("periodo") or "") or clave_fecha(linea.get("fecha"))[:7]
+                if not mes:
+                    continue
+                pdf_por_mes.setdefault(mes, []).append({
+                    "id": None,
+                    "fecha": linea.get("fecha", ""),
+                    "descripcion": linea.get("descripcion", ""),
+                    "monto": monto,
+                    "saldo": linea.get("saldo"),
+                    "tipo": "Banco",
+                    "origen": "estado_cuenta",
+                    "tabla": "conciliacion_movimientos_pdf",
+                    "documento": "",
+                    "archivo_ruta": "",
+                })
+        except Exception as error:
+            print("[Saldos] no se pudieron leer los estados de cuenta:", error)
+            pdf_por_mes = {}
+
+        # 2) Manuales que no estén ya como movimiento del sistema.
+        manuales = extras.get("manuales")
+        if manuales is None:
+            try:
+                manuales = self.cargar_manuales(banco) or []
+            except Exception as error:
+                print("[Saldos] no se pudieron leer los movimientos manuales:", error)
+                manuales = []
+        pendientes_sistema = {}
+        for m in movs_sistema:
+            clave = (clave_fecha(m.get("fecha")), round(float(m.get("monto") or 0), 2))
+            pendientes_sistema[clave] = pendientes_sistema.get(clave, 0) + 1
+        manuales_por_mes = {}
+        for m in manuales:
+            clave = (clave_fecha(m.get("fecha")), round(float(m.get("monto") or 0), 2))
+            if pendientes_sistema.get(clave, 0) > 0:
+                pendientes_sistema[clave] -= 1
+                continue
+            mes = clave_fecha(m.get("fecha"))[:7]
+            manuales_por_mes.setdefault(mes, []).append(m)
+
+        # 3) Cada mes se toma de UNA sola fuente para no duplicar.
+        sistema_por_mes = {}
+        for m in movs_sistema:
+            sistema_por_mes.setdefault(clave_fecha(m.get("fecha"))[:7], []).append(m)
+        salida = []
+        for mes in sorted(set(pdf_por_mes) | set(sistema_por_mes) | set(manuales_por_mes)):
+            if mes in pdf_por_mes:
+                salida.extend(pdf_por_mes[mes])
+            else:
+                salida.extend(sistema_por_mes.get(mes, []))
+                salida.extend(manuales_por_mes.get(mes, []))
+        return salida
 
     def calcular_resumen(self, banco, datos=None, mes=None):
         """Saldo del banco. Si se pasa 'datos' (movimientos crudos ya leídos de
         la base) no se vuelve a consultar Supabase.
+
+        El saldo se arma con los movimientos REALES del banco: en los meses con
+        estado de cuenta cargado se usan sus líneas (conciliadas o no) y en los
+        meses sin estado se usan los movimientos del sistema y los manuales.
+        Así entran efectivo, transferencias, comisiones, etc.
 
         Si 'mes' (formato 'YYYY-MM') viene informado, los importes mostrados
         son los del MES y el saldo es el de CIERRE de ese mes
@@ -2562,7 +2765,10 @@ class ModuloBancoApp:
         """
         if mes is None:
             mes = getattr(self, "mes_saldos", None)
-        movs_todos = self._movimientos_de_banco(banco, datos)
+        movs_sistema = self._movimientos_de_banco(banco, datos)
+        # 🏦 El saldo usa el estado de cuenta en los meses cargados y, en los
+        #    meses sin estado, los movimientos del sistema y los manuales.
+        movs_todos = self._movimientos_para_saldo(banco, movs_sistema)
         saldo_inicial = normalizar_monto(banco.get("saldo_inicial", ""))
 
         # 📌 'fecha' de la cuenta = desde cuándo rige el saldo inicial. Lo movido
@@ -2587,7 +2793,27 @@ class ModuloBancoApp:
 
         ingresos = sum(m["monto"] for m in movs if m["monto"] > 0)
         egresos = sum(-m["monto"] for m in movs if m["monto"] < 0)
-        saldo = saldo_inicial + sum(m["monto"] for m in acumulados)
+        # 🏦 Si hay estado de cuenta, manda el SALDO CORRIDO del banco: la suma
+        #    de los movimientos leídos puede quedar corta si el PDF trae alguna
+        #    línea que no se pudo interpretar (el saldo sí es exacto).
+        ancla_fecha, ancla_saldo = None, None
+        for m in acumulados:
+            if str(m.get("origen") or "") != "estado_cuenta":
+                continue
+            saldo_m = m.get("saldo")
+            if saldo_m is None:
+                continue
+            f_m = clave_fecha(m.get("fecha"))
+            if not f_m:
+                continue
+            if ancla_fecha is None or f_m >= ancla_fecha:
+                ancla_fecha, ancla_saldo = f_m, float(saldo_m)
+        if ancla_saldo is not None:
+            saldo = ancla_saldo + sum(m["monto"] for m in acumulados
+                                      if clave_fecha(m.get("fecha")) > ancla_fecha)
+        else:
+            saldo = saldo_inicial + sum(m["monto"] for m in acumulados)
+        ajuste_estado = round(saldo - (saldo_inicial + sum(m["monto"] for m in acumulados)), 2)
         etiqueta_mes = getattr(self, "mes_saldos_etiqueta", "") if mes else ""
         return {
             "saldo_inicial": saldo_inicial,
@@ -2595,6 +2821,8 @@ class ModuloBancoApp:
             "egresos": egresos,
             "saldo_actual": saldo,
             "saldo_actual_txt": formatear_monto(saldo),
+            "ajuste_estado": ajuste_estado,
+            "ancla_fecha": ancla_fecha,
             "n_movimientos": len(movs),
             "movimientos": movs,
             "mes": mes or "",
@@ -2614,9 +2842,8 @@ class ModuloBancoApp:
         datos = {"cobros": [], "pagos": [], "transferencias": []}
         conn = conectar_db(silencioso=True)
         if not conn:
-            return datos
+            raise RuntimeError("No se pudieron leer movimientos bancarios: sin conexión.")
         try:
-            tx_soporte.asegurar_esquema(conn)
             with conn.cursor() as c:
                 try:
                     # 🛡️ Solo se cuentan los cobros que APUNTAN A UNA FACTURA EXISTENTE:
@@ -2630,11 +2857,11 @@ class ModuloBancoApp:
                                COALESCE(p.numero_operacion, '')
                         FROM pagos_clientes p
                         LEFT JOIN facturas_emitidas f ON p.id_factura = f.id
-                        WHERE COALESCE(p.id_factura, 0) = 0 OR f.id IS NOT NULL
+                        WHERE TRUE  -- se incluyen tambien los huerfanos (factura borrada)
                     """)
                     datos["cobros"] = c.fetchall()
-                except Exception:
-                    conn.rollback()
+                except Exception as exc:
+                    raise RuntimeError("No se pudieron leer cobros; verifique el esquema del Banco.") from exc
                 try:
                     # 🛡️ Igual que los cobros: un pago cuya factura de compra ya no
                     # existe (huérfano) no debe seguir restando en el saldo.
@@ -2648,40 +2875,35 @@ class ModuloBancoApp:
                                COALESCE(p.numero_operacion, '')
                         FROM pagos_comprobantes p
                         LEFT JOIN facturas_recibidas f ON p.id_factura = f.id
-                        WHERE COALESCE(p.id_factura, 0) = 0 OR f.id IS NOT NULL
+                        WHERE TRUE  -- se incluyen tambien los huerfanos (factura borrada)
                     """)
                     datos["pagos"] = c.fetchall()
-                except Exception:
-                    conn.rollback()
+                except Exception as exc:
+                    raise RuntimeError("No se pudieron leer pagos; verifique el esquema del Banco.") from exc
                 try:
                     c.execute("""
                         SELECT id, banco_origen, cuenta_origen, banco_destino, cuenta_destino,
-                               fecha, descripcion, monto, COALESCE(comision, 0),
-                               COALESCE(referencia, ''), COALESCE(archivo_ruta, '')
+                               fecha, descripcion, monto,
+                               COALESCE(comision, 0), COALESCE(referencia, ''),
+                               COALESCE(archivo_ruta, '')
                         FROM transferencias_bancarias
                     """)
                     datos["transferencias"] = c.fetchall()
-                except Exception:
-                    conn.rollback()
-                    raise
-        except Exception as exc:
+                except Exception as exc:
+                    raise RuntimeError("No se pudieron leer transferencias; verifique el esquema del Banco.") from exc
+        except Exception:
             conn.rollback()
-            raise RuntimeError("No se pudieron verificar/cargar las transferencias; no se mostrará un saldo incompleto.") from exc
+            raise
         finally:
             liberar_conexion(conn)
         return datos
 
-    def _movimientos_de_banco(self, banco, datos=None, mes=None, incluir_sin_cuenta=False):
+    def _movimientos_de_banco(self, banco, datos=None, mes=None):
         """Cobros (ingresos), pagos (egresos) y transferencias de ESTE banco.
 
         Si se recibe 'datos' (lo que devuelve _cargar_movimientos_crudos) NO se
         vuelve a consultar la base de datos. Si se recibe 'mes' (formato
         'YYYY-MM'), filtra solo ese mes.
-
-        'incluir_sin_cuenta': la conciliación también lista los cobros y pagos que
-        todavía NO tienen cuenta bancaria asignada (se marcan con ⚠️), porque de lo
-        contrario no aparecerían en ninguna cuenta. El SALDO de cada banco sigue
-        siendo estricto: solo cuenta lo que tiene su cuenta asignada.
         """
         if datos is None:
             datos = self._cargar_movimientos_crudos()
@@ -2690,16 +2912,13 @@ class ModuloBancoApp:
             idp, fecha, nombre, monto, cuenta, idf, num_doc, ref = fila_c[:8]
             arch = fila_c[8] if len(fila_c) > 8 else ""
             oper_c = str(fila_c[9] or "").strip() if len(fila_c) > 9 else ""
-            coincide = banco_matchea(banco, cuenta)
-            sin_cuenta = bool(incluir_sin_cuenta and not str(cuenta or "").strip())
-            if coincide or sin_cuenta:
+            if banco_matchea(banco, cuenta):
                 doc = (num_doc or ref or "").strip()
                 desc = f"Cobro {nombre or ''}".replace("  ", " ").strip()
                 movs.append({
                     "id": idp, "fecha": fecha or "", "descripcion": desc,
                     "monto": float(monto or 0), "tipo": "ingreso",
                     "origen": "sistema", "tabla": "pagos_clientes", "documento": doc,
-                    "sin_cuenta": sin_cuenta,
                     "archivo_ruta": arch or "", "id_factura": idf or 0,
                     "operacion": oper_c,
                 })
@@ -2711,9 +2930,7 @@ class ModuloBancoApp:
             espejo = bool(fila[8]) if len(fila) > 8 else False
             arch_p = fila[9] if len(fila) > 9 else ""
             oper_p = str(fila[10] or "").strip() if len(fila) > 10 else ""
-            coincide = banco_matchea(banco, cuenta)
-            sin_cuenta = bool(incluir_sin_cuenta and not str(cuenta or "").strip())
-            if coincide or sin_cuenta:
+            if banco_matchea(banco, cuenta):
                 doc = (num_doc or ref or "").strip()
                 desc = f"Pago {nombre or ''}".replace("  ", " ").strip()
                 movs.append({
@@ -2721,37 +2938,34 @@ class ModuloBancoApp:
                     "monto": -float(monto or 0), "tipo": "egreso",
                     "origen": "sistema", "tabla": "pagos_comprobantes", "documento": doc,
                     "espejo_banco": espejo,
-                    "sin_cuenta": sin_cuenta,
                     "archivo_ruta": arch_p or "", "id_factura": idf or 0,
                     "operacion": oper_p,
                 })
         for fila_tx in (datos.get("transferencias") or []):
-            idt, bo, co, bd, cd, fecha, desc, monto = fila_tx[:8]
-            comision, referencia, archivo = (tuple(fila_tx[8:11]) + (0, "", ""))[:3]
+            if len(fila_tx) != 11:
+                raise ValueError("Lectura incompleta de transferencia: faltan comisión, referencia o archivo.")
+            (idt, bo, co, bd, cd, fecha, desc, monto,
+             comision_tx, referencia_tx, archivo_tx) = fila_tx
             monto_v = float(monto or 0)
-            et_origen = construir_etiqueta_banco({"banco": bo, "cuenta": co})
-            et_destino = construir_etiqueta_banco({"banco": bd, "cuenta": cd})
-            if (_norm_texto(banco.get("banco")) == _norm_texto(bo)
-                    and _norm_texto(banco.get("cuenta")) == _norm_texto(co)):
+            com_v = float(comision_tx or 0)
+            if cuenta_transferencia_matchea(banco, bo, co):
                 desc_eg = f"Transferencia a {bd or 'otra cuenta'}"
                 if desc:
                     desc_eg += f" ({desc})"
+                # 🏦 El banco debita el TOTAL (monto + comisión) en UNA sola línea.
+                #    Antes se creaban dos asientos (-300 y -4,80) y el de la comisión
+                #    quedaba como sobrante al conciliar.
+                total_debitado = monto_v + com_v
+                if com_v > 0:
+                    desc_eg += " + comisión %s" % formatear_monto(com_v)
                 movs.append({
                     "id": idt, "fecha": fecha or "", "descripcion": desc_eg,
-                    "monto": -monto_v, "tipo": "transferencia",
+                    "monto": -total_debitado, "tipo": "transferencia",
                     "origen": "sistema", "tabla": "transferencias_bancarias",
-                    "documento": referencia or "", "archivo_ruta": archivo or "",
+                    "documento": str(referencia_tx or ""), "archivo_ruta": archivo_tx or "",
+                    "comision": com_v,
                 })
-                if float(comision or 0) > 0:
-                    movs.append({
-                        "id": idt, "fecha": fecha or "",
-                        "descripcion": f"Comisión transferencia a {bd or 'otra cuenta'}",
-                        "monto": -float(comision), "tipo": "egreso",
-                        "origen": "sistema", "tabla": tx_soporte.TABLA_COMISION,
-                        "documento": referencia or "", "archivo_ruta": archivo or "",
-                    })
-            if (_norm_texto(banco.get("banco")) == _norm_texto(bd)
-                    and _norm_texto(banco.get("cuenta")) == _norm_texto(cd)):
+            if cuenta_transferencia_matchea(banco, bd, cd):
                 desc_in = f"Transferencia de {bo or 'otra cuenta'}"
                 if desc:
                     desc_in += f" ({desc})"
@@ -2759,8 +2973,12 @@ class ModuloBancoApp:
                     "id": idt, "fecha": fecha or "", "descripcion": desc_in,
                     "monto": monto_v, "tipo": "transferencia",
                     "origen": "sistema", "tabla": "transferencias_bancarias",
-                    "documento": referencia or "", "archivo_ruta": archivo or "",
+                    "documento": str(referencia_tx or ""), "archivo_ruta": archivo_tx or "",
                 })
+        # 🧹 Pagos/cobros en 0.00 (tickets del App Grifo sin importe): no son
+        #    movimientos bancarios y ensucian la conciliación (aparecían como
+        #    «asiento del sistema» que nunca puede cruzar).
+        movs = [m for m in movs if abs(float(m.get("monto") or 0)) > 0.0001]
         # Un mismo pago (mismo N de operacion o mismo comprobante) que cancela
         # VARIAS facturas debe verse como UN SOLO asiento.
         movs = self._agrupar_pagos_multiples(movs)
@@ -2807,74 +3025,76 @@ class ModuloBancoApp:
                 copia["documento"] = ", ".join(unicos)
         return salida
 
-    def _avisar_ya_conciliados(self):
+    @staticmethod
+    def _limpiar_conciliaciones_transferencia(cursor, ids):
+        """Invalida marcas de principal/comisión dentro de la transacción del CRUD.
 
-        """Avisa cuántos movimientos ya estaban conciliados."""
-
-        pendientes = int(getattr(self, "_ya_conciliados", 0) or 0)
-
-        if pendientes <= 0:
-
+        No abre conexión ni hace commit/rollback. El llamador debe propagar errores.
+        No borra líneas PDF: no existe un vínculo inequívoco con ellas.
+        """
+        ids = sorted({int(idt) for idt in ids if int(idt) > 0})
+        if not ids:
             return
+        tablas = ["transferencias_bancarias", "tx_comision"]
+        origenes = [prefijo + tabla for prefijo in ("s:", "sistema:") for tabla in tablas]
+        cursor.execute("""DELETE FROM conciliacion_bancaria
+            WHERE id_movimiento = ANY(%s)
+              AND (origen = ANY(%s) OR (origen = 'sistema' AND tabla = ANY(%s)))""",
+            (ids, origenes, tablas))
+        cursor.execute("""DELETE FROM conciliacion_ignorados
+            WHERE id_movimiento = ANY(%s) AND origen = 'sistema' AND tabla = ANY(%s)""",
+            (ids, tablas))
 
-        self._ya_conciliados = 0
-
+    def _abrir_transferencia_desde_movimiento(self, movimiento):
+        """Los asientos virtuales solo se editan a través de su transferencia padre."""
         try:
+            idt = int(movimiento.get("id") or 0)
+            tx = next((t for t in self.cargar_transferencias() if int(t["id"]) == idt), None)
+            if not tx:
+                raise ValueError("No se encontró la transferencia padre; recargue los movimientos.")
+            self._preparar_form_transferencia(tx)
+            self.tabview.set(" 🔄 Transferencias ")
+        except Exception as exc:
+            messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
 
-            messagebox.showinfo("Conciliación",
-
-                                "%d movimiento(s) ya estaban conciliados y no se "
-
-                                "volvieron a registrar." % pendientes,
-
-                                parent=self.parent_frame)
-
+    def _avisar_ya_conciliados(self):
+        """Avisa cuántos movimientos ya tenían asiento (y reinicia el contador)."""
+        pendientes = int(getattr(self, "_ya_conciliados", 0) or 0)
+        if pendientes <= 0:
+            return
+        self._ya_conciliados = 0
+        try:
+            messagebox.showinfo(
+                "Conciliación",
+                "%d movimiento(s) ya tenían su asiento en la conciliación: "
+                "se marcaron como conciliados (no se duplicaron)." % pendientes,
+                parent=self.parent_frame)
         except Exception as error:
+            print("[Conciliación] aviso de ya conciliados:", error)
 
-            print("[Conciliación] aviso:", error)
-
-
-    def cargar_movimientos_sistema(self, banco, mes=None, incluir_sin_cuenta=False):
-
-
+    def cargar_movimientos_sistema(self, banco, mes=None):
+        """Compatibilidad: movimientos de un banco (consulta la base de datos)."""
         self._avisar_ya_conciliados()
-        """Movimientos del sistema para un banco (consulta la base de datos)."""
-        return self._movimientos_de_banco(banco, mes=mes, incluir_sin_cuenta=incluir_sin_cuenta)
+        return self._movimientos_de_banco(banco, mes=mes)
 
     def ver_movimientos(self, banco):
-        # ⚡ Si los movimientos ya están cargados (pestaña de saldos) se usan esos:
-        # antes esta ventana volvía a consultar Supabase y tardaba varios segundos.
-        datos = getattr(self, "_datos_saldos", None)
-        if datos is None:
-            def _trabajo(estado):
-                estado["resumen"] = self.calcular_resumen(banco)
-
-            def _aplicar(estado):
-                if estado.get("error"):
-                    return messagebox.showerror("Movimientos",
-                                                f"No se pudieron cargar los movimientos:\n{estado['error']}",
-                                                parent=self.parent_frame)
-                self._mostrar_ventana_movimientos(banco, estado.get("resumen") or {})
-
-            ejecutar_en_hilo(self.parent_frame, _trabajo, al_terminar=_aplicar)
-            return
-        self._mostrar_ventana_movimientos(banco, self.calcular_resumen(banco, datos))
-
-    def _mostrar_ventana_movimientos(self, banco, resumen):
-        movs = resumen.get("movimientos") or []
+        resumen = self.calcular_resumen(banco)
+        movs = resumen["movimientos"]
         periodo = f" — {resumen['etiqueta_mes']}" if resumen.get("es_mes") else ""
         v = ctk.CTkToplevel(self.parent_frame)
         v.title(f"Movimientos - {construir_etiqueta_banco(banco)}{periodo}")
         v.geometry("760x480")
         v.transient(self.parent_frame)
+        traer_al_frente(v)
 
         ctk.CTkLabel(v, text=f"Movimientos de {construir_etiqueta_banco(banco)}{periodo}",
-                     font=("Arial", 15, "bold"), text_color="#1f538d").pack(pady=(15, 5))
+                     font=(FAMILIA, 15, "bold"), text_color="#1f538d").pack(pady=(15, 5))
 
         f_tabla = ctk.CTkFrame(v, fg_color="transparent")
         f_tabla.pack(fill="both", expand=True, padx=15, pady=10)
         columnas = ("fecha", "documento", "descripcion", "tipo", "monto")
         tabla = ttk.Treeview(f_tabla, columns=columnas, show="headings", height=14)
+        preparar_colores_montos(tabla)
         tabla.heading("fecha", text="Fecha")
         tabla.heading("documento", text="N° Documento")
         tabla.heading("descripcion", text="Descripción")
@@ -2908,6 +3128,8 @@ class ModuloBancoApp:
                 tipo_txt = "Comisión interbancaria"
             elif m.get("tipo") == "transferencia":
                 tipo_txt = "Transferencia (Ingreso)" if m["monto"] > 0 else "Transferencia (Egreso)"
+            elif m.get("tipo") == "Banco" or m.get("origen") == "estado_cuenta":
+                tipo_txt = "Ingreso (Banco)" if m["monto"] > 0 else "Egreso (Banco)"
             else:
                 tipo_txt = "Ingreso (Cobro)" if m["monto"] > 0 else "Egreso (Pago)"
             return (fecha_para_mostrar(m["fecha"]), m.get("documento", ""), m["descripcion"],
@@ -2959,11 +3181,13 @@ class ModuloBancoApp:
             except Exception:
                 return
             _tabla = str(m.get("tabla") or "")
-            es_tx = _tabla in tx_soporte.TABLAS_TX
-            if es_tx:
-                _tabla = "transferencias_bancarias"
             _id = int(m.get("id") or 0)
-            if _tabla not in ("pagos_clientes", "pagos_comprobantes", "transferencias_bancarias") or not _id:
+            if _tabla in ("transferencias_bancarias", "tx_comision"):
+                messagebox.showinfo("Transferencia",
+                                    "Este asiento pertenece a una transferencia. Edítela o elimínela desde Transferencias; la comisión no se borra por separado.", parent=v)
+                self._abrir_transferencia_desde_movimiento(m)
+                return
+            if _tabla not in ("pagos_clientes", "pagos_comprobantes") or not _id:
                 return messagebox.showwarning("Eliminar",
                                               "Este movimiento no se puede eliminar desde aquí.", parent=v)
             _desc = str(m.get("descripcion") or "")
@@ -2972,8 +3196,7 @@ class ModuloBancoApp:
                     "Eliminar movimiento",
                     "¿Eliminar este movimiento del sistema?" + chr(10) + chr(10)
                     + _desc + "   (" + _monto + ")" + chr(10) + chr(10)
-                    + ("Se eliminará la transferencia COMPLETA (origen, destino y comisión)." if es_tx
-                       else "Se borrará de la base de datos (" + _tabla + ")."),
+                    + "Se borrará de la base de datos (" + _tabla + ").",
                     parent=v):
                 return
             conn_del = conectar_db()
@@ -2981,8 +3204,6 @@ class ModuloBancoApp:
                 return
             try:
                 c_del = conn_del.cursor()
-                if es_tx:
-                    tx_soporte.limpiar_marcas(c_del, [_id])
                 c_del.execute("DELETE FROM " + _tabla + " WHERE id = %s", (_id,))
                 conn_del.commit()
             except Exception as e_del:
@@ -3005,12 +3226,6 @@ class ModuloBancoApp:
                 pass
             messagebox.showinfo("Eliminar", "Movimiento eliminado.", parent=v)
             v.destroy()
-            if es_tx:
-                if self.id_tx_edicion == _id:
-                    self._preparar_form_transferencia()
-                self.refrescar_transferencias()
-            self.actualizar_saldos_boton()
-            self.generar_reporte()
 
         f_botones = ctk.CTkFrame(v, fg_color="transparent")
         f_botones.pack(pady=(0, 15))
@@ -3032,14 +3247,14 @@ class ModuloBancoApp:
             etiquetas = ["(Sin bancos configurados)"]
 
         r1 = ctk.CTkFrame(f_form, fg_color="transparent"); r1.pack(fill="x", padx=12, pady=(12, 4))
-        ctk.CTkLabel(r1, text="Banco Origen:", width=130, anchor="w", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(r1, text="Banco Origen:", width=130, anchor="w", font=(FAMILIA, 12, "bold")).pack(side="left")
         self.cmb_tx_origen = ctk.CTkComboBox(r1, values=etiquetas, width=340, state="readonly")
         self.cmb_tx_origen.pack(side="left", padx=6)
         if etiquetas:
             self.cmb_tx_origen.set(etiquetas[0])
 
         r2 = ctk.CTkFrame(f_form, fg_color="transparent"); r2.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r2, text="Banco Destino:", width=130, anchor="w", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(r2, text="Banco Destino:", width=130, anchor="w", font=(FAMILIA, 12, "bold")).pack(side="left")
         self.cmb_tx_destino = ctk.CTkComboBox(r2, values=etiquetas, width=340, state="readonly")
         self.cmb_tx_destino.pack(side="left", padx=6)
         if len(etiquetas) > 1:
@@ -3048,18 +3263,18 @@ class ModuloBancoApp:
             self.cmb_tx_destino.set(etiquetas[0])
 
         r3 = ctk.CTkFrame(f_form, fg_color="transparent"); r3.pack(fill="x", padx=12, pady=4)
-        ctk.CTkLabel(r3, text="Fecha:", width=130, anchor="w", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(r3, text="Fecha:", width=130, anchor="w", font=(FAMILIA, 12, "bold")).pack(side="left")
         self.ent_tx_fecha = ctk.CTkEntry(r3, width=170)
         self.ent_tx_fecha.pack(side="left", padx=6)
         self.ent_tx_fecha.insert(0, datetime.now().strftime("%d/%m/%Y"))
         ctk.CTkButton(r3, text="📅", width=40,
                       command=lambda: CalendarioNativo(self.parent_frame, self.ent_tx_fecha)).pack(side="left")
-        ctk.CTkLabel(r3, text="Monto:", width=90, anchor="w", font=("Arial", 12, "bold")).pack(side="left", padx=(16, 0))
+        ctk.CTkLabel(r3, text="Monto:", width=90, anchor="w", font=(FAMILIA, 12, "bold")).pack(side="left", padx=(16, 0))
         self.ent_tx_monto = ctk.CTkEntry(r3, width=170)
         self.ent_tx_monto.pack(side="left", padx=6)
 
         r4 = ctk.CTkFrame(f_form, fg_color="transparent"); r4.pack(fill="x", padx=12, pady=(4, 4))
-        ctk.CTkLabel(r4, text="Descripción:", width=130, anchor="w", font=("Arial", 12, "bold")).pack(side="left")
+        ctk.CTkLabel(r4, text="Descripción:", width=130, anchor="w", font=(FAMILIA, 12, "bold")).pack(side="left")
         self.ent_tx_desc = ctk.CTkEntry(r4)
         self.ent_tx_desc.pack(side="left", fill="x", expand=True, padx=6)
 
@@ -3087,10 +3302,11 @@ class ModuloBancoApp:
         self.btn_tx_escanear = ctk.CTkButton(r_comp, text="🖨 Escanear + OCR", width=160,
                                             command=lambda: self._procesar_comprobante_tx(escanear=True))
         self.btn_tx_escanear.pack(side="left", padx=4)
-        self.btn_tx_telefono = ctk.CTkButton(r_comp, text="📱 Teléfono", width=130,
-                                            fg_color="#8e44ad", hover_color="#6c3483",
-                                            command=self.escanear_comprobante_tx_telefono)
-        self.btn_tx_telefono.pack(side="left", padx=4)
+        # 📱 Escanear con el teléfono y leer el comprobante con OCR
+        self.btn_tx_tel = ctk.CTkButton(r_comp, text="📱 Escanear con el teléfono", width=200,
+                                        fg_color="#8e44ad", hover_color="#6c3483",
+                                        command=self.escanear_transferencia_telefono)
+        self.btn_tx_tel.pack(side="left", padx=4)
         ctk.CTkButton(r_comp, text="Quitar adjunto", width=120,
                       command=self._quitar_comprobante_tx).pack(side="left", padx=4)
         self.lbl_tx_archivo = ctk.CTkLabel(r_comp, text="Sin comprobante", anchor="w")
@@ -3098,38 +3314,40 @@ class ModuloBancoApp:
 
         r5 = ctk.CTkFrame(f_form, fg_color="transparent"); r5.pack(fill="x", padx=12, pady=(4, 12))
         self.btn_tx_guardar = ctk.CTkButton(r5, text="💸 Realizar Transferencia", width=220, height=38,
-                                            font=("Arial", 13, "bold"), fg_color="#27ae60",
+                                            font=(FAMILIA, 13, "bold"), fg_color="#27ae60",
                                             hover_color="#1e8449", command=self.realizar_transferencia)
         self.btn_tx_guardar.pack(side="left", padx=(0, 8))
         self.btn_tx_editar = ctk.CTkButton(r5, text="✏️ Editar", width=120, height=38,
-                                           font=("Arial", 12, "bold"), fg_color="#2980b9",
+                                           font=(FAMILIA, 12, "bold"), fg_color="#2980b9",
                                            hover_color="#1f618d", command=self.editar_transferencia)
         self.btn_tx_editar.pack(side="left", padx=(0, 8))
         # Este botón solo se muestra mientras se está editando una transferencia
         self.btn_tx_cancelar = ctk.CTkButton(r5, text="✖ Cancelar edición", width=150, height=38,
-                                             font=("Arial", 12, "bold"), fg_color="#7f8c8d",
+                                             font=(FAMILIA, 12, "bold"), fg_color="#7f8c8d",
                                              hover_color="#606b6b",
                                              command=self.cancelar_edicion_transferencia)
         ctk.CTkButton(r5, text="🗑️ Eliminar", width=120, height=38,
-                      font=("Arial", 12, "bold"), fg_color="#e74c3c", hover_color="#c0392b",
+                      font=(FAMILIA, 12, "bold"), fg_color="#e74c3c", hover_color="#c0392b",
                       command=self.eliminar_transferencia).pack(side="left")
 
-        self.lbl_tx_modo = ctk.CTkLabel(f_form, text="", font=("Arial", 11, "bold"),
+        self.lbl_tx_modo = ctk.CTkLabel(f_form, text="", font=(FAMILIA, 11, "bold"),
                                         text_color="#2980b9")
         self.lbl_tx_modo.pack(anchor="w", padx=12, pady=(0, 10))
 
         ctk.CTkLabel(self.tab_transferencias, text="Historial de transferencias:",
-                     font=("Arial", 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=5, pady=(0, 4))
+                     font=(FAMILIA, 13, "bold"), text_color="#1f538d").pack(anchor="w", padx=5, pady=(0, 4))
         f_tabla = ctk.CTkFrame(self.tab_transferencias, fg_color="transparent")
         f_tabla.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-        columnas = ("fecha", "origen", "destino", "descripcion", "monto", "comision", "referencia")
+        columnas = ("fecha", "origen", "destino", "descripcion", "monto", "comision", "total", "referencia")
         self.tabla_tx = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
+        preparar_colores_montos(self.tabla_tx)
         for col, txt, w, anc in (("fecha", "Fecha", 100, "center"),
                                  ("origen", "Banco Origen", 200, "center"),
                                  ("destino", "Banco Destino", 200, "center"),
                                  ("descripcion", "Descripción", 260, "w"),
                                  ("monto", "Monto", 130, "e"),
                                  ("comision", "Comisión", 100, "e"),
+                                 ("total", "Total debitado", 130, "e"),
                                  ("referencia", "Referencia", 150, "w")):
             self.tabla_tx.heading(col, text=txt)
             self.tabla_tx.column(col, width=w, anchor=anc)
@@ -3293,14 +3511,15 @@ class ModuloBancoApp:
         ventana.title("Comprobante escaneado (OCR)")
         ventana.geometry("900x640")
         ventana.transient(self.parent_frame)
+        traer_al_frente(ventana)
         ctk.CTkLabel(ventana, text="COMPROBANTE ESCANEADO - REVISE ANTES DE USAR",
-                     font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(10, 2))
+                     font=(FAMILIA, 14, "bold"), text_color="#1f538d").pack(pady=(10, 2))
         datos = resultado.get("datos") or {}
-        monto_txt = ("%.2f" % float(datos.get("monto") or 0)) if datos.get("monto") else "sin dato"
+        monto_txt = formatear_monto(datos.get("monto")) if datos.get("monto") else "sin dato"
         ctk.CTkLabel(ventana, text="Fecha: " + str(datos.get("fecha") or "sin dato")
                      + "   ·   Monto: " + monto_txt
                      + "   ·   Referencia: " + str(datos.get("referencia") or "sin dato"),
-                     font=("Arial", 11, "bold"), text_color="#2c3e50").pack(pady=(0, 6))
+                     font=(FAMILIA, 11, "bold"), text_color="#2c3e50").pack(pady=(0, 6))
         cuerpo = ctk.CTkFrame(ventana, fg_color="transparent")
         cuerpo.pack(fill="both", expand=True, padx=10, pady=4)
         f_izq = ctk.CTkFrame(cuerpo, fg_color="#f8f9fa")
@@ -3316,15 +3535,15 @@ class ModuloBancoApp:
                 ctk.CTkLabel(f_izq, text="", image=foto).pack(padx=6, pady=6)
                 ventana._foto_escaneo = foto
             except Exception:
-                ctk.CTkLabel(f_izq, text="(sin vista previa)", font=("Arial", 10)).pack(padx=8, pady=8)
+                ctk.CTkLabel(f_izq, text="(sin vista previa)", font=(FAMILIA, 10)).pack(padx=8, pady=8)
         f_der = ctk.CTkFrame(cuerpo, fg_color="transparent")
         f_der.pack(side="left", fill="both", expand=True)
-        ctk.CTkLabel(f_der, text="Texto leído (OCR):", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f_der, text="Texto leído (OCR):", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         caja = ctk.CTkTextbox(f_der, width=420, height=430)
         caja.pack(fill="both", expand=True)
         caja.insert("1.0", resultado.get("texto") or "(sin texto legible)")
         if resultado.get("aviso"):
-            ctk.CTkLabel(ventana, text="Aviso: " + str(resultado["aviso"]), font=("Arial", 10),
+            ctk.CTkLabel(ventana, text="Aviso: " + str(resultado["aviso"]), font=(FAMILIA, 10),
                          text_color="#c0392b").pack(pady=(2, 0))
         barra = ctk.CTkFrame(ventana, fg_color="transparent")
         barra.pack(fill="x", pady=8)
@@ -3344,35 +3563,36 @@ class ModuloBancoApp:
         ctk.CTkButton(barra, text="Cerrar", width=120, height=34, fg_color="#7f8c8d",
                       hover_color="#606b6b", command=ventana.destroy).pack(side="left")
 
-    def escanear_comprobante_tx_telefono(self):
-        """📱 Escanea el comprobante de la transferencia con el teléfono."""
+    def escanear_transferencia_telefono(self):
+        """📱 Recibe la foto del comprobante desde el teléfono y la lee con OCR.
+
+        La imagen cae en la carpeta de escaneos (la que sincroniza rclone) y se
+        procesa igual que un archivo cargado: completa fecha, monto y referencia
+        en el formulario de transferencias.
+        """
         try:
-            try:
-                padre = self.parent_frame
-            except Exception:
-                padre = None
-            import escaner_movil as _mov
+            import escaner_movil
+        except Exception as error:
+            return messagebox.showerror(
+                "Escáner", "No se pudo cargar el escáner: " + str(error),
+                parent=self.parent_frame)
+        try:
+            config = dict(cargar_config())
+            config.update(leer_config_disco())
+        except Exception:
+            config = {}
 
-            def al_recibir(rutas, tipo):
-                if not rutas:
-                    return
+        def al_recibir(rutas, tipo_doc):
+            if rutas:
+                self._procesar_comprobante_tx(ruta=rutas[0], escanear=False)
 
-                def procesar():
-                    self._procesar_comprobante_tx(ruta=rutas[0])
-
-                try:
-                    (padre or self.parent_frame).after(0, procesar)
-                except Exception:
-                    procesar()
-
-            _mov.escanear_desde_telefono(padre, config=None, al_recibir=al_recibir,
-                                         titulo_extra="Banco · comprobante de transferencia")
-        except Exception as e:
-            try:
-                from tkinter import messagebox as _mb
-                _mb.showerror("Escáner por teléfono", str(e), parent=self.parent_frame)
-            except Exception:
-                print("Escáner por teléfono:", e)
+        try:
+            escaner_movil.escanear_desde_telefono(
+                self.parent_frame, config, al_recibir=al_recibir,
+                titulo_extra="Banco · comprobante de transferencia")
+        except Exception as error:
+            messagebox.showerror("Escáner", "No se pudo abrir el escáner: " + str(error),
+                                 parent=self.parent_frame)
 
     def _procesar_comprobante_tx(self, ruta="", escanear=False):
         if getattr(self, "_tx_ocr_ocupado", False):
@@ -3387,6 +3607,10 @@ class ModuloBancoApp:
         self.btn_tx_cargar.configure(state="disabled")
         self.btn_tx_escanear.configure(state="disabled")
         self.btn_tx_guardar.configure(state="disabled")
+        try:
+            self.btn_tx_tel.configure(state="disabled")
+        except Exception:
+            pass
         self.lbl_tx_archivo.configure(text="Escaneando / leyendo OCR...")
         progreso = None
         if escanear:
@@ -3395,15 +3619,16 @@ class ModuloBancoApp:
                 progreso.title("Escaneando comprobante de transferencia")
                 progreso.geometry("470x175")
                 progreso.transient(self.parent_frame)
+                traer_al_frente(progreso)
                 try:
                     progreso.grab_set()
                 except Exception:
                     pass
                 ctk.CTkLabel(progreso, text="Escaneando y leyendo el comprobante...",
-                             font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(18, 4))
+                             font=(FAMILIA, 13, "bold"), text_color="#1f538d").pack(pady=(18, 4))
                 ctk.CTkLabel(progreso, text="Coloque el comprobante en el cristal del escáner."
                                             + chr(10) + "Escanea a 300 ppp; si no se lee bien, repite a 600 ppp.",
-                             font=("Arial", 10), text_color="gray", justify="center").pack()
+                             font=(FAMILIA, 10), text_color="gray", justify="center").pack()
                 barra_prog = ctk.CTkProgressBar(progreso, width=340, mode="indeterminate")
                 barra_prog.pack(pady=10)
                 barra_prog.start()
@@ -3450,6 +3675,10 @@ class ModuloBancoApp:
             self.btn_tx_cargar.configure(state="normal")
             self.btn_tx_escanear.configure(state="normal")
             self.btn_tx_guardar.configure(state="normal")
+            try:
+                self.btn_tx_tel.configure(state="normal")
+            except Exception:
+                pass
             if token != self._tx_ocr_token:
                 self._mostrar_archivo_tx()
                 return
@@ -3601,11 +3830,6 @@ class ModuloBancoApp:
         except ValueError as exc:
             messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
             return
-        if validar_fecha_registro is not None:
-            permitido, aviso = validar_fecha_registro(fecha)
-            if not permitido:
-                messagebox.showwarning("Fecha fuera del corte del sistema", aviso, parent=self.parent_frame)
-                return
         archivo = self.tx_archivo_ruta or ""
         if archivo and archivo != self._tx_archivo_original:
             try:
@@ -3667,8 +3891,8 @@ class ModuloBancoApp:
             messagebox.showinfo("Éxito", "Transferencia actualizada correctamente.", parent=self.parent_frame)
         else:
             messagebox.showinfo("Éxito", f"Transferencia de {formatear_monto(monto)} registrada:\n"
-                                         f"• Egreso en {origen}: {formatear_monto(monto)}\n"
-                                         f"• Comisión separada: {formatear_monto(comision)}\n"
+                                         f"• Egreso total en {origen}: {formatear_monto(monto + comision)} "
+                                         f"({formatear_monto(monto)} + comisión {formatear_monto(comision)})\n"
                                          f"• Ingreso en {destino}: {formatear_monto(monto)}", parent=self.parent_frame)
 
     def cargar_transferencias(self):
@@ -3713,7 +3937,10 @@ class ModuloBancoApp:
             self.tabla_tx.insert("", tk.END, iid=str(t["id"]),
                                  values=(fecha_para_mostrar(t["fecha"]), t["origen"], t["destino"],
                                          t["descripcion"], formatear_monto(t["monto"]),
-                                         formatear_monto(t.get("comision", 0)), t.get("referencia", "")))
+                                         formatear_monto(t.get("comision", 0)),
+                                         formatear_monto(float(t["monto"] or 0)
+                                                         + float(t.get("comision", 0) or 0)),
+                                         t.get("referencia", "")))
 
     def refrescar_transferencias(self):
         try:
@@ -3755,6 +3982,57 @@ class ModuloBancoApp:
     # -----------------------------------------------------
     # TAB: CONCILIACION BANCARIA
     # -----------------------------------------------------
+    def _cargar_conciliacion_cuando_haya_bancos(self, intentos=60):
+        """Carga la conciliación del MES EN CURSO en cuanto los bancos están listos.
+
+        Los bancos llegan de la base en segundo plano; si todavía no están, se
+        reintenta cada 500 ms (hasta ~30 s). No depende de detectar la pestaña.
+        """
+        if not getattr(self, "bancos", None):
+            if intentos > 0:
+                try:
+                    self.frame_main.after(500, lambda: self._cargar_conciliacion_cuando_haya_bancos(intentos - 1))
+                except Exception:
+                    pass
+            return
+        try:
+            self.cmb_mes.set(mes_actual_etiqueta())      # 📅 mes en curso
+        except Exception:
+            pass
+        try:
+            self.generar_reporte()
+        except Exception as e:
+            print("Aviso - carga de conciliación:", e)
+
+    def _vigilar_tab_conciliacion(self):
+        """Detecta cuando se abre la pestaña de Conciliación: mes en curso + carga."""
+        try:
+            actual = str(self.tabview.get() or "")
+        except Exception:
+            actual = ""
+        es_conc = "conciliaci" in actual.lower()
+        anterior = getattr(self, "_tab_conc_visto", None)
+        if es_conc and actual != anterior:
+            if not getattr(self, "bancos", None):
+                # ⏳ los bancos aún se están cargando: se reintenta en 500 ms
+                pass
+            else:
+                self._tab_conc_visto = actual
+                try:
+                    self.cmb_mes.set(mes_actual_etiqueta())   # mes en curso
+                except Exception:
+                    pass
+                try:
+                    self.frame_main.after(80, self.generar_reporte)
+                except Exception:
+                    pass
+        elif not es_conc:
+            self._tab_conc_visto = None
+        try:
+            self.frame_main.after(500, self._vigilar_tab_conciliacion)
+        except Exception:
+            pass
+
     def _al_cambiar_tab_banco(self, valor=None):
         """Compatibilidad: carga los movimientos si la pestaña activa es Conciliación."""
         self._cargar_si_conciliacion()
@@ -3777,11 +4055,21 @@ class ModuloBancoApp:
             print("Aviso - carga de conciliación:", e)
 
     def construir_tab_conciliacion(self):
+        f_filtro = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
+        f_filtro.pack(fill="x", padx=15, pady=(5, 0))
+        self.var_solo_negativos = tk.BooleanVar(value=False)
+        self.var_solo_positivos = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(f_filtro, text="Solo negativos", variable=self.var_solo_negativos,
+                        font=(FAMILIA, 11),
+                        command=lambda: self._aplicar_filtro_montos("negativos")).pack(side="left")
+        ctk.CTkCheckBox(f_filtro, text="Solo positivos", variable=self.var_solo_positivos,
+                        font=(FAMILIA, 11),
+                        command=lambda: self._aplicar_filtro_montos("positivos")).pack(side="left", padx=(15, 0))
         f_sel = ctk.CTkFrame(self.tab_conciliacion, fg_color="#f8f9fa",
                              border_width=1, border_color="#e0e0e0", corner_radius=8)
         f_sel.pack(fill="x", padx=5, pady=(5, 10))
 
-        ctk.CTkLabel(f_sel, text="Banco a conciliar:", font=("Arial", 12, "bold")).pack(side="left", padx=(12, 6), pady=10)
+        ctk.CTkLabel(f_sel, text="Banco a conciliar:", font=(FAMILIA, 12, "bold")).pack(side="left", padx=(12, 6), pady=10)
         etiquetas = [construir_etiqueta_banco(b) for b in self.bancos]
         if not etiquetas:
             etiquetas = ["(Sin bancos configurados)"]
@@ -3791,57 +4079,79 @@ class ModuloBancoApp:
         if etiquetas:
             self.cmb_banco.set(etiquetas[0])
 
-        ctk.CTkLabel(f_sel, text="Periodo a conciliar:", font=("Arial", 12, "bold")).pack(side="left", padx=(20, 6), pady=10)
-        # 🗓️ Primera opción por defecto: todo lo registrado desde la Fecha de Comienzo
-        # del Sistema (Configuración General) hasta hoy.
-        valores_mes = [ETIQUETA_DESDE_COMIENZO] + construir_valores_mes()
-        self.cmb_mes = ctk.CTkComboBox(f_sel, values=valores_mes, width=210, state="readonly",
+        ctk.CTkLabel(f_sel, text="Mes a conciliar:", font=(FAMILIA, 12, "bold")).pack(side="left", padx=(20, 6), pady=10)
+        valores_mes = construir_valores_mes()
+        self.cmb_mes = ctk.CTkComboBox(f_sel, values=valores_mes, width=160, state="readonly",
                                          command=lambda _v=None: self.generar_reporte())
         self.cmb_mes.pack(side="left", padx=6, pady=10)
-        self.cmb_mes.set(ETIQUETA_DESDE_COMIENZO)
+        self.cmb_mes.set(mes_actual_etiqueta())
 
         f_btns = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
         f_btns.pack(fill="x", padx=5, pady=(0, 2))
-        ctk.CTkButton(f_btns, text="📄 Subir PDF Estado de Cuenta", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns, text="📄 Subir PDF Estado de Cuenta", font=(FAMILIA, 12, "bold"),
                       fg_color="#e67e22", hover_color="#ca6f1e",
                       command=self.subir_pdf).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns, text="🔄 Cargar Movimientos del Sistema", font=("Arial", 12, "bold"),
-                      fg_color="#1f538d", hover_color="#163b65",
-                      command=self.generar_reporte).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns, text="✅ Conciliar Seleccionados", font=("Arial", 12, "bold"),
+        # 📚 Lista de estados de cuenta ya guardados (banco, cuenta y período).
+        ctk.CTkButton(f_btns, text="📚 Estados cargados", width=170, font=(FAMILIA, 12, "bold"),
+                      fg_color="#7d6608", hover_color="#5b4a06",
+                      command=self.mostrar_estados_cargados).pack(side="left", padx=4)
+        # (El botón «Cargar Movimientos del Sistema» se quitó: la conciliación se
+        #  recarga sola al cambiar banco/mes, al entrar a la pestaña y tras cada
+        #  acción. Para forzar la lectura está F5.)
+        ctk.CTkButton(f_btns, text="🧠 Conciliar inteligente", width=190, fg_color="#6c3483", hover_color="#4a235a",
+                      command=self.abrir_conciliacion_inteligente).pack(side="left", padx=5)
+        ctk.CTkButton(f_btns, text="✅ Conciliar Seleccionados", font=(FAMILIA, 12, "bold"),
                       fg_color="#27ae60", hover_color="#1e8449",
                       command=self.conciliar_seleccionados).pack(side="left", padx=4)
 
         f_btns2 = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
         f_btns2.pack(fill="x", padx=5, pady=(0, 8))
-        ctk.CTkButton(f_btns2, text="🏦 Asignar cuenta",
-                      font=("Arial", 12, "bold"), fg_color="#16a085", hover_color="#117a65",
-                      command=self.asignar_cuenta_a_movimientos).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="➕ Registro de Ingresos / Egresos / Cruzadas", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="➕ Registro de Ingresos / Egresos / Cruzadas", font=(FAMILIA, 12, "bold"),
                       fg_color="#8e44ad", hover_color="#703688",
                       command=self.agregar_movimiento_manual).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="🧾 Asentar ITF", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="🧾 Asentar ITF", font=(FAMILIA, 12, "bold"),
                       fg_color="#b7950b", hover_color="#9a7d0a",
                       command=self.asentar_itf).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="✏️ Editar / Corregir", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="✏️ Editar / Corregir", font=(FAMILIA, 12, "bold"),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=self.corregir_movimiento).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="🗑️ Eliminar", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="🗑️ Eliminar", font=(FAMILIA, 12, "bold"),
                       fg_color="#c0392b", hover_color="#96281b",
                       command=self.eliminar_movimiento_conciliacion).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="♻️ Restaurar Eliminados", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="♻️ Restaurar Eliminados", font=(FAMILIA, 12, "bold"),
                       fg_color="#16a085", hover_color="#117a65",
                       command=self.restaurar_ignorados).pack(side="left", padx=4)
-        ctk.CTkButton(f_btns2, text="💾 Exportar", font=("Arial", 12, "bold"),
+        ctk.CTkButton(f_btns2, text="🗑️ Eliminar Ocultos", font=(FAMILIA, 12, "bold"),
+                      fg_color="#922b21", hover_color="#641e16",
+                      command=self.eliminar_ocultos_definitivo).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns2, text="💾 Exportar", font=(FAMILIA, 12, "bold"),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=self.exportar_reporte).pack(side="left", padx=4)
+
+        # 📊 Fila propia para las herramientas de control (antes se cortaban abajo).
+        f_btns3 = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
+        f_btns3.pack(fill="x", padx=5, pady=(0, 4))
+        ctk.CTkButton(f_btns3, text="📋 Faltantes / Sobrantes", width=210,
+                      font=(FAMILIA, 12, "bold"), fg_color="#1f538d", hover_color="#163b65",
+                      command=lambda: self._mostrar_faltantes_banco(
+                          self.banco_seleccionado(), [], self.movimientos_pdf)
+                      ).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns3, text="🧹 Duplicados", width=150,
+                      font=(FAMILIA, 12, "bold"), fg_color="#7d6608", hover_color="#5b4a06",
+                      command=self.limpiar_duplicados).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns3, text="📊 Resumen del período", width=200,
+                      font=(FAMILIA, 12, "bold"), fg_color="#117a65", hover_color="#0b5345",
+                      command=self.mostrar_resumen).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns3, text="🔍 Diferencias por asiento", width=210,
+                      font=(FAMILIA, 12, "bold"), fg_color="#8e44ad", hover_color="#6c3483",
+                      command=self.mostrar_diferencias_importe).pack(side="left", padx=4)
 
         self.f_resumen = ctk.CTkFrame(self.tab_conciliacion, fg_color="#eaf2f8",
                                       border_width=1, border_color="#d4e6f1", corner_radius=8)
         self.f_resumen.pack(fill="x", padx=5, pady=(0, 8))
         self.lbl_resumen = ctk.CTkLabel(self.f_resumen, text="Seleccione un banco, suba el PDF del estado de cuenta "
                                                              "y cargue los movimientos del sistema.",
-                                        font=("Arial", 12), text_color="#1f538d", justify="left")
+                                        font=(FAMILIA, 12), text_color="#1f538d", justify="left")
         self.lbl_resumen.pack(anchor="w", padx=12, pady=10)
 
         # 🔄 Los movimientos del sistema se cargan SOLOS al abrir la conciliación
@@ -3854,29 +4164,29 @@ class ModuloBancoApp:
         self.f_faltantes = ctk.CTkFrame(self.tab_conciliacion, fg_color="#fdebd0",
                                         border_width=1, border_color="#f5cba7", corner_radius=8)
         self.f_faltantes.pack(fill="x", padx=5, pady=(0, 6))
-        self.lbl_faltantes = ctk.CTkLabel(self.f_faltantes, text="", font=("Arial", 12, "bold"),
+        self.lbl_faltantes = ctk.CTkLabel(self.f_faltantes, text="", font=(FAMILIA, 12, "bold"),
                                           text_color="#a04000", justify="left")
         self.lbl_faltantes.pack(side="left", padx=12, pady=8)
         # 🧾 Se abre la ventana para ELEGIR, DESCRIBIR e incluir los diferenciales
         self.btn_faltantes = ctk.CTkButton(
             self.f_faltantes, text="🧾 Ver diferenciales…", width=190,
-            font=("Arial", 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
+            font=(FAMILIA, 11, "bold"), fg_color="#e67e22", hover_color="#ca6f1e",
             command=self.abrir_diferenciales)
         self.btn_faltantes.pack(side="right", padx=(6, 12), pady=8)
         # 📊 Exportar los diferenciales a Excel (ventana actual o historial completo)
         self.btn_exportar_dif = ctk.CTkButton(
             self.f_faltantes, text="📊 Exportar a Excel", width=160,
-            font=("Arial", 11, "bold"), fg_color="#1e8449", hover_color="#196f3d",
+            font=(FAMILIA, 11, "bold"), fg_color="#1e8449", hover_color="#196f3d",
             command=lambda: VentanaDiferenciales.exportar_desde_modulo(self))
         self.btn_exportar_dif.pack(side="right", padx=6, pady=8)
 
         f_buscar = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
         f_buscar.pack(fill="x", padx=5, pady=(0, 4))
-        ctk.CTkLabel(f_buscar, text="🔍 Buscar:", font=("Arial", 12, "bold")).pack(side="left", padx=(4, 6))
+        ctk.CTkLabel(f_buscar, text="🔍 Buscar:", font=(FAMILIA, 12, "bold")).pack(side="left", padx=(4, 6))
         self.ent_buscar_conc = ctk.CTkEntry(
             f_buscar, placeholder_text="cualquier columna: fecha, monto, descripción, tipo…", width=460)
         self.ent_buscar_conc.pack(side="left")
-        ctk.CTkButton(f_buscar, text="✖ Limpiar", width=90, font=("Arial", 11),
+        ctk.CTkButton(f_buscar, text="✖ Limpiar", width=90, font=(FAMILIA, 11),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=self.limpiar_busqueda_conc).pack(side="left", padx=8)
         self.ent_buscar_conc.bind("<KeyRelease>", lambda _e: self.filtrar_conciliacion_inline())
@@ -3886,6 +4196,7 @@ class ModuloBancoApp:
         columnas = ("estado", "fecha", "documento", "descripcion", "tipo", "monto", "origen", "saldo")
         self.tabla_conc = ttk.Treeview(f_tabla, columns=columnas, show="headings",
                                        selectmode="extended")
+        preparar_colores_montos(self.tabla_conc)
         for col, txt, w, anc in (("estado", "Estado", 140, "center"),
                                  ("fecha", "Fecha", 95, "center"),
                                  ("documento", "N° Documento", 140, "center"),
@@ -3906,7 +4217,13 @@ class ModuloBancoApp:
         hsb.pack(side="bottom", fill="x")
         self.tabla_conc.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        self.tabla_conc.bind("<Delete>", lambda _e: self.eliminar_movimiento_conciliacion())
+        # ⌨️ En un teclado Mac la tecla de borrar envía <BackSpace> (el borrado
+        #    hacia delante es fn+Delete). Se escucha SOLO en macOS: en Windows
+        #    <BackSpace> es la tecla de retroceso y borraría sin querer.
+        _teclas_borrar = ("<Delete>", "<BackSpace>") if sys.platform == "darwin" else ("<Delete>",)
+        for _tecla_borrar in _teclas_borrar:
+            self.tabla_conc.bind(_tecla_borrar,
+                                 lambda _e: self.eliminar_movimiento_conciliacion())
         # Doble clic: abre el editor del movimiento (pago del módulo o corrección simple)
         self.tabla_conc.bind("<Double-1>", lambda _e: (
             self.corregir_movimiento() if self.tabla_conc.selection() else None))
@@ -3918,14 +4235,34 @@ class ModuloBancoApp:
         self.tabla_conc.bind("<Control-Button-1>", lambda e: self._menu_contextual_movimiento(
             e, self.tabla_conc, self.filas_conciliacion))
         self.tabla_conc.tag_configure("conciliado", background="#d5f5e3")
+        self.tabla_conc.tag_configure("pendiente", background="#fef9e7")
         self.tabla_conc.tag_configure("diferencia", background="#fadbd8")
         self.tabla_conc.tag_configure("estado_cuenta", background="#d6eaf8")
+        # Asiento de un mes SIN estado de cuenta cargado (mes en curso): gris.
+        self.tabla_conc.tag_configure("sin_estado", background="#eaecee")
 
         f_pie = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
         f_pie.pack(fill="x", padx=5)
-        ctk.CTkButton(f_pie, text="👁 Ver Texto Extraído del PDF", width=220, font=("Arial", 11),
+        ctk.CTkButton(f_pie, text="👁 Ver Texto Extraído del PDF", width=220, font=(FAMILIA, 11),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=self.mostrar_texto_pdf).pack(side="left")
+        # (Los botones Faltantes / Duplicados / Resumen están en la fila de abajo:
+        #  acá no entraban y se veían cortados.)
+        # 🎨 Leyenda de colores: el color indica el estado de CONCILIACIÓN,
+        #    no si está pagado o cancelado (eso se ve en el módulo de Compras).
+        #    Se usan cuadraditos de texto («■») con color propio: los emojis de
+        #    color 🟩🟥🟦 no se dibujan en todas las fuentes de Windows.
+        for _color, _texto in (("#2874a6", "Manual pendiente"),
+                               ("#c0392b", "Falta conciliar"),
+                               ("#27ae60", "Conciliado")):
+            ctk.CTkLabel(f_pie, text="■ " + _texto, font=(FAMILIA, 11),
+                         text_color=_color).pack(side="right", padx=10)
+
+        # 🔄 Carga inicial de la conciliación (mes en curso) en cuanto haya bancos
+        try:
+            self.frame_main.after(600, self._cargar_conciliacion_cuando_haya_bancos)
+        except Exception:
+            pass
 
     def banco_seleccionado(self):
         etiquetas = [construir_etiqueta_banco(b) for b in self.bancos]
@@ -3943,7 +4280,2764 @@ class ModuloBancoApp:
             self.cmb_banco.set(et)
         self.tabview.set(" 🧾 Conciliación Bancaria ")
 
-    def _guardar_movimientos_pdf(self, banco, movs):
+    # =========================================================
+    # 🧠 CONCILIACIÓN INTELIGENTE (pantalla de revisión)
+    #    Motor: conciliacion_inteligente.py
+    #    Nada se concilia solo: aquí se APRUEBA o RECHAZA.
+    # =========================================================
+    def abrir_conciliacion_inteligente(self):
+        """Analiza el estado de cuenta cargado y muestra las propuestas."""
+        try:
+            import conciliacion_inteligente as ci
+        except Exception as error:
+            messagebox.showerror("Conciliación inteligente",
+                                 "No se encontró el motor conciliacion_inteligente.py\n%s"
+                                 % error, parent=self.parent_frame)
+            return
+        banco = self.banco_seleccionado()
+        if not banco:
+            messagebox.showinfo("Conciliación inteligente",
+                                "Primero seleccione el banco a conciliar.",
+                                parent=self.parent_frame)
+            return
+        movs = getattr(self, "movimientos_pdf", None) or []
+        if not movs:
+            try:
+                movs = self._cargar_movimientos_pdf(
+                    banco, mes_etiqueta_a_key(self.cmb_mes.get())) or []
+            except Exception:
+                movs = []
+        if not movs:
+            messagebox.showinfo("Conciliación inteligente",
+                                "Primero suba el Estado de Cuenta (PDF).",
+                                parent=self.parent_frame)
+            return
+        ventana = ctk.CTkToplevel(self.parent_frame)
+        ventana.title("🧠 Conciliación inteligente · revisar propuestas")
+        ventana.geometry("1250x640")
+        ventana.resizable(True, True)
+        try:
+            ventana.transient(self.parent_frame)
+        except Exception:
+            pass
+        traer_al_frente(ventana)
+
+        barra = ctk.CTkFrame(ventana)
+        barra.pack(fill="x", padx=10, pady=8)
+        ctk.CTkLabel(barra, text="Movimiento del banco", font=(FAMILIA, 12, "bold")).pack(side="left", padx=6)
+        ctk.CTkLabel(barra, text="   ·   ").pack(side="left")
+        ctk.CTkLabel(barra, text="Días de desfase:", font=(FAMILIA, 11)).pack(side="left", padx=(16, 4))
+        ent_dias = ctk.CTkEntry(barra, width=60)
+        # 5 días por defecto; se recuerda el último valor usado en esta sesión
+        try:
+            dias_guardados = int(getattr(self, "_dias_desfase", 5) or 5)
+        except Exception:
+            dias_guardados = 5
+        ent_dias.insert(0, str(dias_guardados))
+        ent_dias.pack(side="left")
+        ctk.CTkLabel(barra, text="(días después de la fecha contable)",
+                     font=(FAMILIA, 10), text_color="#7f8c8d").pack(side="left", padx=4)
+        # ⚡ Coincidencia 100 % (importe exacto y UN solo candidato): se concilia
+        #    sola. La casilla permite apagarlo en cualquier momento.
+        chk_auto = ctk.CTkCheckBox(barra, text="Conciliar los de 100%",
+                                   font=(FAMILIA, 11))
+        chk_auto.select()
+        chk_auto.pack(side="left", padx=(18, 4))
+
+        marco = ctk.CTkFrame(ventana)
+        marco.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        columnas = ("fecha_banco", "desc_banco", "monto_banco", "fecha_cont", "desc_cont",
+                    "monto_sistema", "dias", "estado", "confianza")
+        tabla = ttk.Treeview(marco, columns=columnas, show="headings", height=18)
+        preparar_colores_montos(tabla)
+        titulos = {"fecha_banco": ("Fecha banco", 100), "desc_banco": ("Descripción banco", 250),
+                   "monto_banco": ("Monto banco", 100), "fecha_cont": ("Fecha contable", 100),
+                   "desc_cont": ("Descripción contable", 250), "monto_sistema": ("Monto sistema", 100),
+                   "dias": ("Días", 50), "estado": ("Estado", 180), "confianza": ("Confianza", 80)}
+        for col in columnas:
+            texto, ancho = titulos[col]
+            tabla.heading(col, text=texto)
+            tabla.column(col, width=ancho, anchor="center" if col in ("dias", "confianza", "importe") else "w")
+        desplaz = ttk.Scrollbar(marco, orient="vertical", command=tabla.yview)
+        tabla.configure(yscrollcommand=desplaz.set)
+        tabla.pack(side="left", fill="both", expand=True)
+        desplaz.pack(side="right", fill="y")
+
+        estado_ventana = {"propuestas": [], "aplicadas": set()}
+
+        def _cargar_propuestas():
+            """Lanza el cálculo en un HILO y pinta cuando termina.
+
+            El cálculo (sincronizar asientos + proponer) tarda varios segundos: si
+            corriera en el hilo de la pantalla, la barra quedaría congelada. Ahora
+            la barra se anima sola mientras el hilo trabaja.
+            """
+            for fila in tabla.get_children():
+                tabla.delete(fila)
+            dias = 5
+            try:
+                dias = int(str(ent_dias.get()).strip() or 5)
+            except Exception:
+                dias = 5
+            self._dias_desfase = dias
+            movimientos = [{"id": m.get("id") or i + 1, "banco": banco.get("banco", ""),
+                            "cuenta": banco.get("cuenta", ""),
+                            "fecha": m.get("fecha"), "descripcion": m.get("descripcion"),
+                            "monto": m.get("monto"), "pagina": m.get("pagina")}
+                           for i, m in enumerate(movs)]
+            # 📅 El período se lee del combo AQUÍ (hilo principal) y se pasa al hilo.
+            try:
+                _desde_h, _hasta_h = self._periodo_de_conciliacion()
+            except Exception:
+                _desde_h = _hasta_h = None
+
+            estado_ventana["animando"] = True
+            _pulso()
+
+            def _trabajo(estado):
+                try:
+                    estado["asientos"] = self._asientos_para_conciliar(
+                        banco, _desde_h, _hasta_h)
+                    estado["propuestas"] = ci.proponer(
+                        movimientos, estado["asientos"], ventana_dias=dias)
+                except Exception as error:
+                    estado["error"] = str(error)
+
+            ejecutar_en_hilo(ventana, _trabajo,
+                             al_terminar=lambda est: _pintar(est, movimientos, dias))
+
+        def _pulso():
+            """Mueve la barra del letrero mientras el hilo trabaja."""
+            try:
+                barra = estado_ventana.get("barra")
+                aviso = estado_ventana.get("aviso")
+                if barra is None or aviso is None or not estado_ventana.get("animando"):
+                    return
+                valor = estado_ventana.get("pulso", 0.1) + 0.03
+                if valor > 0.9:
+                    valor = 0.1
+                estado_ventana["pulso"] = valor
+                barra.set(valor)
+                aviso.after(110, _pulso)
+            except Exception:
+                pass
+
+        def _cerrar_letrero(mensaje=None):
+            """Cierra el letrero de «Analizando» y muestra el aviso pendiente."""
+            estado_ventana["animando"] = False
+            try:
+                if aviso is not None:
+                    texto_final = mensaje or mensaje_final[0]
+                    if texto_final:
+                        try:
+                            lbl_aviso.configure(text=texto_final,
+                                                text_color="#c0392b" if mensaje else "#1e8449")
+                            barra_aviso.set(1)
+                            aviso.update_idletasks()
+                            aviso.after(1500, aviso.destroy)   # se cierra solo
+                        except Exception:
+                            aviso.destroy()
+                    else:
+                        aviso.destroy()
+            except Exception:
+                pass
+            finally:
+                estado_ventana["aviso"] = None
+                estado_ventana["barra"] = None
+                estado_ventana["pulso"] = 0.1
+            texto_vacio = estado_ventana.pop("mensaje_vacio", "")
+            if texto_vacio:
+                try:
+                    messagebox.showinfo("Conciliación inteligente", texto_vacio,
+                                        parent=ventana)
+                except Exception:
+                    pass
+
+        def _pintar(estado, movimientos, dias):
+            """Dibuja el resultado (siempre en el hilo principal)."""
+            estado_ventana["animando"] = False
+            asientos = estado.get("asientos") or []
+            propuestas = estado.get("propuestas") or []
+            if estado.get("error"):
+                _cerrar_letrero(mensaje="❌ No se pudo analizar: %s" % estado["error"])
+                return
+            propuestas = [p for p in propuestas
+                          if (str(p.get("id_asiento")), str(p.get("fecha_banco")),
+                              round(float(p.get("importe_banco") or 0), 2))
+                          not in estado_ventana["aplicadas"]]
+            # ⚡ COINCIDENCIA 100 % (importe exacto + un único candidato): se concilia
+            #    sola, como pide el usuario. Queda registrada con origen_decision
+            #    = 'auto' en la auditoría, así se distingue de lo aprobado a mano y
+            #    se puede revertir desde 🕘 Historial. La casilla lo desactiva.
+            aplicadas_auto = 0
+            try:
+                auto_activo = bool(chk_auto.get())
+            except Exception:
+                auto_activo = True
+            if auto_activo:
+                for p in list(propuestas):
+                    try:
+                        if float(p.get("confianza") or 0) < 100:
+                            continue
+                        if self._aplicar_conciliacion_inteligente(banco, p, "APROBADO",
+                                                                  origen="auto"):
+                            aplicadas_auto += 1
+                            estado_ventana["aplicadas"].add(
+                                (str(p.get("id_asiento")), str(p.get("fecha_banco")),
+                                 round(float(p.get("importe_banco") or 0), 2)))
+                    except Exception as error:
+                        print("[Conciliación] automática:", error)
+                if aplicadas_auto:
+                    propuestas = [p for p in propuestas
+                                  if (str(p.get("id_asiento")), str(p.get("fecha_banco")),
+                                      round(float(p.get("importe_banco") or 0), 2))
+                                  not in estado_ventana["aplicadas"]]
+                    print("[Conciliación] conciliadas automáticamente: %d" % aplicadas_auto)
+            estado_ventana["propuestas"] = propuestas
+            try:
+                mensaje_final[0] = (
+                    ("✅ %d conciliada(s) automáticamente (100%%) · %d para revisar"
+                     % (aplicadas_auto, len(propuestas))) if aplicadas_auto else
+                    ("✅ %d propuesta(s) para revisar y aprobar" % len(propuestas)))
+            except Exception:
+                pass
+            if not propuestas:
+                # 📅 Se muestra el rango de fechas de cada lado: si no coinciden,
+                #    se entiende al instante que se está comparando contra otro mes.
+                def _rango(fechas):
+                    validas = sorted(normalizar_fecha(f) for f in fechas
+                                     if normalizar_fecha(f))
+                    if not validas:
+                        return ""
+                    return " (%s al %s)" % (validas[0], validas[-1])
+
+                rango_pdf = _rango([m.get("fecha") for m in movimientos])
+                rango_asi = _rango([a.get("fecha") for a in asientos])
+                # ⏳ El mensaje se muestra DESPUÉS de cerrar el letrero de «Analizando»
+                #    (si no, quedaba visible detrás del cartel).
+                estado_ventana["mensaje_vacio"] = (
+                    "No hay propuestas para este banco.\n\n"
+                    "• Estado de cuenta: %d movimiento(s)%s\n"
+                    "• Asientos pendientes: %d%s\n\n"
+                    "%s" % (len(movimientos), rango_pdf, len(asientos), rango_asi,
+                            "Todos los asientos de este banco ya figuran como CONCILIADOS."
+                            if asientos == [] else
+                            "Ninguno coincide en importe y fecha (máximo %d días).\n"
+                            "Si los pendientes son de otro mes, suba el estado de cuenta "
+                            "de ESE mes y elija ese período." % dias))
+            for indice, p in enumerate(propuestas):
+                tabla.insert("", "end", iid=str(indice + 1), values=(
+                    str(p["fecha_banco"])[:10], str(p["descripcion_banco"])[:55],
+                    formatear_monto(p["importe_banco"]), str(p["fecha_contable"])[:10],
+                    str(p["descripcion_contable"])[:55],
+                    formatear_monto(p["importe_contable"]), p["dias_desfase"],
+                    p["estado"] if not p.get("rivales")
+                    else "%s · %d candidatos" % (p["estado"], p.get("candidatos") or 2),
+                    "%d%%" % p["confianza"]))
+            self._resumen_revision = ci.resumen(propuestas, movimientos, asientos)
+            _cerrar_letrero()
+
+        def _aplicar_varias(decision):
+            seleccion = tabla.selection()
+            if not seleccion:
+                messagebox.showinfo("Conciliación",
+                                    "Seleccione una o más filas (Ctrl+clic o Shift+clic).",
+                                    parent=ventana)
+                return
+            aplicadas = 0
+            for iid in seleccion:
+                try:
+                    propuesta = estado_ventana["propuestas"][int(iid) - 1]
+                except Exception:
+                    continue
+                if self._aplicar_conciliacion_inteligente(banco, propuesta, decision):
+                    aplicadas += 1
+                    try:
+                        estado_ventana["aplicadas"].add(
+                            (str(propuesta.get("id_asiento")), str(propuesta.get("fecha_banco")),
+                             round(float(propuesta.get("importe_banco") or 0), 2)))
+                    except Exception:
+                        pass
+            if aplicadas:
+                messagebox.showinfo(
+                    "Conciliación",
+                    "%d movimiento(s) %s." % (
+                        aplicadas,
+                        "conciliados y registrados en la auditoría"
+                        if decision == "APROBADO" else "rechazados"),
+                    parent=ventana)
+            _cargar_propuestas()
+
+        def _aprobar():
+            _aplicar_varias("APROBADO")
+
+        def _rechazar():
+            _aplicar_varias("RECHAZADO")
+
+        def _ver_candidatos():
+            """Muestra los asientos que compiten por la línea seleccionada y deja elegir."""
+            seleccion = tabla.selection()
+            if len(seleccion) != 1:
+                messagebox.showinfo("Conciliación",
+                                    "Seleccione UNA fila para ver sus candidatos.",
+                                    parent=ventana)
+                return
+            try:
+                propuesta = estado_ventana["propuestas"][int(seleccion[0]) - 1]
+            except Exception:
+                return
+            detalle = list(propuesta.get("candidatos_detalle") or [])
+            if len(detalle) < 2:
+                messagebox.showinfo("Conciliación",
+                                    "Esta fila tiene un solo candidato:\n"
+                                    "se puede aprobar directo.", parent=ventana)
+                return
+            dlg = ctk.CTkToplevel(ventana)
+            dlg.title("Candidatos · %s del %s"
+                      % (formatear_moneda(propuesta.get("importe_banco")),
+                         str(propuesta.get("fecha_banco"))[:10]))
+            dlg.geometry("860x390")
+            try:
+                dlg.transient(ventana)
+            except Exception:
+                pass
+            traer_al_frente(dlg)
+            ctk.CTkLabel(dlg, text="Movimiento del banco", font=(FAMILIA, 12, "bold")).pack(
+                anchor="w", padx=12, pady=(10, 0))
+            ctk.CTkLabel(dlg, text="%s   ·   %s   ·   %s"
+                         % (str(propuesta.get("fecha_banco"))[:10],
+                            formatear_moneda(propuesta.get("importe_banco")),
+                            str(propuesta.get("descripcion_banco"))[:70]),
+                         font=(FAMILIA, 11), text_color="#34495e").pack(
+                anchor="w", padx=12, pady=(0, 8))
+            columnas_c = ("fecha", "descripcion", "dias", "origen")
+            tabla_c = ttk.Treeview(dlg, columns=columnas_c, show="headings", height=7)
+            preparar_colores_montos(tabla_c)
+            for col, titulo, ancho in (("fecha", "Fecha contable", 110),
+                                       ("descripcion", "Descripción contable", 520),
+                                       ("dias", "Días", 50),
+                                       ("origen", "Origen", 130)):
+                tabla_c.heading(col, text=titulo)
+                tabla_c.column(col, width=ancho)
+            tabla_c.pack(fill="both", expand=True, padx=12)
+            for i, cand in enumerate(detalle):
+                tabla_c.insert("", "end", iid=str(i),
+                               values=(str(cand.get("fecha"))[:10],
+                                       str(cand.get("descripcion"))[:80],
+                                       cand.get("dias"),
+                                       str(cand.get("tabla") or cand.get("id_asiento"))))
+
+            def _elegir():
+                sel = tabla_c.selection()
+                if not sel:
+                    messagebox.showinfo("Conciliación", "Seleccione un candidato.",
+                                        parent=dlg)
+                    return
+                elegido = detalle[int(sel[0])]
+                nueva = dict(propuesta)
+                nueva["id_asiento"] = elegido.get("id_asiento")
+                nueva["descripcion_contable"] = elegido.get("descripcion")
+                nueva["estado"] = "CONCILIADO EXACTO"
+                nueva["confianza"] = 100
+                if self._aplicar_conciliacion_inteligente(banco, nueva, "APROBADO"):
+                    estado_ventana["aplicadas"].add(
+                        (str(nueva.get("id_asiento")), str(nueva.get("fecha_banco")),
+                         round(float(nueva.get("importe_banco") or 0), 2)))
+                    dlg.destroy()
+                    _cargar_propuestas()
+
+            ctk.CTkButton(dlg, text="✅ Conciliar con este", width=200, fg_color="#1e8449",
+                          hover_color="#145a32", command=_elegir).pack(pady=10)
+
+        pie = ctk.CTkFrame(ventana)
+        pie.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(pie, text="✅ Aprobar", width=140, fg_color="#1e8449",
+                      hover_color="#145a32", command=_aprobar).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="✖ Rechazar", width=140, fg_color="#922b21",
+                      hover_color="#641e16", command=_rechazar).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="🔎 Candidatos", width=132, fg_color="#5b2c6f",
+                      hover_color="#3d1c4a",
+                      command=_ver_candidatos).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="🔄 Recalcular", width=140, fg_color="#1f538d",
+                      hover_color="#163b65", command=_cargar_propuestas).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="📊 Reporte", width=130, fg_color="#b9770e",
+                      hover_color="#7e5109",
+                      command=lambda: self._mostrar_reporte_conciliacion(
+                          estado_ventana["propuestas"], movs,
+                          self._asientos_para_conciliar(banco),
+                          int(str(ent_dias.get()).strip() or 5))).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="📉 Saldos", width=120, fg_color="#1f538d",
+                      hover_color="#163b65",
+                      command=lambda: self._mostrar_validacion_saldos(
+                          banco, estado_ventana["propuestas"])).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="📋 Faltantes", width=130, fg_color="#7e5109",
+                      hover_color="#5b4a06",
+                      command=lambda: self._mostrar_faltantes_banco(
+                          banco, estado_ventana["propuestas"], movs)).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="🕘 Historial", width=130, fg_color="#7d6608",
+                      hover_color="#5b4a06",
+                      command=lambda: self._historial_conciliaciones(banco)).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=ventana.destroy).pack(side="right", padx=6)
+        # ⏳ indicador mientras analiza (la primera carga tarda por la sincronización)
+        aviso = None
+        mensaje_final = [""]
+        try:
+            try:
+                ventana.update_idletasks()
+                ventana.update()
+            except Exception:
+                pass
+            aviso = ctk.CTkToplevel(ventana)
+            try:
+                aviso.attributes("-topmost", True)
+            except Exception:
+                pass
+            aviso.title("Conciliación inteligente")
+            aviso.geometry("420x120")
+            try:
+                aviso.transient(ventana)
+                aviso.resizable(False, False)
+                x = ventana.winfo_rootx() + (ventana.winfo_width() // 2) - 210
+                y = ventana.winfo_rooty() + (ventana.winfo_height() // 2) - 60
+                aviso.geometry("+%d+%d" % (max(0, x), max(0, y)))
+            except Exception:
+                pass
+            lbl_aviso = ctk.CTkLabel(aviso, text="⏳ Analizando movimientos del banco…",
+                                     font=(FAMILIA, 14, "bold"))
+            lbl_aviso.pack(pady=(22, 6))
+            barra_aviso = ctk.CTkProgressBar(aviso, width=350)
+            barra_aviso.pack(pady=(0, 16))
+            barra_aviso.set(0.1)
+            aviso.update_idletasks()
+            # 🔗 Se guardan las referencias para que el análisis pueda ir moviendo la barra.
+            estado_ventana["aviso"] = aviso
+            estado_ventana["barra"] = barra_aviso
+            aviso.update_idletasks()
+            aviso.update()
+            # 🔝 forzar el dibujado ANTES del trabajo pesado (Tk no pinta si el
+            #    hilo principal se queda calculando)
+            try:
+                import time as _t
+                aviso.lift()
+                aviso.attributes("-topmost", True)
+                aviso.focus_force()
+                for _pasada in range(6):
+                    aviso.update_idletasks()
+                    aviso.update()
+                    _t.sleep(0.05)
+            except Exception as error:
+                print("[Conciliación] dibujar letrero:", error)
+        except Exception as error:
+            print("[Conciliación] indicador:", error)
+            aviso = None
+        # 🚀 El cálculo va en un hilo: _pintar() cierra el letrero al terminar.
+        _cargar_propuestas()
+
+    def _buscar_duplicados(self, banco, mes=None):
+        """Asientos MANUALES que copian una línea del banco ya cubierta.
+
+        Antes se agrupaba por (fecha, importe exacto), así que no veía los casos
+        en que el sistema registra el principal y el manual el total con comisión
+        (1,200.00 vs 1,204.80). Ahora se empareja cada asiento con su línea real
+        del estado de cuenta y se marca el manual que sobra.
+
+        Devuelve grupos con 'fecha', 'monto', 'asientos' (tuplas de la base) y
+        'lineas'. Sólo se proponen manuales: nunca se borra un asiento del sistema.
+        """
+        if mes:
+            try:
+                lineas = self._cargar_movimientos_pdf(banco, mes) or []
+            except Exception as error:
+                print("[Conciliación] líneas para duplicados:", error)
+                lineas = []
+        else:
+            try:
+                lineas = self._cargar_movimientos_pdf(banco) or []
+            except Exception as error:
+                print("[Conciliación] líneas para duplicados:", error)
+                lineas = []
+        if not lineas:
+            return []           # sin estado de cuenta no hay contra qué comparar
+
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return []
+        try:
+            with conn.cursor() as c:
+                # 📄 Se trae el NÚMERO DE FACTURA de cada asiento: dos facturas con
+                #    el mismo importe y fecha pero número distinto NO son duplicados.
+                c.execute("""SELECT b.id, b.fecha, b.monto, COALESCE(b.origen,''),
+                                    COALESCE(b.estado,''), COALESCE(b.descripcion,''),
+                                    UPPER(TRIM(COALESCE(f.numero_documento,
+                                                        f2.numero_documento, ''))),
+                                    COALESCE(b.tabla,''), COALESCE(b.id_movimiento,0)
+                             FROM conciliacion_bancaria b
+                             LEFT JOIN pagos_comprobantes p
+                                    ON (b.tabla = 'pagos_comprobantes' AND p.id = b.id_movimiento)
+                             LEFT JOIN facturas_recibidas f
+                                    ON f.id = NULLIF(p.id_factura, 0)
+                             LEFT JOIN facturas_recibidas f2
+                                    ON f2.id = NULLIF(b.id_gasto_compras, 0)
+                             WHERE UPPER(COALESCE(b.banco,'')) = UPPER(%s)
+                               AND COALESCE(b.cuenta,'') = %s""",
+                          (banco.get("banco", ""), banco.get("cuenta", "") or ""))
+                filas = c.fetchall()
+        except Exception as error:
+            print("[Conciliación] buscar duplicados:", error)
+            return []
+        finally:
+            liberar_conexion(conn)
+
+        asientos = []
+        sistema_en_tabla = set()
+        sistema_claves = set()
+        for fila in filas:
+            if mes and not clave_fecha(fila[1]).startswith(mes):
+                continue
+            origen = str(fila[3] or "")
+            if origen.startswith("s:"):
+                sistema_en_tabla.add((str(fila[7] or ""), int(fila[8] or 0)))
+                sistema_claves.add((clave_fecha(fila[1]),
+                                    round(float(fila[2] or 0), 2)))
+            asientos.append({
+                "id": fila[0], "fecha": fila[1], "monto": float(fila[2] or 0),
+                "origen": origen, "estado": str(fila[4] or ""),
+                "descripcion": str(fila[5] or ""), "numero": str(fila[6] or ""),
+                "_prioridad": self._prioridad_asiento(origen, fila[4]),
+                "_raw": fila,
+            })
+        # 🧩 La tabla conciliacion_bancaria no siempre tiene TODOS los pagos del
+        #    sistema (los que nunca se conciliaron). Se agregan para comparar
+        #    contra el banco igual que hace el Resumen; nunca se borran.
+        try:
+            for s in (self._movimientos_de_banco(banco, mes=mes) or []):
+                if s.get("espejo_banco"):
+                    continue
+                tabla = str(s.get("tabla") or "")
+                idm = int(s.get("id") or 0)
+                if (tabla, idm) in sistema_en_tabla:
+                    continue
+                clave = (clave_fecha(s.get("fecha")),
+                         round(float(s.get("monto") or 0), 2))
+                if clave in sistema_claves:
+                    continue
+                origen_s = "s:%s" % (tabla or "sistema")
+                raw = (0, s.get("fecha", ""), float(s.get("monto") or 0),
+                       origen_s, "conciliado", s.get("descripcion", ""),
+                       str(s.get("documento") or ""), tabla, idm)
+                asientos.append({
+                    "id": 0, "fecha": s.get("fecha", ""),
+                    "monto": float(s.get("monto") or 0), "origen": origen_s,
+                    "estado": "conciliado",
+                    "descripcion": str(s.get("descripcion") or ""),
+                    "numero": str(s.get("documento") or ""),
+                    "_prioridad": self._prioridad_asiento(origen_s, "conciliado"),
+                    "_raw": raw,
+                })
+        except Exception as error:
+            print("[Conciliación] sistema para duplicados:", error)
+        try:
+            comision = cargar_comision_interbancaria()
+        except Exception:
+            comision = 0.0
+        match, duplicados, _sobrantes, _faltantes = emparejar_asientos_banco(
+            asientos, lineas, comision)
+        principal_por_linea = {j: i for i, j in match.items()}
+
+        grupos = {}
+        for i, j in duplicados:
+            asiento = asientos[i]
+            # 🔒 Sólo se propone borrar manuales. Los asientos del sistema y los
+            #    del estado de cuenta (e) nunca se tocan.
+            if asiento["origen"] != "manual":
+                continue
+            linea = lineas[j]
+            pi = principal_por_linea.get(j)
+            principal = asientos[pi] if pi is not None else None
+            if not _es_duplicado_manual_claro(asiento, linea, principal, comision):
+                continue
+            grupo = grupos.setdefault(j, {"linea": linea, "asientos": []})
+            if principal is not None and principal not in grupo["asientos"]:
+                grupo["asientos"].insert(0, principal)
+            if asiento not in grupo["asientos"]:
+                grupo["asientos"].append(asiento)
+
+        resultado = []
+        for j, grupo in grupos.items():
+            crudos = [a["_raw"] for a in grupo["asientos"]]
+            if not any(str(a[3] or "") == "manual" for a in crudos):
+                continue
+            linea = grupo["linea"]
+            resultado.append({
+                "fecha": clave_fecha(linea.get("fecha")),
+                "monto": abs(float(linea.get("monto") or 0)),
+                "asientos": crudos,
+                "fechas": {clave_fecha(a.get("fecha")) for a in grupo["asientos"]},
+                "lineas": 1,
+            })
+        return sorted(resultado, key=lambda g: (g["fecha"], -g["monto"]))
+
+    def _quitar_de_respaldos(self, banco, fecha, monto):
+        """Borra de los archivos respaldo_*.json las entradas de ese movimiento.
+
+        Los respaldos que guarda el módulo (respaldo_*.json) también se limpian:
+        si el movimiento se elimina, no debe quedar ni en la base ni en el JSON.
+        """
+        try:
+            import glob
+            from app_paths import DATA_DIR as _DATA
+        except Exception:
+            import glob
+            _DATA = None
+        carpetas = {os.path.dirname(os.path.abspath(__file__))}
+        try:
+            if _DATA:
+                carpetas.add(str(_DATA))
+        except Exception:
+            pass
+        _fecha_iso = normalizar_fecha(fecha)
+        _fecha_dma = fecha_para_mostrar(fecha)
+        try:
+            _monto = abs(float(monto or 0))
+        except Exception:
+            _monto = 0.0
+
+        def _es_el_mismo(item):
+            if not isinstance(item, dict):
+                return False
+            try:
+                if abs(abs(float(item.get("monto") or item.get("importe_banco") or 0)) - _monto) > 0.02:
+                    return False
+            except Exception:
+                return False
+            fecha_item = normalizar_fecha(item.get("fecha") or item.get("fecha_banco")
+                                          or item.get("fecha_pago") or "")
+            return fecha_item in (_fecha_iso, normalizar_fecha(_fecha_dma))
+
+        for carpeta in carpetas:
+            for ruta_json in glob.glob(os.path.join(carpeta, "respaldo_*.json")):
+                try:
+                    with open(ruta_json, "r", encoding="utf-8") as archivo:
+                        contenido = json.load(archivo)
+                except Exception:
+                    continue
+                cambiado = False
+                # 🧹 Si el respaldo ya estaba vacío, se borra el archivo y listo.
+                if ((isinstance(contenido, list) and not contenido)
+                        or (isinstance(contenido, dict)
+                            and not any(v for v in contenido.values() if v))):
+                    try:
+                        os.remove(ruta_json)
+                        print("[Conciliación] respaldo vacío eliminado:",
+                              os.path.basename(ruta_json))
+                    except Exception as error:
+                        print("[Conciliación] no se pudo borrar el respaldo vacío:", error)
+                    continue
+                if isinstance(contenido, list):
+                    nuevo = [x for x in contenido if not _es_el_mismo(x)]
+                    if len(nuevo) != len(contenido):
+                        contenido = nuevo
+                        cambiado = True
+                elif isinstance(contenido, dict):
+                    for clave, valor in list(contenido.items()):
+                        if isinstance(valor, list):
+                            nuevo = [x for x in valor if not _es_el_mismo(x)]
+                            if len(nuevo) != len(valor):
+                                contenido[clave] = nuevo
+                                cambiado = True
+                if cambiado:
+                    # 🧹 Si el respaldo quedó vacío, se borra el archivo directamente.
+                    _vacio = ((isinstance(contenido, list) and not contenido)
+                              or (isinstance(contenido, dict)
+                                  and not any(v for v in contenido.values() if v)))
+                    try:
+                        if _vacio:
+                            os.remove(ruta_json)
+                            print("[Conciliación] respaldo vacío eliminado:",
+                                  os.path.basename(ruta_json))
+                        else:
+                            with open(ruta_json, "w", encoding="utf-8") as archivo:
+                                json.dump(contenido, archivo, ensure_ascii=False, indent=1)
+                            print("[Conciliación] entrada quitada del respaldo:",
+                                  os.path.basename(ruta_json))
+                    except Exception as error:
+                        print("[Conciliación] no se pudo limpiar el respaldo:", error)
+
+    def _prioridad_asiento(self, origen, estado):
+        """Qué asiento se CONSERVA en un grupo duplicado (menor = se queda).
+
+        Se conserva el que viene del SISTEMA (pago real), después el que vino del
+        estado de cuenta, y por último el manual que se cargó desde el módulo.
+        """
+        origen = str(origen or "")
+        if origen == "s:pagos_comprobantes":
+            return 0
+        if origen.startswith("s:"):
+            return 1
+        if origen == "e":
+            return 2
+        return 3
+
+    def limpiar_duplicados(self):
+        """🧹 Quita los asientos sobrantes de cada grupo duplicado.
+
+        Deja UN asiento por (fecha, importe) — priorizando el del sistema — y borra
+        el resto. Antes de borrar guarda un respaldo JSON en la carpeta del sistema.
+        """
+        banco = self.banco_seleccionado() if hasattr(self, "banco_seleccionado") else None
+        if not banco:
+            messagebox.showerror("Duplicados", "Elija un banco primero.",
+                                 parent=self.parent_frame)
+            return
+        mes = mes_etiqueta_a_key(self.cmb_mes.get()) if hasattr(self, "cmb_mes") else ""
+        grupos = self._buscar_duplicados(banco, mes or None)
+        if not grupos:
+            messagebox.showinfo("Duplicados",
+                                "✅ No hay duplicados: cada línea tiene su asiento.",
+                                parent=self.parent_frame)
+            return
+        detalle = []
+        a_borrar = []
+        for grupo in grupos:
+            ordenados = sorted(
+                grupo["asientos"],
+                key=lambda a: (self._prioridad_asiento(a[3], a[4]),
+                               0 if clave_fecha(a[1]) in grupo.get("fechas", set()) else 1,
+                               a[0]))
+            # Se conservan tantos asientos como líneas tenga el estado de cuenta
+            # (mínimo 1). Antes se conservaba uno solo y se borraban de más.
+            cuantos = max(1, int(grupo["lineas"]))
+            conservar = ordenados[0]
+            sobran = ordenados[cuantos:]
+            detalle.append("   %s  %10s  línea(s): %d · asientos: %d"
+                           % (grupo["fecha"], formatear_monto(grupo["monto"]),
+                              grupo["lineas"], len(grupo["asientos"])))
+            for sobra in sobran:
+                # 🔒 Nunca se borra un asiento del SISTEMA (s:*) ni uno del estado
+                #    de cuenta (e): sólo los manuales que duplican a otro.
+                if str(sobra[3] or "") != "manual":
+                    continue
+                a_borrar.append({"grupo": grupo, "conservar": conservar, "borrar": sobra})
+        if not messagebox.askyesno(
+                "Limpiar duplicados",
+                "Se encontraron %d grupo(s) con asientos de más.\n"
+                "Se va a conservar el asiento DEL SISTEMA y borrar el resto.\n\n"
+                "%s\n\n¿Continuar? (se guarda un respaldo antes)"
+                % (len(grupos), "\n".join(detalle[:12])),
+                parent=self.parent_frame):
+            return
+        respaldo = {"creado": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "banco": banco.get("banco", ""), "cuenta": banco.get("cuenta", ""),
+                    "grupos": [{"fecha": g["fecha"], "monto": g["monto"],
+                                "conservar": {"id": g["asientos"][0][0]},
+                                "asientos": [{"id": a[0], "fecha": a[1],
+                                              "monto": float(a[2] or 0), "origen": a[3],
+                                              "estado": a[4], "descripcion": a[5]}
+                                             for a in g["asientos"]]}
+                               for g in grupos]}
+        ruta_respaldo = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "respaldo_duplicados_%s.json" % datetime.now().strftime("%Y-%m-%d_%H%M"))
+        try:
+            with open(ruta_respaldo, "w", encoding="utf-8") as archivo:
+                json.dump(respaldo, archivo, ensure_ascii=False, indent=1)
+        except Exception as error:
+            print("[Conciliación] respaldo duplicados:", error)
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return
+        borrados = 0
+        try:
+            with conn.cursor() as c:
+                for item in a_borrar:
+                    sobra = item["borrar"]
+                    c.execute("DELETE FROM conciliacion_bancaria WHERE id = %s", (sobra[0],))
+                    borrados += c.rowcount
+                    c.execute("""INSERT INTO conciliacion_auditoria
+                        (banco, cuenta, fecha_banco, descripcion_banco, importe_banco,
+                         sentido, estado, confianza, reglas, observacion, origen_decision,
+                         creado, activo)
+                        VALUES (%s,%s,%s,%s,%s,%s,'DUPLICADO_BORRADO',100,%s,%s,'auto',%s,TRUE)""",
+                              (banco.get("banco", ""), banco.get("cuenta", ""),
+                               str(sobra[1] or ""), str(sobra[5] or ""), float(sobra[2] or 0),
+                               "ingreso" if float(sobra[2] or 0) > 0 else "egreso",
+                               "se conserva el asiento id=%s" % item["conservar"][0],
+                               "duplicado en conciliación",
+                               datetime.now().strftime("%Y-%m-%d %H:%M")))
+            conn.commit()
+        except Exception as error:
+            print("[Conciliación] limpiar duplicados:", error)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            messagebox.showerror("Duplicados", "No se pudo limpiar:\n%s" % error,
+                                 parent=self.parent_frame)
+            return
+        finally:
+            liberar_conexion(conn)
+        self._cache_asientos = None
+        self._cache_saldos_extra = None
+        messagebox.showinfo(
+            "Duplicados",
+            "🧹 %d asiento(s) duplicado(s) eliminado(s) en %d grupo(s).\n"
+            "Se conservó el asiento del sistema.\n\nRespaldo: %s"
+            % (borrados, len(grupos), os.path.basename(ruta_respaldo)),
+            parent=self.parent_frame)
+        try:
+            self.generar_reporte()
+        except Exception:
+            pass
+
+    def mostrar_diferencias_importe(self, diferencias=None, periodo=None):
+        """🔍 Lista los asientos emparejados cuyo importe no coincide exacto.
+
+        Sirve para ubicar diferencias de centavos (redondeo) o comisiones que
+        antes solo se veían como un total en el Resumen del período.
+        """
+        if diferencias is None:
+            # 🔎 Solo se muestran las diferencias del banco y mes seleccionados.
+            #    Si la última lista calculada es de otro período, se recalcula.
+            banco_actual = self.banco_seleccionado()
+            if not banco_actual:
+                messagebox.showerror("Diferencias de importe",
+                                     "Elija un banco primero.",
+                                     parent=self.parent_frame)
+                return
+            mes_actual = (mes_etiqueta_a_key(self.cmb_mes.get())
+                          if hasattr(self, "cmb_mes") else "")
+            clave_actual = (banco_actual.get("banco", ""),
+                            banco_actual.get("cuenta", ""),
+                            mes_actual or "")
+            if getattr(self, "_diferencias_clave", None) != clave_actual:
+                try:
+                    self.parent_frame.configure(cursor="watch")
+                    self.parent_frame.update_idletasks()
+                except Exception:
+                    pass
+                try:
+                    self.generar_reporte()
+                except Exception as error:
+                    messagebox.showerror(
+                        "Diferencias de importe",
+                        "No se pudieron calcular las diferencias del período:\n%s" % error,
+                        parent=self.parent_frame)
+                    return
+                finally:
+                    try:
+                        self.parent_frame.configure(cursor="")
+                    except Exception:
+                        pass
+            if periodo is None and hasattr(self, "cmb_mes"):
+                periodo = self.cmb_mes.get()
+
+        datos = list(diferencias if diferencias is not None else
+                     (getattr(self, "_diferencias_importe", None) or []))
+        if not datos:
+            messagebox.showinfo(
+                "Diferencias de importe",
+                "No hay diferencias de importe entre los asientos y el banco.",
+                parent=self.parent_frame)
+            return
+        banco = self.banco_seleccionado()
+        etiqueta_banco = construir_etiqueta_banco(banco) if banco else ""
+        periodo_txt = (" · " + str(periodo)) if periodo else ""
+        v = ctk.CTkToplevel(self.parent_frame)
+        v.title("🔍 Diferencias de importe · %s%s" % (etiqueta_banco, periodo_txt))
+        v.geometry("1080x560")
+        try:
+            v.transient(self.parent_frame)
+            v.resizable(True, True)
+        except Exception:
+            pass
+        traer_al_frente(v)
+
+        marco = ctk.CTkFrame(v)
+        marco.pack(fill="both", expand=True, padx=10, pady=10)
+        ctk.CTkLabel(marco, text="Diferencias por asiento",
+                     font=(FAMILIA, 15, "bold"), text_color="#1f538d").pack(anchor="w", padx=8, pady=(6, 0))
+        ctk.CTkLabel(marco, text="Solo se muestran asientos emparejados con una línea del banco "
+                                  "cuyo importe no es idéntico.",
+                     font=(FAMILIA, 10, "italic"), text_color="#7f8c8d").pack(anchor="w", padx=8)
+
+        _repintar = lambda: None   # se define abajo; evita error si el control llama al crear
+        f_ctrl = ctk.CTkFrame(marco, fg_color="transparent")
+        f_ctrl.pack(fill="x", padx=8, pady=(4, 0))
+        var_sin_comisiones = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(f_ctrl, text="Ocultar comisiones",
+                        variable=var_sin_comisiones, font=(FAMILIA, 11),
+                        command=lambda: _repintar()).pack(side="left")
+        var_movimiento = tk.StringVar(value="Todos")
+        ctk.CTkSegmentedButton(f_ctrl, values=["Todos", "Ingresos", "Egresos"],
+                               variable=var_movimiento, width=250,
+                               command=lambda _valor: _repintar()).pack(side="left", padx=(15, 0))
+        label_cuentas = ctk.CTkLabel(f_ctrl, text="", font=(FAMILIA, 11),
+                                     text_color="#7f8c8d")
+        label_cuentas.pack(side="left", padx=(15, 0))
+
+        cont = ctk.CTkFrame(marco, fg_color="transparent")
+        cont.pack(fill="both", expand=True, padx=6, pady=6)
+        columnas = ("fecha_sistema", "fecha_banco", "documento", "descripcion",
+                    "monto_sistema", "monto_banco", "diferencia", "movimiento", "tipo")
+        titulos = (("fecha_sistema", "Fecha sistema", 100),
+                   ("fecha_banco", "Fecha banco", 100),
+                   ("documento", "Documento", 150),
+                   ("descripcion", "Descripción", 280),
+                   ("monto_sistema", "Monto sistema", 105),
+                   ("monto_banco", "Monto banco", 105),
+                   ("diferencia", "Diferencia", 90),
+                   ("movimiento", "Movimiento", 85),
+                   ("tipo", "Tipo", 90))
+        tabla = ttk.Treeview(cont, columns=columnas, show="headings", height=16)
+        preparar_colores_montos(tabla)
+        for col, texto, ancho in titulos:
+            tabla.heading(col, text=texto)
+            tabla.column(col, width=ancho,
+                         anchor="w" if col in ("documento", "descripcion") else "center")
+        vsb = ttk.Scrollbar(cont, orient="vertical", command=tabla.yview)
+        tabla.configure(yscrollcommand=vsb.set)
+        tabla.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        tabla.tag_configure("redondeo", background="#fef9e7")
+        tabla.tag_configure("comision", background="#eaf2f8")
+        tabla.tag_configure("diferencia", background="#fadbd8")
+
+        def _tipo_txt(t):
+            t = str(t or "").lower()
+            if t == "comision":
+                return "Comisión"
+            if t == "redondeo":
+                return "Redondeo"
+            return "Diferencia"
+
+        ordenados = sorted(datos, key=lambda f: (
+            str(f.get("fecha_sistema") or ""),
+            -abs(float(f.get("diferencia") or 0))))
+
+        pie = ctk.CTkFrame(v, fg_color="transparent")
+        pie.pack(fill="x", padx=12, pady=(0, 10))
+        label_pie = ctk.CTkLabel(pie, text="", font=(FAMILIA, 12, "bold"),
+                                 text_color="#1f538d")
+        label_pie.pack(side="left", padx=8)
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=v.destroy).pack(side="right", padx=4)
+
+        def _repintar():
+            for item in tabla.get_children():
+                tabla.delete(item)
+            modo_mov = var_movimiento.get()
+            visibles = []
+            n_ing = n_egr = 0
+            for f in ordenados:
+                if (var_sin_comisiones.get()
+                        and str(f.get("tipo") or "").lower() == "comision"):
+                    continue
+                es_ingreso = float(f.get("monto_sistema") or 0) > 0
+                if modo_mov == "Ingresos" and not es_ingreso:
+                    continue
+                if modo_mov == "Egresos" and es_ingreso:
+                    continue
+                visibles.append(f)
+                if es_ingreso:
+                    n_ing += 1
+                else:
+                    n_egr += 1
+            label_cuentas.configure(
+                text="Ingresos con diferencia: %d   ·   Egresos con diferencia: %d"
+                     % (n_ing, n_egr))
+            total_vis = 0.0
+            for i, f in enumerate(visibles):
+                dif = float(f.get("diferencia") or 0)
+                total_vis += dif
+                tag = str(f.get("tipo") or "diferencia").lower()
+                if tag not in ("redondeo", "comision", "diferencia"):
+                    tag = "diferencia"
+                tabla.insert("", "end", iid=str(i), tags=(tag,), values=(
+                    fecha_para_mostrar(f.get("fecha_sistema") or ""),
+                    fecha_para_mostrar(f.get("fecha_banco") or ""),
+                    f.get("documento") or "",
+                    (f.get("descripcion") or "")[:80],
+                    formatear_monto(f.get("monto_sistema") or 0),
+                    formatear_monto(f.get("monto_banco") or 0),
+                    formatear_monto(dif),
+                    ("Ingreso" if float(f.get("monto_sistema") or 0) > 0 else "Egreso"),
+                    _tipo_txt(tag)))
+            texto_pie = ("%d diferencia(s) por asiento   ·   Suma: %s"
+                         % (len(visibles), formatear_monto(total_vis)))
+            if var_sin_comisiones.get():
+                texto_pie += "   ·   sin comisiones"
+            try:
+                (n1, ni1, ti1, ne1, te1), (n2, ni2, ti2, ne2, te2) = self._ultimo_resumen
+                dif_neta = (ti1 - te1) - (ti2 - te2)
+                texto_pie += ("   ·   Diferencia neta del período: %s"
+                              % formatear_monto(dif_neta))
+            except Exception:
+                pass
+            label_pie.configure(text=texto_pie)
+
+        _repintar()
+
+    def mostrar_resumen(self):
+        """📊 Ventana con las cantidades y totales de cada lado del período.
+
+        Muestra, para el banco y mes elegidos: cuántos asientos tiene el sistema y
+        cuántas líneas el estado de cuenta, con ingresos y egresos separados, y la
+        diferencia de netos.
+        """
+        banco = self.banco_seleccionado()
+        if not banco:
+            messagebox.showerror("Resumen", "Elija un banco primero.",
+                                 parent=self.parent_frame)
+            return
+        mes_key = mes_etiqueta_a_key(self.cmb_mes.get()) if hasattr(self, "cmb_mes") else ""
+        etiqueta_mes = self.cmb_mes.get() if hasattr(self, "cmb_mes") else "Todos los meses"
+        ignorados = self.cargar_ignorados(banco)
+        ign_sistema = ignorados.get("sistema", set())
+        ign_pdf = ignorados.get("estado_cuenta", set())
+
+        # 🔎 Asegurar que las diferencias calculadas sean de ESTE banco/mes.
+        clave_resumen = (banco.get("banco", ""), banco.get("cuenta", ""), mes_key or "")
+        if getattr(self, "_diferencias_clave", None) != clave_resumen:
+            try:
+                self.generar_reporte()
+            except Exception as error:
+                print("[Resumen] no se pudieron recalcular las diferencias:", error)
+
+        try:
+            sistema = [m for m in self.cargar_movimientos_sistema(banco, mes=mes_key)
+                       if not m.get("espejo_banco")]
+        except Exception as error:
+            print("[Resumen] movimientos del sistema:", error)
+            sistema = []
+        sistema = [m for m in sistema
+                   if self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
+                                           m.get("id", 0), m.get("fecha"), m.get("monto"),
+                                           m.get("descripcion")) not in ign_sistema]
+        # 🏦 El banco muestra la transferencia + su comisión en UNA sola línea.
+        #    Se suma la comisión a la transferencia; si no, quedaba como un
+        #    «sobrante» de 4.80 aunque el banco ya la había cobrado.
+        comisiones = {}
+        sistema_sin_comision = []
+        for m in sistema:
+            desc = _norm_texto(m.get("descripcion", ""))
+            es_comision = (m.get("tabla") == "tx_comision" or m.get("es_comision")
+                           or ("comision" in desc
+                               and abs(float(m.get("monto") or 0)) <= 20))
+            if es_comision:
+                comisiones[(m.get("id"), normalizar_fecha(m.get("fecha")))] = \
+                    float(m.get("monto") or 0)
+            else:
+                sistema_sin_comision.append(m)
+        for m in sistema_sin_comision:
+            if m.get("tabla") == "transferencias_bancarias":
+                com = comisiones.get((m.get("id"), normalizar_fecha(m.get("fecha"))))
+                if com:
+                    m["monto"] = float(m.get("monto") or 0) + com
+        sistema = sistema_sin_comision
+        try:
+            manuales = [m for m in self.cargar_manuales(banco)
+                        if not mes_key
+                        or normalizar_fecha(m.get("fecha")).startswith(mes_key)]
+        except Exception as error:
+            print("[Resumen] manuales:", error)
+            manuales = []
+        try:
+            lineas = self._cargar_movimientos_pdf(banco, mes_key) or []
+        except Exception as error:
+            print("[Resumen] estado de cuenta:", error)
+            lineas = []
+        # 🚫 Igual que la pestaña de Conciliación: las líneas marcadas como
+        #    eliminadas (ocultas) no se cuentan en el resumen.
+        lineas = [b for b in lineas
+                  if self._clave_ignorado("estado_cuenta", "", 0, b.get("fecha"),
+                                          b.get("monto"), b.get("descripcion")) not in ign_pdf]
+        try:
+            extras = self.cargar_asientos_extra(banco, mes_key) or []
+        except Exception as error:
+            print("[Resumen] asientos extra:", error)
+            extras = []
+        # ⏳ Asientos de fin del mes anterior que el banco posteó en este mes.
+        try:
+            comision = cargar_comision_interbancaria()
+        except Exception:
+            comision = 0.0
+        try:
+            prev_pend = self._traer_pendientes_mes_anterior(
+                banco, mes_key, sistema, lineas, comision)
+            for m in prev_pend:
+                m["_pendiente"] = True
+                sistema.append(m)
+        except Exception as error:
+            print("[Resumen] pendientes del mes anterior:", error)
+
+        def _lado(lista):
+            ingresos = [float(m.get("monto") or 0) for m in lista
+                        if float(m.get("monto") or 0) > 0]
+            egresos = [float(m.get("monto") or 0) for m in lista
+                       if float(m.get("monto") or 0) < 0]
+            return {"total": len(lista), "n_ing": len(ingresos), "ing": sum(ingresos),
+                    "n_egr": len(egresos), "egr": -sum(egresos),
+                    "neto": sum(ingresos) + sum(egresos)}
+
+        # 🧮 Comparación justa: cada línea del banco se usa UNA sola vez.
+        #    - 'unicos': asientos que representan un movimiento real.
+        #    - 'duplicados': asientos extra que copian una línea ya usada.
+        #    - 'sobrantes': asientos sin línea en el banco.
+        #    - 'faltantes': líneas del banco sin asiento.
+        asientos = []
+        for m in sistema:
+            d = dict(m)
+            origen_s = str(m.get("origen") or "")
+            if not origen_s.startswith("s:"):
+                origen_s = "s:%s" % (m.get("tabla") or "sistema")
+            d["origen"] = origen_s
+            d["_prioridad"] = 0 if origen_s == "s:pagos_comprobantes" else 1
+            asientos.append(d)
+        # 🧾 Asientos que no vienen de Compras/Ventas (e, App Grifo, comisiones):
+        #    también forman parte del lado del sistema.
+        for m in extras:
+            d = dict(m)
+            d["_prioridad"] = 2
+            asientos.append(d)
+        for m in manuales:
+            d = dict(m)
+            d["origen"] = "manual"
+            d["_prioridad"] = 3
+            asientos.append(d)
+        match, dup_idx, sobr_idx, falt_idx = emparejar_asientos_banco(
+            asientos, lineas, comision)
+
+        # 🔁 Corregir pares cruzados: si dos asientos quedaron con las líneas
+        #    intercambiadas (7,56 con 7,55 y 7,55 con 7,56), se cambian para
+        #    que cada uno tome la línea de su importe exacto.
+        _items_match = list(match.items())
+        for _a in range(len(_items_match)):
+            for _b in range(_a + 1, len(_items_match)):
+                _i1, _j1 = _items_match[_a]
+                _i2, _j2 = _items_match[_b]
+                try:
+                    _am1 = float(asientos[_i1].get("monto") or 0)
+                    _am2 = float(asientos[_i2].get("monto") or 0)
+                    _bm1 = float(lineas[_j1].get("monto") or 0)
+                    _bm2 = float(lineas[_j2].get("monto") or 0)
+                except Exception:
+                    continue
+                if _am1 * _bm2 <= 0 or _am2 * _bm1 <= 0:
+                    continue
+                _actual = abs(_bm1 - _am1) + abs(_bm2 - _am2)
+                _cruzado = abs(_bm2 - _am1) + abs(_bm1 - _am2)
+                if _cruzado + 0.001 < _actual:
+                    match[_i1], match[_i2] = _j2, _j1
+        # 🏦 Si el banco cobró la comisión en la MISMA línea (principal + 4.80),
+        #    el asiento se compara por el total del banco. Antes el sistema
+        #    mostraba sólo el principal y aparecía una diferencia de 4.80 por
+        #    cada transferencia, aunque no faltara ningún movimiento.
+        for i, j in match.items():
+            a = asientos[i]
+            b = lineas[j]
+            try:
+                am = float(a.get("monto") or 0)
+                bm = float(b.get("monto") or 0)
+            except (TypeError, ValueError):
+                continue
+            if am * bm <= 0:
+                continue
+            if abs((abs(bm) - abs(am)) - float(comision or 0)) <= 0.02:
+                a["monto"] = bm
+        # 🔍 Diferencias de importe que quedan en el Resumen (redondeos/comisiones).
+        diferencias_resumen = []
+        _vistos_dif = set()
+        for i, j in match.items():
+            a = asientos[i]
+            b = lineas[j]
+            try:
+                am = float(a.get("monto") or 0)
+                bm = float(b.get("monto") or 0)
+            except (TypeError, ValueError):
+                continue
+            dif = round(bm - am, 2)
+            if abs(dif) < 0.005:
+                continue
+            clave = (a.get("tabla"), a.get("id"),
+                     normalizar_fecha(b.get("fecha")), round(bm, 2))
+            if clave in _vistos_dif:
+                continue
+            _vistos_dif.add(clave)
+            try:
+                com = abs(float(comision or 0))
+            except (TypeError, ValueError):
+                com = 0.0
+            if abs(abs(dif) - com) <= 0.02 and abs(dif) > 0.02:
+                tipo = "comision"
+            elif abs(dif) <= 0.05:
+                tipo = "redondeo"
+            else:
+                tipo = "diferencia"
+            diferencias_resumen.append({
+                "fecha_sistema": a.get("fecha") or "",
+                "fecha_banco": b.get("fecha") or "",
+                "documento": a.get("documento") or "",
+                "descripcion": a.get("descripcion") or "",
+                "monto_sistema": am,
+                "monto_banco": bm,
+                "diferencia": dif,
+                "tipo": tipo,
+                "origen": a.get("origen") or "",
+                "tabla": a.get("tabla") or "",
+                "id": a.get("id") or 0,
+            })
+        # 🔒 Sólo se descuentan los duplicados MANUALES claros (copia de la línea
+        #    o principal + comisión). Si el asiento extra no es una copia clara,
+        #    se muestra como SOBRANTE para no ocultar un movimiento real.
+        dup_final, sobr_final = [], list(sobr_idx)
+        for i, j in dup_idx:
+            pi = next((i2 for i2, j2 in match.items() if j2 == j), None)
+            principal = asientos[pi] if pi is not None else None
+            if _es_duplicado_manual_claro(asientos[i], lineas[j], principal, comision):
+                dup_final.append((i, j))
+            else:
+                sobr_final.append(i)
+        dup_idx, sobr_idx = dup_final, sobr_final
+        # ✅ Los asientos que el usuario ya concilió no son «sobrantes», aunque su
+        #    línea del banco esté marcada como eliminada. Así el resumen coincide
+        #    con el aviso de la pestaña de Conciliación.
+        conciliados = self.cargar_conciliados(banco)
+        resueltos = set()
+        for i in list(sobr_idx):
+            a = asientos[i]
+            origen = str(a.get("origen") or "")
+            if origen == "manual":
+                if str(a.get("estado") or "").lower() == "conciliado":
+                    resueltos.add(i)
+                continue
+            if origen.startswith("s:"):
+                base, tabla = "sistema", origen[2:]
+            elif origen in ("e", "estado_cuenta"):
+                base, tabla = "estado_cuenta", ""
+            else:
+                base, tabla = origen, str(a.get("tabla") or "")
+            clave = self._clave_conciliado(base, tabla, a.get("id", 0), a.get("fecha"),
+                                           a.get("monto"), a.get("descripcion"))
+            if clave in conciliados:
+                resueltos.add(i)
+        if resueltos:
+            sobr_idx = [i for i in sobr_idx if i not in resueltos]
+        # ⏳ Asientos de fin de mes que aparecen en el estado siguiente: no son
+        #    sobrantes de este mes; se conciliarán al abrir el mes siguiente.
+        pendientes_siguiente_resumen = []
+        try:
+            filas_pend = []
+            for i in sobr_idx:
+                a = asientos[i]
+                if a.get("tabla") not in ("pagos_comprobantes", "pagos_clientes",
+                                          "transferencias_bancarias", "tx_comision"):
+                    continue
+                filas_pend.append({"origen": "sistema", "estado": "diferencia",
+                                   "tabla": a.get("tabla"), "id": a.get("id"),
+                                   "fecha": a.get("fecha"), "monto": a.get("monto"),
+                                   "descripcion": a.get("descripcion"),
+                                   "documento": a.get("documento"),
+                                   "id_factura": a.get("id_factura")})
+            marcados = self._marcar_pendientes_siguiente(
+                filas_pend, banco, mes_key, comision)
+            pendientes_siguiente_resumen = list(marcados or [])
+            if marcados:
+                claves = {(m.get("tabla"), m.get("id"), normalizar_fecha(m.get("fecha")),
+                           round(float(m.get("monto") or 0), 2)) for m in marcados}
+                sobr_idx = [i for i in sobr_idx
+                            if (asientos[i].get("tabla"), asientos[i].get("id"),
+                                normalizar_fecha(asientos[i].get("fecha")),
+                                round(float(asientos[i].get("monto") or 0), 2)) not in claves]
+        except Exception as error:
+            print("[Resumen] pendientes próximo mes:", error)
+        # 🔄 Manda la decisión que ya tomó la pestaña de Conciliación: si allí
+        #    una fila quedó «Pendiente próximo estado», el Resumen debe mostrar
+        #    esa misma cantidad y no recalcularla con otro criterio.
+        try:
+            pend_reporte = [f for f in (getattr(self, "filas_conciliacion", None) or [])
+                            if f.get("_pendiente_siguiente")]
+        except Exception:
+            pend_reporte = []
+        if pend_reporte:
+            pendientes_siguiente_resumen = list(pend_reporte)
+            claves_reporte = {(f.get("tabla"), f.get("id"),
+                               normalizar_fecha(f.get("fecha")),
+                               round(float(f.get("monto") or 0), 2))
+                              for f in pend_reporte}
+            sobr_idx = [i for i in sobr_idx
+                        if (asientos[i].get("tabla"), asientos[i].get("id"),
+                            normalizar_fecha(asientos[i].get("fecha")),
+                            round(float(asientos[i].get("monto") or 0), 2))
+                        not in claves_reporte]
+        # 🔄 También manda el estado final de la tabla: si la Conciliación ya
+        #    muestra un asiento como «Conciliado», el Resumen no debe contarlo
+        #    como sobrante aunque su propio cruce no lo haya emparejado igual.
+        try:
+            conciliadas_reporte = [f for f in (getattr(self, "filas_conciliacion", None) or [])
+                                   if str(f.get("estado") or "").lower() == "conciliado"
+                                   and f.get("origen") != "estado_cuenta"]
+        except Exception:
+            conciliadas_reporte = []
+        if conciliadas_reporte:
+            claves_conc = {(f.get("tabla"), f.get("id"),
+                            normalizar_fecha(f.get("fecha")),
+                            round(float(f.get("monto") or 0), 2))
+                           for f in conciliadas_reporte}
+            sobr_idx = [i for i in sobr_idx
+                        if (asientos[i].get("tabla"), asientos[i].get("id"),
+                            normalizar_fecha(asientos[i].get("fecha")),
+                            round(float(asientos[i].get("monto") or 0), 2))
+                        not in claves_conc]
+        unicos = [asientos[i] for i in sorted(match)] + [asientos[i] for i in sobr_idx]
+        duplicados = [asientos[i] for i, _ in dup_idx]
+        lado_sis = _lado(unicos)
+        lado_pdf = _lado(lineas)
+        lado_dup = _lado(duplicados)
+        neto_sis, neto_pdf = lado_sis["neto"], lado_pdf["neto"]
+        neto_sob = sum(float(asientos[i].get("monto") or 0) for i in sobr_idx)
+        neto_falt = sum(float(lineas[j].get("monto") or 0) for j in falt_idx)
+
+        v = ctk.CTkToplevel(self.parent_frame)
+        v.title("📊 Resumen del período")
+        v.geometry("720x520")
+        try:
+            v.transient(self.parent_frame)
+        except Exception:
+            pass
+        traer_al_frente(v)
+
+        marco = ctk.CTkFrame(v)
+        marco.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(marco, text="Banco: %s" % construir_etiqueta_banco(banco),
+                     font=(FAMILIA, 14, "bold")).pack(anchor="w", padx=8, pady=(8, 0))
+        ctk.CTkLabel(marco, text="Período: %s" % etiqueta_mes,
+                     font=(FAMILIA, 12), text_color="#566573").pack(anchor="w", padx=8, pady=(0, 8))
+
+        cont = ctk.CTkFrame(marco, fg_color="transparent")
+        cont.pack(fill="both", expand=True, padx=8)
+        columnas = ("concepto", "sistema", "estado")
+        tabla = ttk.Treeview(cont, columns=columnas, show="headings", height=11)
+        preparar_colores_montos(tabla)
+        for col, titulo, ancho in (("concepto", "Concepto", 220),
+                                   ("sistema", "Asientos (sin duplicados)", 240),
+                                   ("estado", "Estado de cuenta", 240)):
+            tabla.heading(col, text=titulo)
+            tabla.column(col, width=ancho,
+                         anchor="w" if col == "concepto" else "center")
+        tabla.pack(fill="both", expand=True)
+        filas_tabla = [
+            ("Cantidad", "%d" % lado_sis["total"], "%d" % lado_pdf["total"]),
+            ("Ingresos", "%d  ·  %s" % (lado_sis["n_ing"], formatear_monto(lado_sis["ing"])),
+             "%d  ·  %s" % (lado_pdf["n_ing"], formatear_monto(lado_pdf["ing"]))),
+            ("Egresos", "%d  ·  %s" % (lado_sis["n_egr"], formatear_monto(lado_sis["egr"])),
+             "%d  ·  %s" % (lado_pdf["n_egr"], formatear_monto(lado_pdf["egr"]))),
+            ("Neto (ingresos − egresos)", formatear_monto(neto_sis),
+             formatear_monto(neto_pdf)),
+            ("Diferencia de netos", formatear_monto(neto_sis - neto_pdf), ""),
+            ("Diferencias de importe",
+             "%d  ·  %s" % (len(diferencias_resumen),
+                            formatear_monto(sum(float(f.get("diferencia") or 0)
+                                                for f in diferencias_resumen))), ""),
+            ("Duplicados (no sumados)",
+             "%d  ·  %s" % (lado_dup["total"], formatear_monto(lado_dup["neto"])), ""),
+            ("Sobrantes (sistema sin banco)",
+             "%d  ·  %s" % (len(sobr_idx), formatear_monto(neto_sob)), ""),
+            ("Faltantes (banco sin asiento)",
+             "%d  ·  %s" % (len(falt_idx), formatear_monto(neto_falt)), ""),
+            ("Pendientes próximo mes",
+             "%d  ·  %s" % (len(pendientes_siguiente_resumen),
+                            formatear_monto(sum(float(m.get("monto") or 0)
+                                                for m in pendientes_siguiente_resumen))), ""),
+        ]
+        # 🔎 Duplicados / sobrantes / faltantes con el MISMO cruce corregido del
+        #    reporte (filas_conciliacion), para que el cuadro quede consistente.
+        for i, fila in enumerate(filas_tabla):
+            tabla.insert("", "end", iid=str(i), values=fila)
+
+        ctk.CTkLabel(
+            marco,
+            text=("El resumen usa las mismas líneas visibles que la conciliación: las "
+                  "marcadas como eliminadas/ocultas no se cuentan y los asientos ya "
+                  "conciliados dejan de ser sobrantes. Cuando el banco cobra la comisión "
+                  "en la misma línea, se compara el total del banco. La diferencia que "
+                  "quede es real (redondeo, sobrantes o faltantes)."),
+            font=(FAMILIA, 10, "italic"), text_color="#7f8c8d",
+            wraplength=650, justify="left").pack(anchor="w", padx=8, pady=(6, 0))
+
+        pie = ctk.CTkFrame(v, fg_color="transparent")
+        pie.pack(fill="x", padx=12, pady=(4, 12))
+        ctk.CTkButton(pie, text="🔍 Ver diferencias", width=160,
+                      font=(FAMILIA, 11, "bold"), fg_color="#8e44ad", hover_color="#6c3483",
+                      command=lambda: self.mostrar_diferencias_importe(
+                          diferencias_resumen, etiqueta_mes)).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=v.destroy).pack(side="right")
+
+    def _periodos_cargados(self, banco):
+        """{'AAAA-MM'} de los estados de cuenta cargados para ese banco y cuenta."""
+        periodos = set()
+        if not banco:
+            return periodos
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return periodos
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT DISTINCT LEFT(fecha, 7) FROM conciliacion_movimientos_pdf
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                               AND COALESCE(cuenta,'') = %s""",
+                          (banco.get("banco", ""), banco.get("cuenta", "") or ""))
+                periodos = {str(r[0]) for r in c.fetchall() if r[0]}
+        except Exception as error:
+            print("[Conciliación] períodos cargados:", error)
+        finally:
+            liberar_conexion(conn)
+        return periodos
+
+    def mostrar_estados_cargados(self):
+        """📚 Ventana con TODOS los estados de cuenta guardados.
+
+        Muestra banco, cuenta, período, cantidad de líneas, rango de fechas, neto
+        y cuándo se guardó. Sirve para saber qué meses están cargados sin tener que
+        ir mes por mes en el desplegable.
+        """
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Estados de cuenta",
+                                 "Sin conexión a la base de datos.",
+                                 parent=self.parent_frame)
+            return
+        filas = []
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT banco, COALESCE(cuenta,''), COALESCE(periodo,''),
+                                    COUNT(*), MIN(fecha), MAX(fecha),
+                                    COALESCE(SUM(monto),0), COALESCE(MAX(creado),''),
+                                    COALESCE(MAX(archivo_ruta),'')
+                             FROM conciliacion_movimientos_pdf
+                             GROUP BY banco, cuenta, periodo
+                             ORDER BY banco, periodo DESC""")
+                filas = c.fetchall()
+        except Exception as error:
+            print("[Conciliación] estados cargados:", error)
+        finally:
+            liberar_conexion(conn)
+
+        v = ctk.CTkToplevel(self.parent_frame)
+        v.title("📚 Estados de cuenta cargados")
+        v.geometry("1000x470")
+        try:
+            v.transient(self.parent_frame)
+            v.resizable(True, True)
+        except Exception:
+            pass
+        traer_al_frente(v)
+
+        marco = ctk.CTkFrame(v)
+        marco.pack(fill="both", expand=True, padx=10, pady=10)
+        total_lineas = sum(int(f[3] or 0) for f in filas)
+        ctk.CTkLabel(marco,
+                     text="Estados de cuenta guardados: %d  ·  líneas en total: %d"
+                          % (len(filas), total_lineas),
+                     font=(FAMILIA, 13, "bold")).pack(anchor="w", padx=6, pady=(6, 8))
+        if not filas:
+            ctk.CTkLabel(marco, text="Todavía no hay ningún estado de cuenta cargado.",
+                         font=(FAMILIA, 12), text_color="#a04000").pack(pady=24)
+        else:
+            cont = ctk.CTkFrame(marco, fg_color="transparent")
+            cont.pack(fill="both", expand=True)
+            columnas = ("banco", "cuenta", "periodo", "lineas", "desde", "hasta",
+                        "neto", "guardado", "respaldo")
+            tabla = ttk.Treeview(cont, columns=columnas, show="headings", height=14)
+            preparar_colores_montos(tabla)
+            for col, titulo, ancho in (("banco", "Banco", 105), ("cuenta", "Cuenta", 145),
+                                       ("periodo", "Período", 90), ("lineas", "Líneas", 65),
+                                       ("desde", "Desde", 92), ("hasta", "Hasta", 92),
+                                       ("neto", "Neto", 115), ("guardado", "Guardado", 120),
+                                       ("respaldo", "Respaldo", 95)):
+                tabla.heading(col, text=titulo)
+                tabla.column(col, width=ancho,
+                             anchor="w" if col in ("banco", "cuenta") else "center")
+            despl = ttk.Scrollbar(cont, orient="vertical", command=tabla.yview)
+            tabla.configure(yscrollcommand=despl.set)
+            tabla.pack(side="left", fill="both", expand=True)
+            despl.pack(side="right", fill="y")
+            for i, f in enumerate(filas):
+                periodo = str(f[2] or "").strip()
+                if not periodo:
+                    # Estados viejos (cargados antes de existir el período): se
+                    # muestra el mes de la última fecha, para que igual se entienda.
+                    _ult = str(f[5] or "")
+                    periodo = (_ult[:7] + " (por fecha)") if len(_ult) >= 7 else "(sin período)"
+                tabla.insert("", "end", iid=str(i),
+                             values=(f[0] or "", f[1] or "", periodo, f[3],
+                                     fecha_para_mostrar(f[4]), fecha_para_mostrar(f[5]),
+                                     formatear_monto(f[6]), str(f[7] or "")[:16],
+                                     "📄 Sí" if str(f[8] or "").strip() else "—"))
+
+            def _abrir_respaldo(_evento=None):
+                """Doble clic: abre el PDF archivado de ese estado de cuenta."""
+                seleccion = tabla.selection()
+                if not seleccion:
+                    return
+                archivo = str(filas[int(seleccion[0])][8] or "").strip()
+                if not archivo:
+                    messagebox.showinfo("Estados de cuenta",
+                                        "Ese estado de cuenta se cargó antes de que se "
+                                        "guardaran los respaldos.\nVolvé a subir el PDF "
+                                        "para archivarlo.",
+                                        parent=v)
+                    return
+                ruta_real = resolver_ruta_archivo(archivo) or archivo
+                abrir_documento(ruta_real, "Estado de cuenta")
+
+            tabla.bind("<Double-1>", _abrir_respaldo)
+        ctk.CTkButton(marco, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=v.destroy).pack(pady=10)
+
+    def _mostrar_faltantes_banco(self, banco, propuestas, movs):
+        """📋 Líneas del estado de cuenta que quedaron SIN pareja en el sistema.
+
+        ⚠️ Antes se calculaba con las propuestas del motor inteligente, y ese motor
+        solo mira los asientos de 'conciliacion_bancaria': cualquier línea que ya
+        estuviera conciliada por la vía clásica (o emparejada con un pago) salía
+        como «faltante» — por eso listaba las 138 líneas. Ahora se usa la MISMA
+        lista que el aviso naranja de la pestaña.
+        """
+        filas_tabla = list(getattr(self, "filas_conciliacion", None) or [])
+        if not filas_tabla:
+            messagebox.showinfo(
+                "Faltantes",
+                "Primero cargue los movimientos del sistema (🔄) para poder comparar.",
+                parent=self.parent_frame)
+            return
+        faltantes = [f for f in filas_tabla
+                     if f.get("origen") == "estado_cuenta"
+                     and f.get("estado") != "conciliado"]
+        # 🔄 La otra dirección: asientos del SISTEMA que no aparecen en el estado de
+        #    cuenta cargado (los que «sobran», los de otro mes o los duplicados).
+        sobrantes = list(getattr(self, "_pendientes_sistema", None) or [])
+        # 📄 Sin estado de cuenta cargado no se puede afirmar que el cruce esté
+        #    completo: no hay contra qué comparar.
+        try:
+            _mes_vista = mes_etiqueta_a_key(self.cmb_mes.get()) if hasattr(self, "cmb_mes") else ""
+        except Exception:
+            _mes_vista = ""
+        _periodos_ok = getattr(self, "_periodos_ok", None)
+        _periodos_ok = _periodos_ok if isinstance(_periodos_ok, (set, frozenset)) else set()
+        if _mes_vista and _mes_vista not in _periodos_ok:
+            messagebox.showinfo(
+                "Faltantes",
+                "📄 Todavía no hay estado de cuenta cargado para %s.\n\n"
+                "Sin el estado de cuenta no hay contra qué comparar: subí el PDF de "
+                "ese mes para poder cruzar los asientos del sistema."
+                % (self.cmb_mes.get() if hasattr(self, "cmb_mes") else _mes_vista),
+                parent=self.parent_frame)
+            return
+        if not faltantes and not sobrantes:
+            messagebox.showinfo(
+                "Faltantes",
+                "El cruce está completo en las dos direcciones:\n\n"
+                "• Todas las líneas del estado de cuenta tienen su asiento.\n"
+                "• Todos los asientos del sistema aparecen en el estado de cuenta.",
+                parent=self.parent_frame)
+            return
+        ventana_f = ctk.CTkToplevel(self.parent_frame)
+        ventana_f.title("📋 Faltantes del banco · %s" % banco.get("banco", ""))
+        ventana_f.geometry("1000x640")
+        try:
+            ventana_f.transient(self.parent_frame)
+            ventana_f.resizable(True, True)
+        except Exception:
+            pass
+        traer_al_frente(ventana_f)
+        marco = ctk.CTkFrame(ventana_f)
+        marco.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+        tabs = ctk.CTkTabview(marco)
+        tabs.pack(fill="both", expand=True)
+        tab_banco_nombre = "FALTANTES · banco sin asiento (%d)" % len(faltantes)
+        tab_banco = tabs.add(tab_banco_nombre)
+        tab_sistema = tabs.add("SOBRANTES · sistema sin banco (%d)" % len(sobrantes))
+
+        # 🔎 Facturas del sistema por importe: sirve para decir, en cada línea del
+        #    banco, si YA hay una factura con ese total (falta sólo el pago) o si
+        #    no hay nada registrado.
+        # 🔍 Lo que de verdad importa: ¿hay un ASIENTO con ese importe en el banco?
+        #    (La columna anterior buscaba facturas por importe y confundía: una
+        #    factura no es lo mismo que un movimiento.)
+        asientos_por_importe = {}
+        conn_as = conectar_db(silencioso=True)
+        if conn_as:
+            try:
+                with conn_as.cursor() as cur_as:
+                    cur_as.execute("""SELECT fecha, monto, COALESCE(origen,''), COALESCE(estado,'')
+                                      FROM conciliacion_bancaria
+                                      WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                        AND COALESCE(cuenta,'') = %s""",
+                                   (banco.get("banco", ""), banco.get("cuenta", "") or ""))
+                    for _f, _mo, _or, _es in cur_as.fetchall():
+                        asientos_por_importe.setdefault(
+                            round(abs(float(_mo or 0)), 2), []).append(
+                                (clave_fecha(_f), str(_or), str(_es)))
+            except Exception as _e_as:
+                print("[Conciliación] asientos por importe:", _e_as)
+            finally:
+                liberar_conexion(conn_as)
+
+        facturas_por_importe = {}
+        try:
+            _conn_f = conectar_db(silencioso=True)
+            if _conn_f:
+                with _conn_f.cursor() as _cur_f:
+                    # 🔍 Solo facturas REALES con número: se excluyen los registros
+                    #    espejo «PAGO BANCO» (no tienen número) para no decir «Sí»
+                    #    cuando en realidad la factura no existe.
+                    _cur_f.execute("""SELECT COALESCE(numero_documento,''), COALESCE(proveedor,''),
+                                             COALESCE(total,0)
+                                      FROM facturas_recibidas
+                                      WHERE COALESCE(total,0) > 0
+                                        AND COALESCE(numero_documento,'') <> ''
+                                        AND COALESCE(tipo_documento,'') <> 'PAGO BANCO'""")
+                    for _num, _prov, _tot in _cur_f.fetchall():
+                        facturas_por_importe.setdefault(
+                            round(abs(float(_tot)), 2), []).append((_num, _prov))
+        except Exception as _e_fact:
+            print("[Conciliación] facturas por importe:", _e_fact)
+        finally:
+            try:
+                liberar_conexion(_conn_f)
+            except Exception:
+                pass
+
+        def _armar_tabla(padre, filas, texto_vacio, nota="", con_factura=False):
+            """Tabla de (fecha, descripción, monto) [+ factura]. Devuelve el Treeview."""
+            if nota:
+                ctk.CTkLabel(padre, text=nota, font=(FAMILIA, 11), text_color="#7f8c8d",
+                             wraplength=900, justify="left").pack(anchor="w", padx=6, pady=(4, 2))
+            if not filas:
+                ctk.CTkLabel(padre, text=texto_vacio, font=(FAMILIA, 12),
+                             text_color="#1e8449").pack(pady=24)
+                return None
+            cont = ctk.CTkFrame(padre, fg_color="transparent")
+            cont.pack(fill="both", expand=True)
+            columnas = ("fecha", "descripcion", "monto") + (("asiento",) if con_factura else ())
+            titulos = [("fecha", "Fecha", 100), ("descripcion", "Descripción", 520),
+                       ("monto", "Monto", 110)]
+            if con_factura:
+                titulos.append(("asiento", "Asiento con el mismo importe", 260))
+            tabla_t = ttk.Treeview(cont, columns=columnas, show="headings", height=15)
+            preparar_colores_montos(tabla_t)
+            for col, titulo, ancho in titulos:
+                tabla_t.heading(col, text=titulo)
+                tabla_t.column(col, width=ancho,
+                               anchor="w" if col in ("descripcion", "asiento") else "center")
+            despl = ttk.Scrollbar(cont, orient="vertical", command=tabla_t.yview)
+            tabla_t.configure(yscrollcommand=despl.set)
+            tabla_t.pack(side="left", fill="both", expand=True)
+            despl.pack(side="right", fill="y")
+            for indice, m in enumerate(filas):
+                valores = [str(m.get("fecha") or "")[:10],
+                           str(m.get("descripcion") or "")[:70],
+                           formatear_monto(m.get("monto"))]
+                if con_factura:
+                    _imp = round(abs(float(m.get("monto") or 0)), 2)
+                    _cands = asientos_por_importe.get(_imp) or []
+                    if not _cands:
+                        valores.append("— ninguno")
+                    else:
+                        _dia = clave_fecha(m.get("fecha")) or ""
+                        def _dias(a, _ref=_dia):
+                            try:
+                                return abs((datetime.strptime(a[0], "%Y-%m-%d")
+                                            - datetime.strptime(_ref, "%Y-%m-%d")).days)
+                            except Exception:
+                                return 9999
+                        _mejor = min(_cands, key=_dias)
+                        _fecha_txt = ("%s/%s/%s" % (_mejor[0][8:10], _mejor[0][5:7], _mejor[0][0:4])
+                                      if len(_mejor[0]) >= 10 else "sin fecha")
+                        _dif = _dias(_mejor)
+                        valores.append("%s · %s%s" % (
+                            _fecha_txt,
+                            "manual" if _mejor[1] == "manual" else "sistema",
+                            (" · %d día(s) antes/después" % _dif) if 0 < _dif < 9999 else " · mismo día"))
+                tabla_t.insert("", "end", iid=str(indice), values=tuple(valores))
+            return tabla_t
+
+        tabla_b = _armar_tabla(tab_banco, faltantes,
+                               "✅ Todas las líneas del estado de cuenta tienen su asiento.",
+                               con_factura=True)
+
+        def _quitar_faltantes(iids):
+            """Quita de la ventana las líneas ya registradas/ignoradas, sin cerrarla."""
+            nonlocal tab_banco_nombre
+            for iid in (iids or []):
+                try:
+                    tabla_b.delete(iid)
+                except Exception:
+                    pass
+            restantes = len(tabla_b.get_children()) if tabla_b is not None else 0
+            nuevo_nombre = "FALTANTES · banco sin asiento (%d)" % restantes
+            try:
+                tabs.rename(tab_banco_nombre, nuevo_nombre)
+                tab_banco_nombre = nuevo_nombre
+            except Exception:
+                pass
+            if restantes == 0 and tabla_b is not None:
+                try:
+                    ctk.CTkLabel(tab_banco, text="✅ Ya no quedan líneas del banco sin asiento.",
+                                 font=(FAMILIA, 12), text_color="#1e8449").pack(pady=24)
+                except Exception:
+                    pass
+        _armar_tabla(
+            tab_sistema, sobrantes,
+            "✅ Todos los movimientos del sistema aparecen en el estado de cuenta.",
+            nota="Asientos del sistema que NO aparecen en el estado de cuenta cargado. "
+                 "Puede que el banco los haya cobrado en otro mes, o que estén duplicados "
+                 "o mal registrados en el sistema.")
+
+        def _seleccion():
+            if tabla_b is None:
+                return []
+            return list(tabla_b.selection())
+
+        def _registrar_en_banco():
+            """Crea los movimientos en el banco (sin factura ni comprobante)."""
+            seleccion = _seleccion()
+            if not seleccion:
+                messagebox.showinfo("Faltantes", "Seleccione uno o más movimientos.",
+                                    parent=ventana_f)
+                return
+            if not messagebox.askyesno(
+                    "Registrar en banco",
+                    "¿Registrar %d movimiento(s) directamente en el banco?\n\n"
+                    "Se crearán como asientos MANUALES y quedarán conciliados.\n"
+                    "No se toca Compras ni Ventas." % len(seleccion),
+                    parent=ventana_f):
+                return
+            conn = conectar_db(silencioso=True)
+            if not conn:
+                return
+            creados = 0
+            ya_estaba = 0
+            try:
+                with conn.cursor() as c:
+                    for iid in seleccion:
+                        m = faltantes[int(iid)]
+                        monto = float(m.get("monto") or 0)
+                        # 🛡️ No duplicar: si ese movimiento ya fue registrado como
+                        #    manual (misma fecha, importe y descripción), se saltea.
+                        c.execute("""SELECT 1 FROM conciliacion_bancaria
+                                     WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                       AND COALESCE(cuenta,'') = %s
+                                       AND COALESCE(fecha,'') = %s
+                                       AND ABS(COALESCE(monto,0) - %s) < 0.005 LIMIT 1""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), monto))
+                        if c.fetchone():
+                            ya_estaba += 1
+                            continue
+                        c.execute("""INSERT INTO conciliacion_bancaria
+                            (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                             estado, fecha_conciliacion)
+                            VALUES (%s,%s,%s,%s,%s,%s,'manual','conciliado',%s)""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
+                                   monto, "ingreso" if monto > 0 else "egreso",
+                                   datetime.now().strftime("%d/%m/%Y")))
+                        c.execute("""INSERT INTO conciliacion_auditoria
+                            (banco, cuenta, fecha_banco, descripcion_banco, importe_banco,
+                             sentido, estado, confianza, reglas, observacion,
+                             origen_decision, creado, activo)
+                            VALUES (%s,%s,%s,%s,%s,%s,'REGISTRADO_BANCO',100,%s,%s,
+                                    'manual',%s,TRUE)""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
+                                   abs(monto), "ingreso" if monto > 0 else "egreso",
+                                   "registro directo desde el estado de cuenta",
+                                   "sin factura ni comprobante",
+                                   datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        creados += 1
+                conn.commit()
+            except Exception as error:
+                print("[Conciliación] registrar en banco:", error)
+                messagebox.showerror("Faltantes", "No se pudo registrar:\n%s" % error,
+                                     parent=ventana_f)
+            finally:
+                liberar_conexion(conn)
+            if creados:
+                messagebox.showinfo("Faltantes",
+                                    "%d movimiento(s) registrados en el banco como "
+                                    "MANUAL y conciliados." % creados, parent=ventana_f)
+                _quitar_faltantes(seleccion)
+                try:
+                    self.generar_reporte()
+                except Exception:
+                    pass
+            elif ya_estaba:
+                messagebox.showinfo("Faltantes",
+                                    "Esos %d movimiento(s) ya estaban registrados como "
+                                    "manual: no se duplicó nada." % ya_estaba,
+                                    parent=ventana_f)
+                _quitar_faltantes(seleccion)
+                try:
+                    self.generar_reporte()
+                except Exception:
+                    pass
+
+        def _ignorar():
+            seleccion = _seleccion()
+            if not seleccion:
+                messagebox.showinfo("Faltantes", "Seleccione uno o más movimientos.",
+                                    parent=ventana_f)
+                return
+            if not messagebox.askyesno(
+                    "Ignorar",
+                    "¿Marcar %d movimiento(s) como ignorados?\n\n"
+                    "No se registrará nada en Compras ni en el banco; solo se "
+                    "dejará constancia en la auditoría." % len(seleccion),
+                    parent=ventana_f):
+                return
+            conn = conectar_db(silencioso=True)
+            if not conn:
+                return
+            guardados = 0
+            guardados_iids = []
+            try:
+                with conn.cursor() as c:
+                    for iid in seleccion:
+                        m = faltantes[int(iid)]
+                        c.execute("""INSERT INTO conciliacion_auditoria
+                            (banco, cuenta, fecha_banco, descripcion_banco, importe_banco,
+                             sentido, estado, confianza, reglas, observacion,
+                             origen_decision, creado, activo)
+                            VALUES (%s,%s,%s,%s,%s,%s,'IGNORADO_BANCO',0,%s,%s,'manual',%s,TRUE)""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
+                                   abs(float(m.get("monto") or 0)),
+                                   "ingreso" if float(m.get("monto") or 0) > 0 else "egreso",
+                                   "movimiento del banco sin asiento contable",
+                                   "marcado como ignorado por el usuario",
+                                   datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        # 🚫 Persistir el ignorado: así la misma línea no vuelve a
+                        #     aparecer en la conciliación de ESTE mes ni de los siguientes.
+                        self._registrar_ignorado(c, banco, m)
+                        guardados += 1
+                        guardados_iids.append(iid)
+                conn.commit()
+            except Exception as error:
+                print("[Conciliación] ignorar faltantes:", error)
+            finally:
+                liberar_conexion(conn)
+            messagebox.showinfo("Faltantes", "%d movimiento(s) marcados como ignorados."
+                                % guardados, parent=ventana_f)
+            _quitar_faltantes(guardados_iids)
+            try:
+                self.generar_reporte()
+            except Exception:
+                pass
+
+        def _integrar_sin_factura():
+            """Integra al sistema TODAS las líneas del banco que no tienen factura.
+
+            Crea un asiento MANUAL conciliado por cada una, marcado con
+            tabla='sin_factura'. Después salen de la lista de faltantes y quedan en
+            verde. Cuando más adelante se cargue la factura, se podrá enlazar.
+            """
+            objetivos = [m for m in faltantes
+                         if not facturas_por_importe.get(
+                             round(abs(float(m.get("monto") or 0)), 2))]
+            if not objetivos:
+                messagebox.showinfo(
+                    "Faltantes",
+                    "Todas las líneas pendientes ya tienen una factura en el sistema.\n"
+                    "Registrá el pago desde Compras o aprobalas en la conciliación.",
+                    parent=ventana_f)
+                return
+            total = sum(float(m.get("monto") or 0) for m in objetivos)
+            if not messagebox.askyesno(
+                    "Integrar al sistema",
+                    "¿Integrar %d línea(s) del estado de cuenta SIN factura?\n\n"
+                    "• Se crean como asientos MANUALES, conciliados y marcados\n"
+                    "  como «sin factura» (no tocan Compras ni Ventas).\n"
+                    "• Salen de la lista de faltantes y quedan en verde.\n"
+                    "• Cuando cargues la factura más adelante, la podrás enlazar.\n\n"
+                    "Neto: %s" % (len(objetivos), formatear_moneda(total)),
+                    parent=ventana_f):
+                return
+            conn = conectar_db(silencioso=True)
+            if not conn:
+                return
+            creados = 0
+            ya_estaba = 0
+            try:
+                with conn.cursor() as c:
+                    for m in objetivos:
+                        monto = float(m.get("monto") or 0)
+                        c.execute("""SELECT 1 FROM conciliacion_bancaria
+                                     WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                       AND COALESCE(cuenta,'') = %s
+                                       AND COALESCE(fecha,'') = %s
+                                       AND ABS(COALESCE(monto,0) - %s) < 0.005 LIMIT 1""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), monto))
+                        if c.fetchone():
+                            ya_estaba += 1
+                            continue
+                        c.execute("""INSERT INTO conciliacion_bancaria
+                            (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                             tabla, estado, fecha_conciliacion)
+                            VALUES (%s,%s,%s,%s,%s,%s,'manual','sin_factura','conciliado',%s)""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
+                                   monto, "ingreso" if monto > 0 else "egreso",
+                                   datetime.now().strftime("%d/%m/%Y")))
+                        c.execute("""INSERT INTO conciliacion_auditoria
+                            (banco, cuenta, fecha_banco, descripcion_banco, importe_banco,
+                             sentido, estado, confianza, reglas, observacion,
+                             origen_decision, creado, activo)
+                            VALUES (%s,%s,%s,%s,%s,%s,'INTEGRADO_SIN_FACTURA',100,%s,%s,
+                                    'auto',%s,TRUE)""",
+                                  (banco.get("banco", ""), banco.get("cuenta", ""),
+                                   str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
+                                   abs(monto), "ingreso" if monto > 0 else "egreso",
+                                   "línea del estado de cuenta sin factura",
+                                   "integrado sin comprobante",
+                                   datetime.now().strftime("%Y-%m-%d %H:%M")))
+                        creados += 1
+                conn.commit()
+            except Exception as error:
+                print("[Conciliación] integrar sin factura:", error)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                messagebox.showerror("Faltantes", "No se pudo integrar:\n%s" % error,
+                                     parent=ventana_f)
+            finally:
+                liberar_conexion(conn)
+            if creados:
+                messagebox.showinfo(
+                    "Faltantes",
+                    "%d línea(s) integradas al sistema como asiento MANUAL «sin factura».\n"
+                    "Quedaron conciliadas.%s"
+                    % (creados, ("\n%d ya estaban registradas." % ya_estaba) if ya_estaba else ""),
+                    parent=ventana_f)
+                _quitar_faltantes(objetivos_iids)
+                try:
+                    self.generar_reporte()
+                except Exception:
+                    pass
+            elif ya_estaba:
+                messagebox.showinfo(
+                    "Faltantes",
+                    "Esas %d línea(s) ya estaban registradas como manual: no se duplicó nada."
+                    % ya_estaba, parent=ventana_f)
+                _quitar_faltantes(objetivos_iids)
+                try:
+                    self.generar_reporte()
+                except Exception:
+                    pass
+
+        pie = ctk.CTkFrame(ventana_f)
+        pie.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(pie, text="➕ Registrar en banco", width=190, fg_color="#1e8449",
+                      hover_color="#145a32", command=_registrar_en_banco).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="✅ Integrar todas sin factura", width=240, fg_color="#2874a6",
+                      hover_color="#1b4f72",
+                      command=_integrar_sin_factura).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="🚫 Marcar como ignorados", width=210, fg_color="#7d6608",
+                      hover_color="#5b4a06", command=_ignorar).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=ventana_f.destroy).pack(side="right", padx=6)
+
+    def _mostrar_reporte_conciliacion(self, propuestas, movimientos, asientos, ventana):
+        """📊 Reporte A–I de la conciliación (con exportación a Excel)."""
+        try:
+            import conciliacion_inteligente as ci
+        except Exception as error:
+            messagebox.showerror("Reporte", str(error), parent=self.parent_frame)
+            return
+        grupos = ci.reporte(propuestas, movimientos, asientos, ventana_dias=ventana)
+        ventana_rep = ctk.CTkToplevel(self.parent_frame)
+        ventana_rep.title("📊 Reporte de conciliación")
+        ventana_rep.geometry("900x560")
+        try:
+            ventana_rep.transient(self.parent_frame)
+        except Exception:
+            pass
+        traer_al_frente(ventana_rep)
+        marco = ctk.CTkFrame(ventana_rep)
+        marco.pack(fill="both", expand=True, padx=10, pady=10)
+        total = sum(len(v) for v in grupos.values())
+        ctk.CTkLabel(marco, text="Reporte de conciliación bancaria",
+                     font=(FAMILIA, 16, "bold")).pack(anchor="w", padx=8, pady=(8, 4))
+        for clave in sorted(grupos):
+            ctk.CTkLabel(marco, text="%s · %-46s %d" % (clave, ci.CATEGORIAS[clave], len(grupos[clave])),
+                         font=(FAMILIA, 12), anchor="w").pack(anchor="w", padx=16, pady=1)
+        ctk.CTkLabel(marco, text="\nTotal de partidas analizadas: %d" % total,
+                     font=(FAMILIA, 12, "bold")).pack(anchor="w", padx=16, pady=(8, 0))
+
+        def _exportar():
+            try:
+                import openpyxl
+                from openpyxl.styles import Font
+            except Exception as error:
+                messagebox.showerror("Reporte", "Falta openpyxl: %s" % error, parent=ventana_rep)
+                return
+            ruta = seleccionar_archivo_guardar(titulo="Guardar reporte de conciliación",
+                                               nombre="Reporte conciliacion.xlsx")
+            if not ruta:
+                return
+            libro = openpyxl.Workbook()
+            hoja = libro.active
+            hoja.title = "Reporte"
+            hoja["A1"] = "REPORTE DE CONCILIACIÓN BANCARIA"
+            hoja["A1"].font = Font(bold=True, size=13)
+            fila = 3
+            for clave in sorted(grupos):
+                hoja.cell(row=fila, column=1, value="%s · %s" % (clave, ci.CATEGORIAS[clave])).font = Font(bold=True)
+                fila += 1
+                for item in grupos[clave]:
+                    if "descripcion_banco" in item:
+                        hoja.cell(row=fila, column=1, value=str(item.get("fecha_banco")))
+                        hoja.cell(row=fila, column=2, value=item.get("descripcion_banco"))
+                        hoja.cell(row=fila, column=3, value=item.get("importe_banco"))
+                        hoja.cell(row=fila, column=4, value=str(item.get("fecha_contable")))
+                        hoja.cell(row=fila, column=5, value=item.get("descripcion_contable"))
+                        hoja.cell(row=fila, column=6, value=item.get("estado"))
+                        hoja.cell(row=fila, column=7, value=item.get("confianza"))
+                    else:
+                        hoja.cell(row=fila, column=1, value=str(item.get("fecha")))
+                        hoja.cell(row=fila, column=2, value=str(item.get("descripcion")))
+                        hoja.cell(row=fila, column=3, value=item.get("monto"))
+                    fila += 1
+                fila += 1
+            libro.save(ruta)
+            messagebox.showinfo("Reporte", "Reporte guardado en:\n%s" % ruta, parent=ventana_rep)
+
+        pie = ctk.CTkFrame(ventana_rep)
+        pie.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(pie, text="📥 Exportar a Excel", width=170, fg_color="#1e8449",
+                      hover_color="#145a32", command=_exportar).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=ventana_rep.destroy).pack(side="right", padx=6)
+
+    def _mostrar_validacion_saldos(self, banco, propuestas):
+        """📉 Valida los saldos del banco contra el sistema y explica la diferencia."""
+        try:
+            import conciliacion_inteligente as ci
+        except Exception as error:
+            messagebox.showerror("Saldos", str(error), parent=self.parent_frame)
+            return
+        saldos = []
+        conn = conectar_db(silencioso=True)
+        if conn:
+            try:
+                with conn.cursor() as c:
+                    c.execute("""SELECT saldo FROM conciliacion_movimientos_pdf
+                                 WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                   AND saldo IS NOT NULL ORDER BY id""",
+                              (banco.get("banco", ""),))
+                    saldos = [float(f[0]) for f in c.fetchall() if f[0] is not None]
+            except Exception as error:
+                print("[Conciliación] saldos:", error)
+            finally:
+                liberar_conexion(conn)
+        inicial_banco = saldos[0] if saldos else 0.0
+        final_banco = saldos[-1] if saldos else 0.0
+        asientos = self._asientos_para_conciliar(banco)
+        try:
+            neto_sistema = round(sum(float(a.get("monto") or 0) for a in asientos), 2)
+        except Exception:
+            neto_sistema = 0.0
+        resultado = ci.validar_saldos(inicial_banco, final_banco, 0, neto_sistema, propuestas)
+
+        ventana_s = ctk.CTkToplevel(self.parent_frame)
+        ventana_s.title("📉 Validación de saldos · %s" % banco.get("banco", ""))
+        ventana_s.geometry("620x420")
+        try:
+            ventana_s.transient(self.parent_frame)
+        except Exception:
+            pass
+        traer_al_frente(ventana_s)
+        marco = ctk.CTkFrame(ventana_s)
+        marco.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(marco, text="Validación de saldos", font=(FAMILIA, 16, "bold")).pack(anchor="w", pady=(6, 10))
+        filas = [("Saldo inicial del banco", resultado["saldo_inicial_banco"]),
+                 ("Saldo final del banco", resultado["saldo_final_banco"]),
+                 ("Importe conciliado", resultado["importe_conciliado"]),
+                 ("Neto del sistema (asientos)", resultado["saldo_final_sistema"]),
+                 ("Diferencia banco − sistema", resultado["diferencia_final"])]
+        for etiqueta, valor in filas:
+            fila = ctk.CTkFrame(marco, fg_color="transparent")
+            fila.pack(fill="x", padx=10, pady=2)
+            ctk.CTkLabel(fila, text=etiqueta, font=(FAMILIA, 12), width=280,
+                         anchor="w").pack(side="left")
+            ctk.CTkLabel(fila, text="S/ %s" % formatear_moneda(valor),
+                         font=(FAMILIA, 12, "bold"), anchor="e").pack(side="right")
+        explicacion = ("Los saldos coinciden." if abs(resultado["diferencia_final"]) < 0.01 else
+                       "La diferencia corresponde a partidas en tránsito: movimientos del banco "
+                       "sin asiento contable y/o asientos sin movimiento bancario (ver Reporte).")
+        ctk.CTkLabel(marco, text=explicacion, font=(FAMILIA, 11), wraplength=560,
+                     justify="left", text_color="#7f8c8d").pack(anchor="w", padx=12, pady=(12, 0))
+        ctk.CTkButton(marco, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=ventana_s.destroy).pack(pady=14)
+
+    def _historial_conciliaciones(self, banco):
+        """🕘 Historial de decisiones con opción de REVERTIR."""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Historial", "Sin conexión a la base.", parent=self.parent_frame)
+            return
+        filas = []
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT id, fecha_banco, descripcion_banco, importe_banco,
+                                    fecha_contable, descripcion_contable, estado, confianza,
+                                    creado, id_asiento
+                             FROM conciliacion_auditoria
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                             ORDER BY id DESC LIMIT 300""", (banco.get("banco", ""),))
+                filas = c.fetchall()
+        except Exception as error:
+            print("[Conciliación] historial:", error)
+        finally:
+            liberar_conexion(conn)
+
+        ventana_h = ctk.CTkToplevel(self.parent_frame)
+        ventana_h.title("🕘 Historial de conciliaciones · %s" % banco.get("banco", ""))
+        ventana_h.geometry("1000x520")
+        try:
+            ventana_h.transient(self.parent_frame)
+        except Exception:
+            pass
+        traer_al_frente(ventana_h)
+        marco = ctk.CTkFrame(ventana_h)
+        marco.pack(fill="both", expand=True, padx=10, pady=10)
+        columnas = ("fecha", "desc_banco", "importe", "estado", "confianza", "creado")
+        tabla = ttk.Treeview(marco, columns=columnas, show="headings", height=16)
+        preparar_colores_montos(tabla)
+        for col, titulo, ancho in (("fecha", "Fecha banco", 100), ("desc_banco", "Descripción banco", 300),
+                                   ("importe", "Importe", 90), ("estado", "Estado", 110),
+                                   ("confianza", "Conf.", 60), ("creado", "Registrado", 130)):
+            tabla.heading(col, text=titulo)
+            tabla.column(col, width=ancho)
+        tabla.pack(fill="both", expand=True, side="left")
+        datos = {}
+        for f in filas:
+            iid = str(f[0])
+            datos[iid] = f
+            tabla.insert("", "end", iid=iid, values=(str(f[1])[:10], str(f[2])[:50],
+                                                     formatear_monto(f[3]), f[6],
+                                                     "%d%%" % float(f[7] or 0), str(f[8])[:16]))
+
+        def _revertir():
+            seleccion = tabla.selection()
+            if not seleccion:
+                messagebox.showinfo("Historial", "Seleccione una conciliación.", parent=ventana_h)
+                return
+            fila = datos[seleccion[0]]
+            if fila[6] != "APROBADO":
+                messagebox.showinfo("Historial", "Solo se puede revertir una conciliación APROBADA.",
+                                    parent=ventana_h)
+                return
+            if not messagebox.askyesno("Revertir",
+                                       "¿Revertir esta conciliación?\n\n%s\nS/ %.2f"
+                                       % (str(fila[4])[:40], float(fila[3] or 0)),
+                                       parent=ventana_h):
+                return
+            self._revertir_conciliacion(int(seleccion[0]), fila[9], fila[1])
+            ventana_h.destroy()
+            self._historial_conciliaciones(banco)
+
+        pie = ctk.CTkFrame(ventana_h)
+        pie.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(pie, text="↩ Revertir la seleccionada", width=200, fg_color="#922b21",
+                      hover_color="#641e16", command=_revertir).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="Cerrar", width=100, fg_color="#7f8c8d",
+                      hover_color="#5d6d6e", command=ventana_h.destroy).pack(side="right", padx=6)
+
+    def _revertir_conciliacion(self, id_auditoria, id_asiento, fecha_banco):
+        """Revierte una conciliación: deja el asiento como pendiente y audita."""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return False
+        try:
+            with conn.cursor() as c:
+                c.execute("""UPDATE conciliacion_auditoria
+                             SET estado='REVERTIDO', activo=FALSE,
+                                 modificado=%s
+                             WHERE id=%s""",
+                          (datetime.now().strftime("%Y-%m-%d %H:%M"), id_auditoria))
+                if id_asiento:
+                    c.execute("""UPDATE conciliacion_bancaria
+                                 SET estado='pendiente', fecha_conciliacion=NULL
+                                 WHERE id=%s""", (id_asiento,))
+                c.execute("""INSERT INTO conciliacion_auditoria
+                    (id_asiento, fecha_banco, estado, confianza, reglas, origen_decision,
+                     creado, activo)
+                    VALUES (%s,%s,'REVERTIDO',0,%s,'manual',%s,TRUE)""",
+                          (id_asiento, fecha_banco,
+                           "reversión de la conciliación %s" % id_auditoria,
+                           datetime.now().strftime("%Y-%m-%d %H:%M")))
+            conn.commit()
+            # 🧹 Al revertir, el asiento vuelve a estar pendiente: se refresca la caché.
+            self._cache_asientos = None
+            return True
+        except Exception as error:
+            print("[Conciliación] no se pudo revertir:", error)
+            messagebox.showerror("Revertir", "No se pudo revertir:\n%s" % error,
+                                 parent=self.parent_frame)
+            return False
+        finally:
+            liberar_conexion(conn)
+
+    def _periodo_de_conciliacion(self):
+        """Rango de fechas del mes elegido (±5 días) para sincronizar solo ese período."""
+        import datetime as _dt
+        meses = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+                 "julio": 7, "agosto": 8, "setiembre": 9, "septiembre": 9, "octubre": 10,
+                 "noviembre": 11, "diciembre": 12}
+        try:
+            etiqueta = str(self.cmb_mes.get() or "").strip()
+        except Exception:
+            etiqueta = ""
+        if not etiqueta or "todos" in etiqueta.lower():
+            return None, None
+        partes = etiqueta.split()
+        if len(partes) < 2:
+            return None, None
+        mes = meses.get(partes[0].strip().lower())
+        try:
+            anio = int(partes[-1])
+        except Exception:
+            return None, None
+        if not mes:
+            return None, None
+        desde = _dt.date(anio, mes, 1) - _dt.timedelta(days=5)
+        hasta = (_dt.date(anio + 1, 1, 1) if mes == 12 else _dt.date(anio, mes + 1, 1))             + _dt.timedelta(days=6)
+        return desde, hasta
+
+    def _en_periodo(self, fecha, desde, hasta):
+        """True si la fecha (texto) cae dentro del período (o si no hay filtro)."""
+        if not desde or not hasta:
+            return True
+        import datetime as _dt
+        limpio = str(fecha or "").strip().replace("-", "/")
+        partes = [x for x in limpio.split("/") if x.strip()]
+        try:
+            if len(partes) >= 3:
+                a, b, c = int(partes[0]), int(partes[1]), int(partes[2])
+                real = _dt.date(a, b, c) if a > 31 else _dt.date(c, b, a)
+                return desde <= real <= hasta
+        except Exception:
+            pass
+        return False
+
+    def _asientos_para_conciliar(self, banco, desde=None, hasta=None):
+        """Sincroniza pagos/facturas App_grifo a conciliacion_bancaria y los devuelve.
+
+        ⚠️ Esta función ESCRIBE. La sincronización va acotada a un período: si no
+        hay mes elegido («Todos los meses»), se usa el mes actual. Antes, en ese
+        caso se insertaba TODO el histórico (miles de filas) cada vez que se abría
+        la ventana inteligente.
+
+        'desde'/'hasta' se pueden pasar ya calculados: así la ventana puede llamarla
+        desde un hilo sin tocar Tkinter (leer el combo desde otro hilo es peligroso).
+        """
+        asientos = []
+        if desde is None or hasta is None:
+            _desde, _hasta = self._periodo_de_conciliacion()
+        else:
+            _desde, _hasta = desde, hasta
+        if not (_desde and _hasta):
+            import datetime as _dt
+            _hoy = _dt.date.today()
+            _desde = _dt.date(_hoy.year, _hoy.month, 1) - _dt.timedelta(days=5)
+            _sig_mes = (_hoy.replace(day=28) + _dt.timedelta(days=4)).replace(day=1)
+            _hasta = _sig_mes + _dt.timedelta(days=6)
+        nombre_banco = str(banco.get("banco") or "")
+        # ⚡ caché: evita re-sincronizar y re-consultar en cada repintado (tarda ~10 s)
+        try:
+            _clave_cache = "%s|%s" % (nombre_banco, _desde)
+            _cache = getattr(self, "_cache_asientos", None)
+            if _cache and _cache.get("clave") == _clave_cache:
+                return _cache.get("datos") or []
+        except Exception:
+            _clave_cache = ""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return asientos
+        # 🚫 Movimientos que el usuario ELIMINÓ: no se vuelven a crear al
+        #    sincronizar (era lo que hacía que un asiento borrado reapareciera).
+        try:
+            _ign = self.cargar_ignorados(banco) or {}
+            ign_sistema = _ign.get("sistema", set())
+        except Exception:
+            ign_sistema = set()
+        try:
+            with conn.cursor() as c:
+                # 1) pagos a proveedores (el pago es el que sale del banco)
+                try:
+                    c.execute("""SELECT p.id, p.fecha_pago, p.monto_pagado,
+                                        COALESCE(p.proveedor_nombre,''), p.cuenta_origen,
+                                        COALESCE(p.numero_operacion,'')
+                                 FROM pagos_comprobantes p
+                                 WHERE COALESCE(p.monto_pagado,0) > 0
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM facturas_recibidas f
+                                       WHERE f.id = p.id_factura
+                                         AND f.categoria = 'Combustible y Peajes')
+                                   -- 🚫 Los PAGOS BANCO son el espejo que crea un
+                                   --    egreso MANUAL: el manual ya es el asiento, así
+                                   --    que no se duplica acá (era el «2 candidatos»).
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM facturas_recibidas f2
+                                       WHERE f2.id = p.id_factura
+                                         AND COALESCE(f2.tipo_documento,'') = 'PAGO BANCO')""")
+                    for f in c.fetchall():
+                        if not self._en_periodo(f[1], _desde, _hasta):
+                            continue
+                        cuenta = str(f[4] or "")
+                        if cuenta and nombre_banco and nombre_banco.upper() not in cuenta.upper():
+                            continue
+                        if self._clave_ignorado("sistema", "pagos_comprobantes", f[0], f[1],
+                                                -abs(float(f[2] or 0)), f[3]) in ign_sistema:
+                            continue
+                        c.execute("""SELECT id FROM conciliacion_bancaria
+                                     WHERE origen='s:pagos_comprobantes' AND id_movimiento=%s""",
+                                  (f[0],))
+                        if c.fetchone():
+                            continue
+                        c.execute("""INSERT INTO conciliacion_bancaria
+                            (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                             id_movimiento, estado)
+                            VALUES (%s,%s,%s,%s,%s,'egreso','s:pagos_comprobantes',%s,'')""",
+                                  (nombre_banco, cuenta, f[1], f[3],
+                                   -abs(float(f[2] or 0)), f[0]))
+                except Exception as error:
+                    print("[Conciliación] sincronizar pagos:", error)
+                    conn.rollback()
+                    with conn.cursor() as c:
+                        pass
+                # 2) cobros de clientes
+                try:
+                    with conn.cursor() as c2:
+                        c2.execute("""SELECT p.id, p.fecha_pago, p.monto_pagado,
+                                             COALESCE(p.cliente_nombre,''), p.cuenta_destino
+                                      FROM pagos_clientes p
+                                      WHERE COALESCE(p.monto_pagado,0) > 0""")
+                        for f in c2.fetchall():
+                            if not self._en_periodo(f[1], _desde, _hasta):
+                                continue
+                            cuenta = str(f[4] or "")
+                            if cuenta and nombre_banco and nombre_banco.upper() not in cuenta.upper():
+                                continue
+                            if self._clave_ignorado("sistema", "pagos_clientes", f[0], f[1],
+                                                    abs(float(f[2] or 0)), f[3]) in ign_sistema:
+                                continue
+                            c2.execute("""SELECT id FROM conciliacion_bancaria
+                                          WHERE origen='s:pagos_clientes' AND id_movimiento=%s""",
+                                       (f[0],))
+                            if c2.fetchone():
+                                continue
+                            c2.execute("""INSERT INTO conciliacion_bancaria
+                                (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                                 id_movimiento, estado)
+                                VALUES (%s,%s,%s,%s,%s,'ingreso','s:pagos_clientes',%s,'')""",
+                                       (nombre_banco, cuenta, f[1], f[3],
+                                        abs(float(f[2] or 0)), f[0]))
+                except Exception as error:
+                    print("[Conciliación] sincronizar cobros:", error)
+                    conn.rollback()
+                # 3) facturas del App_grifo SIN pago registrado -> van directo al banco
+                # 💳 la cuenta del App Grifo se define en Configuración General
+                cuenta_grifo = ""
+                try:
+                    from config_nube import cargar_cuenta_grifo
+                    cuenta_grifo = str(cargar_cuenta_grifo() or "")
+                except Exception as error:
+                    print("[Conciliación] cuenta App Grifo:", error)
+                coincide_grifo = True
+                if cuenta_grifo:
+                    cuenta_banco = str(banco.get("cuenta") or "")
+                    coincide_grifo = (nombre_banco.upper() in cuenta_grifo.upper()
+                                      or (cuenta_banco and cuenta_banco in cuenta_grifo)
+                                      or cuenta_grifo.upper() in nombre_banco.upper())
+                    print("[Conciliación] cuenta App Grifo configurada:", cuenta_grifo,
+                          "· coincide:", coincide_grifo)
+                if coincide_grifo:
+                    try:
+                        with conn.cursor() as c3:
+                            c3.execute("""SELECT f.id, f.fecha, f.proveedor, f.total
+                                          FROM facturas_recibidas f
+                                          WHERE f.categoria = 'Combustible y Peajes'
+                                            AND COALESCE(f.total,0) > 0""")
+                            for f in c3.fetchall():
+                                if not self._en_periodo(f[1], _desde, _hasta):
+                                    continue
+                                if self._clave_ignorado("sistema", "facturas_recibidas", f[0],
+                                                        f[1], -abs(float(f[3] or 0)),
+                                                        f[2]) in ign_sistema:
+                                    continue
+                                c3.execute("""SELECT id FROM conciliacion_bancaria
+                                              WHERE origen='s:facturas_recibidas'
+                                                AND id_movimiento=%s""", (f[0],))
+                                if c3.fetchone():
+                                    continue
+                                c3.execute("""INSERT INTO conciliacion_bancaria
+                                    (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                                     id_movimiento, estado)
+                                    VALUES (%s,%s,%s,%s,%s,'egreso','s:facturas_recibidas',%s,'')""",
+                                           (nombre_banco, "", f[1], f[2],
+                                            -abs(float(f[3] or 0)), f[0]))
+                    except Exception as error:
+                        print("[Conciliación] sincronizar App_grifo:", error)
+                        conn.rollback()
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+                # 4) asientos del banco (ya incluyen lo sincronizado)
+                # 🚫 Se excluyen los YA conciliados (por la vía clásica o por el
+                #    motor) para que no se vuelvan a proponer y se puedan cruzar
+                #    dos veces con la misma línea del estado de cuenta.
+                c.execute("""SELECT id, fecha, descripcion, monto
+                             FROM conciliacion_bancaria
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                               AND COALESCE(estado,'') <> 'conciliado'
+                               AND id NOT IN (
+                                   SELECT id_asiento FROM conciliacion_auditoria
+                                   WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                     AND estado = 'APROBADO'
+                                     AND COALESCE(activo, TRUE) = TRUE
+                                     AND id_asiento IS NOT NULL)
+                             ORDER BY fecha""", (nombre_banco, nombre_banco))
+                for f in c.fetchall():
+                    asientos.append({"id": f[0], "id_asiento": f[0],
+                                     "tabla": "conciliacion_bancaria",
+                                     "fecha": f[1], "descripcion": f[2], "monto": f[3],
+                                     "banco": nombre_banco})
+        except Exception as error:
+            print("[Conciliación] asientos:", error)
+        finally:
+            liberar_conexion(conn)
+        try:
+            if _clave_cache:
+                self._cache_asientos = {'clave': _clave_cache, 'datos': asientos}
+        except Exception:
+            pass
+        return asientos
+
+    def _aplicar_conciliacion_inteligente(self, banco, propuesta, decision, origen="manual"):
+        """Marca el asiento como conciliado (solo si se APRUEBA) y audita.
+
+        'origen' queda en la auditoría: 'manual' si lo aprobó el usuario,
+        'auto' si fue una coincidencia del 100 % aplicada automáticamente.
+        """
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Conciliación", "Sin conexión a la base de datos.",
+                                 parent=self.parent_frame)
+            return False
+        try:
+            with conn.cursor() as c:
+                _id_asiento = propuesta.get("id_asiento")
+                _id_int = _id_asiento if isinstance(_id_asiento, int) else None
+                if decision == "APROBADO" and _id_int:
+                    c.execute("""UPDATE conciliacion_bancaria
+                                 SET estado='conciliado', fecha_conciliacion=%s
+                                 WHERE id=%s""",
+                              (datetime.now().strftime("%d/%m/%Y"), _id_int))
+                c.execute("""INSERT INTO conciliacion_auditoria
+                    (id_asiento, banco, cuenta, fecha_contable, fecha_banco, dias_desfase,
+                     descripcion_contable, descripcion_banco, importe_contable, importe_banco,
+                     diferencia, sentido, referencia, pagina_pdf, nivel, estado, confianza,
+                     reglas, observacion, accion_sugerida, origen_decision, aprobado_por,
+                     creado, activo)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (_id_int, propuesta["banco"], propuesta.get("cuenta", ""),
+                     propuesta["fecha_contable"], propuesta["fecha_banco"],
+                     propuesta["dias_desfase"], propuesta["descripcion_contable"],
+                     propuesta["descripcion_banco"], propuesta["importe_contable"],
+                     propuesta["importe_banco"], propuesta.get("diferencia", 0),
+                     propuesta["sentido"],
+                     propuesta.get("referencia") or (str(_id_asiento) if not _id_int else ""),
+                     propuesta.get("pagina_pdf"), propuesta["nivel"], decision,
+                     propuesta["confianza"], propuesta["reglas"],
+                     propuesta.get("observacion", ""), propuesta.get("accion_sugerida", ""),
+                     origen or "manual", "", datetime.now().strftime("%Y-%m-%d %H:%M"), True))
+            conn.commit()
+            # 🧹 El asiento cambió de estado: la lista cacheada de asientos ya no
+            #    sirve (si no, el recién conciliado volvía a salir como candidato).
+            self._cache_asientos = None
+            return True
+        except Exception as error:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._cache_asientos = None
+            print("[Conciliación] no se pudo aplicar:", error)
+            messagebox.showerror("Conciliación", "No se pudo aplicar:\n%s" % error,
+                                 parent=self.parent_frame)
+            return False
+        finally:
+            liberar_conexion(conn)
+
+    def _auto_seleccionar_periodo(self, movs, texto_pdf=""):
+        """Detecta el mes del estado de cuenta, lo selecciona y baja los movimientos."""
+        try:
+            import datetime as _dt
+
+            def _fecha_de(txt):
+                if hasattr(txt, "year") and hasattr(txt, "month"):
+                    return _dt.date(txt.year, txt.month, getattr(txt, "day", 1))
+                limpio = str(txt or "").strip().replace("-", "/")
+                partes = [x for x in limpio.split("/") if x.strip()]
+                try:
+                    if len(partes) >= 3:
+                        a, b, c = int(partes[0]), int(partes[1]), int(partes[2])
+                        return _dt.date(a, b, c) if a > 31 else _dt.date(c, b, a)
+                except Exception:
+                    pass
+                return None
+            if not (movs or []):
+                movs = getattr(self, "movimientos_pdf", []) or []
+            fechas = [f for f in (_fecha_de(m.get("fecha")) for m in (movs or [])) if f]
+            if not fechas:
+                print("[Conciliación] no se pudo leer la fecha de los movimientos del PDF")
+                return
+            ultima = max(fechas)
+            # 🔑 Se compara por número de mes («2026-09»), no por el nombre: antes
+            #    buscaba «Setiembre» y el desplegable dice «Septiembre», así que en
+            #    septiembre nunca se seleccionaba el mes solo.
+            clave_pdf = "%04d-%02d" % (ultima.year, ultima.month)
+            etiqueta = "%s %d" % (NOMBRES_MESES[ultima.month - 1], ultima.year)
+            try:
+                valores = list(self.cmb_mes.cget("values") or [])
+                elegido = ""
+                for valor in valores:
+                    if mes_etiqueta_a_key(valor) == clave_pdf:
+                        elegido = valor
+                        break
+                if not elegido:
+                    for valor in valores:
+                        if etiqueta.lower() in str(valor).lower():
+                            elegido = valor
+                            break
+                if elegido:
+                    self.cmb_mes.set(elegido)
+                    print("[Conciliación] mes detectado en el PDF:", elegido)
+            except Exception as error:
+                print("[Conciliación] mes del PDF:", error)
+            # 🏦 detectar el banco por palabras del estado de cuenta
+            try:
+                pistas = " ".join(str(m.get("descripcion") or "") for m in (movs or []))
+                pistas += " " + str(texto_pdf or "") + " " + str(getattr(self, "texto_pdf", "") or "")
+                crudo = pistas
+                pistas = pistas.upper()
+                # 🔢 números de cuenta que aparecen en el PDF (ej. 297-3007235833)
+                import re as _re
+                cuentas_pdf = set()
+                for hallado in _re.finditer(r"\d[\d\-\.]{6,}", crudo):
+                    solo_digitos = _re.sub(r"\D", "", hallado.group(0))
+                    if len(solo_digitos) >= 8:
+                        cuentas_pdf.add(solo_digitos)
+                # 1️⃣ Por NÚMERO DE CUENTA (lo más fiable).
+                banco_por_cuenta = False
+                for banco in (self.bancos or []):
+                    cuenta_banco = _re.sub(r"\D", "", str(banco.get("cuenta") or ""))
+                    if cuenta_banco and any(cuenta_banco in c or c in cuenta_banco
+                                            for c in cuentas_pdf):
+                        etiqueta = construir_etiqueta_banco(banco)
+                        if self.cmb_banco.get() != etiqueta:
+                            self.cmb_banco.set(etiqueta)
+                            print("[Conciliación] banco por número de cuenta:", etiqueta)
+                        banco_por_cuenta = True
+                        break
+                # 2️⃣ Solo si la cuenta no lo identificó, por nombre del banco.
+                #    ⚠️ No se puede mirar el texto completo cuando la cuenta ya lo
+                #    identificó: un estado del BCP menciona «TRANSF.BCO.INTERBANK»
+                #    en cada transferencia y antes eso cambiaba el banco a Interbank.
+                nombres = {"INTERBANK": "INTERBANK", "BCP": "BCP", "BANCO DE CREDITO": "BCP",
+                           "BBVA": "BBVA", "CONTINENTAL": "BBVA", "SCOTIABANK": "SCOTIABANK",
+                           "BANBIF": "BANBIF", "PICHINCHA": "PICHINCHA", "NACION": "NACION"}
+                detectado = ""
+                if not banco_por_cuenta:
+                    for clave, nombre in nombres.items():
+                        if clave in pistas:
+                            detectado = nombre
+                            break
+                if detectado:
+                    for banco in (self.bancos or []):
+                        etiqueta = construir_etiqueta_banco(banco)
+                        if detectado in etiqueta.upper():
+                            if self.cmb_banco.get() != etiqueta:
+                                self.cmb_banco.set(etiqueta)
+                                print("[Conciliación] banco detectado en el PDF:", etiqueta)
+                            break
+            except Exception as error:
+                print("[Conciliación] banco del PDF:", error)
+            try:
+                self.actualizar_saldos_boton()
+                print("[Conciliación] movimientos del sistema actualizados para ese período.")
+            except Exception as error:
+                print("[Conciliación] carga automática:", error)
+        except Exception as error:
+            print("[Conciliación] selección automática:", error)
+
+    def _datos_del_estado_cuenta(self, banco, movs):
+        """Resumen del estado de cuenta a guardar y qué hay ya cargado en esa cuenta."""
+        fechas = sorted(f for f in (normalizar_fecha(m.get("fecha")) for m in movs) if f)
+        datos = {
+            "banco": banco.get("banco", "") or "",
+            "cuenta": banco.get("cuenta", "") or "",
+            "periodo": periodo_de_movimientos(movs),
+            "lineas": len(movs),
+            "neto": round(sum(float(m.get("monto") or 0) for m in movs), 2),
+            "desde": fechas[0] if fechas else "",
+            "hasta": fechas[-1] if fechas else "",
+            "previo_lineas": 0,
+            "previo_neto": 0.0,
+        }
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return datos
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT COUNT(*), COALESCE(SUM(monto), 0)
+                             FROM conciliacion_movimientos_pdf
+                             WHERE banco = %s AND COALESCE(cuenta,'') = %s
+                               AND COALESCE(periodo,'') = %s""",
+                          (datos["banco"], datos["cuenta"], datos["periodo"]))
+                fila = c.fetchone() or (0, 0)
+                datos["previo_lineas"] = int(fila[0] or 0)
+                datos["previo_neto"] = round(float(fila[1] or 0), 2)
+        except Exception as error:
+            print("[Conciliación] resumen del estado de cuenta:", error)
+        finally:
+            liberar_conexion(conn)
+        return datos
+
+    def _banco_que_parece_el_pdf(self, movs, texto_pdf=""):
+        """Nombre del banco que se deduce del PDF (número de cuenta o palabras)."""
+        try:
+            crudo = " ".join(str(m.get("descripcion") or "") for m in (movs or []))
+            crudo += " " + str(texto_pdf or "") + " " + str(getattr(self, "texto_pdf", "") or "")
+            numeros = set()
+            for hallado in re.finditer(r"\d[\d\-\.]{6,}", crudo):
+                solo = re.sub(r"\D", "", hallado.group(0))
+                if len(solo) >= 8:
+                    numeros.add(solo)
+            for banco in (self.bancos or []):
+                cuenta = re.sub(r"\D", "", str(banco.get("cuenta") or ""))
+                if cuenta and any(cuenta in n or n in cuenta for n in numeros):
+                    return construir_etiqueta_banco(banco)
+            pistas = crudo.upper()
+            for clave, nombre in (("INTERBANK", "INTERBANK"), ("BANCO DE CREDITO", "BCP"),
+                                  ("BCP", "BCP"), ("BBVA", "BBVA"), ("CONTINENTAL", "BBVA"),
+                                  ("SCOTIABANK", "SCOTIABANK"), ("BANBIF", "BANBIF"),
+                                  ("PICHINCHA", "PICHINCHA")):
+                if clave in pistas:
+                    for banco in (self.bancos or []):
+                        if nombre in construir_etiqueta_banco(banco).upper():
+                            return construir_etiqueta_banco(banco)
+        except Exception as error:
+            print("[Conciliación] banco del PDF:", error)
+        return ""
+
+    def _confirmar_guardado_estado_cuenta(self, banco, movs):
+        """Cartel de confirmación antes de guardar el PDF. Devuelve True = guardar.
+
+        Muestra banco, cuenta, número de líneas, fechas y neto, avisa si ese estado
+        de cuenta YA estaba cargado y si el PDF parece ser de otro banco. Antes se
+        guardaba directo con el banco del combo y la detección automática cambiaba
+        después el combo, así que un archivo podía quedar cargado en el banco
+        equivocado sin que nadie lo notara.
+        """
+        if not movs:
+            return False
+        datos = self._datos_del_estado_cuenta(banco, movs)
+        etiqueta = construir_etiqueta_banco(banco)
+
+        def _f(valor):
+            return fecha_para_mostrar(valor) if valor else "—"
+
+        texto = ("¿Guardar este estado de cuenta?\n\n"
+                 "Banco:        %s\n"
+                 "Cuenta:       %s\n"
+                 "Período:      %s\n"
+                 "Movimientos:  %d\n"
+                 "Fechas:       %s al %s\n"
+                 "Neto:         %s\n"
+                 % (datos["banco"] or "(sin nombre)",
+                    datos["cuenta"] or "(sin número de cuenta)",
+                    datos["periodo"] or "(sin período)",
+                    datos["lineas"], _f(datos["desde"]), _f(datos["hasta"]),
+                    formatear_monto(datos["neto"])))
+
+        if datos["previo_lineas"]:
+            mismo = (datos["previo_lineas"] == datos["lineas"]
+                     and abs(datos["previo_neto"] - datos["neto"]) < 0.01)
+            if mismo:
+                texto += ("\n✅ Este estado de cuenta YA está cargado para esta cuenta y "
+                          "período (%d línea(s), neto %s). Se volverá a guardar igual.\n"
+                          % (datos["previo_lineas"], formatear_monto(datos["previo_neto"])))
+            else:
+                texto += ("\nℹ️ Ya hay un estado de cuenta cargado para esta cuenta en "
+                          "este período (%d línea(s), neto %s). Se REEMPLAZARÁ por el nuevo; "
+                          "los demás meses se conservan.\n"
+                          % (datos["previo_lineas"], formatear_monto(datos["previo_neto"])))
+
+        detectado = self._banco_que_parece_el_pdf(movs)
+        if detectado and detectado != etiqueta:
+            texto += ("\n⚠️ El PDF parece ser de %s, pero está seleccionado %s.\n"
+                      "Si lo guarda aquí, la conciliación de %s usará este archivo."
+                      % (detectado, etiqueta, etiqueta))
+            return messagebox.askyesno("Estado de cuenta · ¡revisar banco!", texto,
+                                       parent=self.parent_frame, icon="warning")
+        return messagebox.askyesno("Confirmar estado de cuenta", texto,
+                                   parent=self.parent_frame)
+
+    def _archivar_estado_cuenta(self, banco, movs, origen):
+        """Copia el PDF del estado de cuenta a la carpeta sincronizada.
+
+        Queda en «estados_cuenta/<BANCO>/<cuenta>/<AAAA-MM>.pdf», dentro de la
+        carpeta que sincroniza Rclone con Google Drive. Devuelve la ruta como se
+        guarda en la base (relativa si está dentro de la carpeta sincronizada).
+        """
+        if not origen or not os.path.isfile(origen):
+            return ""
+        try:
+            base = obtener_ruta_base()
+        except Exception:
+            base = ""
+        if not base:
+            print("[Conciliación] El equipo no tiene carpeta de archivos autorizada: "
+                  "el estado de cuenta no se archivó.")
+            return ""
+
+        def _limpio(texto):
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", str(texto or "")).strip("_") or "sin_dato"
+
+        periodo = periodo_de_movimientos(movs)
+        carpeta = os.path.join(base, "estados_cuenta", _limpio(banco.get("banco", "")),
+                               _limpio(banco.get("cuenta", "")))
+        destino = os.path.join(carpeta, "%s.pdf" % _limpio(periodo))
+        try:
+            os.makedirs(carpeta, exist_ok=True)
+            if os.path.abspath(origen) != os.path.abspath(destino):
+                shutil.copy2(origen, destino)
+            print("[Conciliación] estado de cuenta archivado en:", destino)
+            return ruta_para_guardar(destino) or destino
+        except Exception as error:
+            print("[Conciliación] no se pudo archivar el estado de cuenta:", error)
+            return ""
+
+    def _guardar_movimientos_pdf(self, banco, movs, archivo=""):
+        self._cache_asientos = None      # 🧹 nuevo PDF: se refresca la caché
         """Guarda las líneas del estado de cuenta (PDF) para no perderlas al salir."""
         if not banco or not movs:
             return
@@ -3952,11 +7046,18 @@ class ModuloBancoApp:
             return
         try:
             with conn.cursor() as c:
-                # 🛡️ ¿ya estaba cargado este mismo estado de cuenta? (mismas líneas y mismo total)
+                # 🏦 Clave del estado de cuenta: banco + CUENTA (antes solo banco:
+                #    subir el PDF de la 2ª cuenta borraba el de la 1ª).
+                nombre_banco = banco.get("banco", "")
+                cuenta = banco.get("cuenta", "") or ""
+                periodo = periodo_de_movimientos(movs)
+                # 🛡️ ¿ya estaba cargado este mismo estado de cuenta? (líneas, total y período)
                 try:
                     c.execute("""SELECT COUNT(*), COALESCE(SUM(monto), 0)
-                                 FROM conciliacion_movimientos_pdf WHERE banco = %s""",
-                              (banco.get("banco", ""),))
+                                 FROM conciliacion_movimientos_pdf
+                                 WHERE banco = %s AND COALESCE(cuenta,'') = %s
+                                   AND COALESCE(periodo,'') = %s""",
+                              (nombre_banco, cuenta, periodo))
                     fila_previa = c.fetchone() or (0, 0)
                     total_nuevo = round(sum(float(m.get("monto") or 0) for m in movs), 2)
                     if (int(fila_previa[0] or 0) == len(movs)
@@ -3967,23 +7068,47 @@ class ModuloBancoApp:
                               "con la conciliación." % (len(movs), total_nuevo))
                 except Exception as error_repetido:
                     print("[Conciliación] revisión de estado repetido:", error_repetido)
-                c.execute("DELETE FROM conciliacion_movimientos_pdf WHERE banco = %s",
-                          (banco.get("banco", ""),))
+                # 📅 Se reemplaza SÓLO ese período: los demás meses del mismo banco
+                #    y cuenta se conservan (antes se borraba todo el banco/cuenta).
+                c.execute("DELETE FROM conciliacion_movimientos_pdf "
+                          "WHERE banco = %s AND COALESCE(cuenta,'') = %s "
+                          "AND COALESCE(periodo,'') = %s",
+                          (nombre_banco, cuenta, periodo))
+                # Filas viejas (cargadas antes de existir 'periodo') de ese mismo mes.
+                c.execute("DELETE FROM conciliacion_movimientos_pdf "
+                          "WHERE banco = %s AND COALESCE(cuenta,'') = %s "
+                          "AND COALESCE(periodo,'') = '' AND fecha LIKE %s",
+                          (nombre_banco, cuenta, periodo + "%"))
+                if cuenta:
+                    # Y las que no tienen cuenta (datos viejos) de ese mes.
+                    c.execute("DELETE FROM conciliacion_movimientos_pdf "
+                              "WHERE banco = %s AND COALESCE(cuenta,'') = '' "
+                              "AND fecha LIKE %s",
+                              (nombre_banco, periodo + "%"))
                 for m in movs:
                     c.execute("""INSERT INTO conciliacion_movimientos_pdf
-                        (banco, fecha, descripcion, monto, saldo, creado)
-                        VALUES (%s,%s,%s,%s,%s,%s)""",
-                        (banco.get("banco", ""), str(m.get("fecha") or ""),
+                        (banco, cuenta, periodo, fecha, descripcion, monto, saldo, creado,
+                         archivo_ruta)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (nombre_banco, cuenta, periodo, str(m.get("fecha") or ""),
                          str(m.get("descripcion") or ""), float(m.get("monto") or 0),
-                         m.get("saldo"), datetime.now().strftime("%Y-%m-%d %H:%M")))
+                         m.get("saldo"), datetime.now().strftime("%Y-%m-%d %H:%M"),
+                         archivo or ""))
             conn.commit()
         except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             print("[Conciliación] No se pudo guardar el estado de cuenta:", e)
         finally:
             liberar_conexion(conn)
 
-    def _cargar_movimientos_pdf(self, banco):
-        """Recupera las líneas del estado de cuenta guardadas para este banco."""
+    def _cargar_movimientos_pdf(self, banco, periodo=None):
+        """Líneas del estado de cuenta de este banco.
+
+        Si se indica 'periodo' (AAAA-MM) se traen sólo las de ese mes; si no, todas.
+        """
         if not banco:
             return []
         conn = conectar_db(silencioso=True)
@@ -3991,13 +7116,26 @@ class ModuloBancoApp:
             return []
         try:
             with conn.cursor() as c:
-                c.execute("""SELECT fecha, descripcion, monto, saldo
-                             FROM conciliacion_movimientos_pdf WHERE banco = %s ORDER BY id""",
-                          (banco.get("banco", ""),))
+                nombre_banco = banco.get("banco", "")
+                cuenta = banco.get("cuenta", "") or ""
+                sql = ("""SELECT fecha, descripcion, monto, saldo, COALESCE(periodo,'')
+                          FROM conciliacion_movimientos_pdf
+                          WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                            AND COALESCE(cuenta,'') = %s""")
+                args = [nombre_banco, cuenta]
+                if periodo:
+                    # Se aceptan las filas viejas sin período si su fecha es de ese mes.
+                    sql += (" AND (COALESCE(periodo,'') = %s"
+                            " OR (COALESCE(periodo,'') = '' AND fecha LIKE %s))")
+                    args += [periodo, periodo + "%"]
+                sql += " ORDER BY id"
+                c.execute(sql, tuple(args))
+                filas = c.fetchall()
                 return [{"fecha": f or "", "descripcion": d or "",
                          "monto": float(m or 0),
-                         "saldo": (float(s) if s is not None else None)}
-                        for f, d, m, s in c.fetchall()]
+                         "saldo": (float(s) if s is not None else None),
+                         "periodo": (str(per) or "") if per else ""}
+                        for f, d, m, s, per in filas]
         except Exception:
             return []
         finally:
@@ -4058,7 +7196,36 @@ class ModuloBancoApp:
             try:
                 _banco_pdf = self.banco_seleccionado()
                 if _banco_pdf and self.movimientos_pdf:
-                    self._guardar_movimientos_pdf(_banco_pdf, self.movimientos_pdf)
+                    # ✅ Confirmación: banco + cuenta + líneas + fechas + neto, y aviso
+                    #    si ya estaba cargado o si el PDF parece de otro banco.
+                    if not self._confirmar_guardado_estado_cuenta(_banco_pdf, self.movimientos_pdf):
+                        # 🚫 Cancelado: se descarta lo leído y se vuelve a lo que hay
+                        #    guardado en la base (no dejar datos sin guardar en pantalla).
+                        try:
+                            self.movimientos_pdf = self._cargar_movimientos_pdf(
+                                _banco_pdf, mes_etiqueta_a_key(self.cmb_mes.get())) or []
+                            self._banco_pdf = _banco_pdf.get("banco", "")
+                            self._mes_pdf = mes_etiqueta_a_key(self.cmb_mes.get()) or ""
+                        except Exception:
+                            self.movimientos_pdf = []
+                        self.lbl_resumen.configure(
+                            text="🚫 No se guardó el estado de cuenta (cancelado).")
+                        self.generar_reporte()
+                        return
+                    # 📎 Se archiva el PDF en la carpeta sincronizada
+                    #    (estados_cuenta/<BANCO>/<cuenta>/<AAAA-MM>.pdf).
+                    _archivo_pdf = self._archivar_estado_cuenta(
+                        _banco_pdf, self.movimientos_pdf, ruta)
+                    self._guardar_movimientos_pdf(_banco_pdf, self.movimientos_pdf,
+                                                  _archivo_pdf)
+                    # 🔁 Se fuerza recargar desde la base con el período correcto
+                    #    (la fecha del estado recién subido puede cambiar el mes).
+                    self._banco_pdf = None
+                    self._mes_pdf = None
+                    try:
+                        self._auto_seleccionar_periodo((estado.get('movimientos') if isinstance(estado, dict) else None) or getattr(self, 'movimientos_pdf', []) or [], getattr(self, 'texto_pdf', '') or '')
+                    except Exception as _e_periodo:
+                        print('[Conciliación] período automático:', _e_periodo)
                     self._banco_pdf = _banco_pdf.get("banco", "")
             except Exception as _e_pdf:
                 print("[Conciliación] No se pudo guardar el estado de cuenta:", _e_pdf)
@@ -4081,8 +7248,10 @@ class ModuloBancoApp:
         if idm:
             lado = ("|ingreso" if float(monto or 0) >= 0 else "|egreso") if tabla == "transferencias_bancarias" else ""
             return f"{tabla or ''}|{idm}{lado}"
-        return "pdf|%s|%.2f|%s" % (normalizar_fecha(fecha), float(monto or 0),
-                                   _norm_texto(descripcion))
+        # 📄 Las líneas del estado de cuenta se reconocen por FECHA + IMPORTE
+        #    (no por la descripción: un espacio de diferencia hacía que la línea
+        #    «eliminada» volviera a aparecer al recalcular).
+        return "pdf|%s|%.2f" % (normalizar_fecha(fecha), float(monto or 0))
 
     def cargar_ignorados(self, banco):
         """Movimientos que el usuario eliminó en la conciliación de este banco.
@@ -4129,6 +7298,112 @@ class ModuloBancoApp:
               str(f.get("fecha", "") or ""), str(f.get("descripcion", "") or ""),
               float(f.get("monto", 0) or 0), datetime.now().strftime("%Y-%m-%d %H:%M")))
 
+    def eliminar_ocultos_definitivo(self):
+        """🗑️ Borra del PDF y de la lista de ocultos las líneas del mes.
+
+        No toca los asientos del sistema: solo elimina definitivamente las
+        líneas del estado de cuenta que estaban marcadas como ocultas.
+        """
+        banco = self.banco_seleccionado()
+        if not banco:
+            return
+        try:
+            mes_key = mes_etiqueta_a_key(self.cmb_mes.get())
+        except Exception:
+            mes_key = ""
+        if not mes_key:
+            messagebox.showwarning("Eliminar ocultos", "Seleccione un mes.", parent=self.parent_frame)
+            return
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Error", "Sin conexión a la base de datos.", parent=self.parent_frame)
+            return
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT id, fecha, monto, descripcion
+                             FROM conciliacion_ignorados
+                             WHERE banco=%s AND origen='estado_cuenta'
+                             ORDER BY fecha, id""", (banco.get("banco", ""),))
+                filas = []
+                for r in c.fetchall():
+                    f = normalizar_fecha(r[1])
+                    if f.startswith(mes_key):
+                        filas.append({"id": r[0], "fecha": f, "monto": float(r[2] or 0),
+                                      "descripcion": str(r[3] or "")})
+                if not filas:
+                    messagebox.showinfo("Eliminar ocultos",
+                                        "No hay líneas ocultas en este mes.",
+                                        parent=self.parent_frame)
+                    return
+                detalle = "\n".join(
+                    "• %s   %s   %s" % (f["fecha"], formatear_monto(f["monto"]),
+                                         f["descripcion"][:55])
+                    for f in filas[:8])
+                if len(filas) > 8:
+                    detalle += "\n… y %d más" % (len(filas) - 8)
+                if not messagebox.askyesno(
+                        "Eliminar ocultos definitivamente",
+                        "Se eliminarán DEFINITIVAMENTE %d línea(s) ocultas del estado de cuenta "
+                        "de %s · %s:\n\n%s\n\n"
+                        "Se borrarán del PDF cargado y de la lista de ocultos. Se guardará un "
+                        "respaldo JSON.\n\n"
+                        "No se tocan los asientos del sistema; si alguno queda sin línea, la "
+                        "diferencia puede continuar.\n\n¿Continuar?"
+                        % (len(filas), construir_etiqueta_banco(banco), self.cmb_mes.get(), detalle),
+                        parent=self.parent_frame):
+                    return
+                # Respaldo antes de borrar
+                try:
+                    respaldo = {"creado": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                "banco": banco.get("banco", ""), "cuenta": banco.get("cuenta", ""),
+                                "mes": mes_key, "ignorados": filas}
+                    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        "respaldo_eliminar_ocultos_%s.json"
+                                        % datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+                    with open(ruta, "w", encoding="utf-8") as f:
+                        json.dump(respaldo, f, ensure_ascii=False, indent=1)
+                except Exception as error:
+                    print("[Ocultos] respaldo:", error)
+                borradas_pdf = 0
+                for f in filas:
+                    base_sql = """SELECT id FROM conciliacion_movimientos_pdf
+                                  WHERE banco=%s AND cuenta=%s
+                                    AND fecha=%s AND ABS(monto-%s)<=0.005
+                                    AND (periodo=%s OR periodo IS NULL OR periodo='')"""
+                    params = (banco.get("banco", ""), banco.get("cuenta", ""),
+                              f["fecha"], f["monto"], mes_key)
+                    # Primero por descripción exacta: evita borrar otra línea
+                    # visible del mismo importe y fecha.
+                    c.execute(base_sql + " AND descripcion=%s ORDER BY id LIMIT 1",
+                              params + (f["descripcion"],))
+                    r = c.fetchone()
+                    if not r:
+                        pref = f["descripcion"][:18]
+                        c.execute(base_sql + " AND descripcion LIKE %s ORDER BY id LIMIT 1",
+                                  params + (pref + "%",))
+                        r = c.fetchone()
+                    if r:
+                        c.execute("DELETE FROM conciliacion_movimientos_pdf WHERE id=%s", (r[0],))
+                        borradas_pdf += 1
+                    c.execute("DELETE FROM conciliacion_ignorados WHERE id=%s", (f["id"],))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            messagebox.showerror("Error", f"No se pudieron eliminar los ocultos:\n{e}",
+                                 parent=self.parent_frame)
+            return
+        finally:
+            liberar_conexion(conn)
+        registrar_auditoria(self.usuario_activo, "Banco",
+                            f"Eliminó definitivamente {len(filas)} línea(s) oculta(s) de "
+                            f"{construir_etiqueta_banco(banco)} · {self.cmb_mes.get()} "
+                            f"(PDF borradas: {borradas_pdf})")
+        # Forzar recarga del PDF y del reporte
+        self.movimientos_pdf = []
+        self._banco_pdf = None
+        self._mes_pdf = ""
+        self.generar_reporte()
+
     def restaurar_ignorados(self):
         """Vuelve a mostrar los movimientos que se habían eliminado de la lista."""
         banco = self.banco_seleccionado()
@@ -4160,182 +7435,204 @@ class ModuloBancoApp:
                             f"{construir_etiqueta_banco(banco)}")
         self.generar_reporte()
 
-    def generar_reporte(self):
-        """Recalcula la conciliación del banco y del mes elegidos.
+    @staticmethod
+    def _mes_desplazado(mes_key, delta):
+        """'2026-09' + 1 -> '2026-10'; -1 -> '2026-08'."""
+        try:
+            anio, mes = [int(x) for x in str(mes_key).split("-")[:2]]
+            total = anio * 12 + (mes - 1) + int(delta)
+            return "%04d-%02d" % (total // 12, (total % 12) + 1)
+        except Exception:
+            return ""
 
-        Las consultas (cobros, pagos, transferencias, movimientos manuales e
-        ignorados) suman entre 2 y 6 segundos: se hacen en segundo plano para que
-        la ventana NO se congele mientras se arma la conciliación.
+    def _dias_desfase_actual(self):
+        """Mismo ajuste «Días de desfase» de la Conciliación inteligente."""
+        try:
+            return max(1, int(getattr(self, "_dias_desfase", 5) or 5))
+        except Exception:
+            return 5
+
+    @staticmethod
+    def _asiento_coincide_linea(asiento, linea, comision=0.0, max_dias=7):
+        """¿El asiento puede ser la misma operación que la línea del banco?"""
+        if not _monto_coincide_banco(linea.get("monto"), asiento.get("monto"), comision):
+            return False
+        return _dias_entre_fechas(asiento.get("fecha"), linea.get("fecha")) <= max_dias
+
+    def _traer_pendientes_mes_anterior(self, banco, mes_key, sys_movs, bank_movs, comision=0.0):
+        """Asientos de fin del mes anterior que aparecen en este estado de cuenta.
+
+        Sirve para pagos como el del 30/09 que el banco posteó el 02/10: se
+        incluyen en el mes siguiente para que se crucen con su línea real.
         """
+        mes_prev = self._mes_desplazado(mes_key, -1)
+        if not mes_prev or not bank_movs:
+            return []
+        dias_desfase = self._dias_desfase_actual()
+        # Sólo hace falta si hay líneas del banco en los primeros días del mes.
+        try:
+            primeros = [b for b in bank_movs
+                        if int(clave_fecha(b.get("fecha"))[8:10] or 99) <= dias_desfase]
+        except Exception:
+            primeros = []
+        if not primeros:
+            return []
+        try:
+            previos = self.cargar_movimientos_sistema(banco, mes=mes_prev) or []
+        except Exception as error:
+            print("[Conciliación] pendientes mes anterior:", error)
+            return []
+        try:
+            ignorados = self.cargar_ignorados(banco).get("sistema", set())
+            conciliados = self.cargar_conciliados(banco)
+        except Exception:
+            ignorados, conciliados = set(), set()
+        existentes = {(m.get("tabla"), m.get("id"),
+                       normalizar_fecha(m.get("fecha")),
+                       round(float(m.get("monto") or 0), 2)) for m in sys_movs}
+        try:
+            anio, mes = [int(x) for x in mes_prev.split("-")[:2]]
+            ultimo_dia = calendar.monthrange(anio, mes)[1]
+        except Exception:
+            return []
+        salida = []
+        for m in previos:
+            if m.get("espejo_banco"):
+                continue
+            f = normalizar_fecha(m.get("fecha"))
+            if not f.startswith(mes_prev):
+                continue
+            try:
+                dia = int(f[8:10])
+            except Exception:
+                continue
+            # Últimos N días del mes, con el mismo «Días de desfase» de la
+            # Conciliación inteligente.
+            if dia < ultimo_dia - (dias_desfase - 1):
+                continue
+            if self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
+                                    m.get("id", 0), m.get("fecha"), m.get("monto"),
+                                    m.get("descripcion")) in ignorados:
+                continue
+            clave_conc = self._clave_conciliado(
+                "sistema", m.get("tabla", ""), m.get("id", 0), m.get("fecha"),
+                m.get("monto"), m.get("descripcion"))
+            if clave_conc in conciliados:
+                continue
+            clave = (m.get("tabla"), m.get("id"), f, round(float(m.get("monto") or 0), 2))
+            if clave in existentes:
+                continue
+            if any(self._asiento_coincide_linea(m, b, comision, dias_desfase)
+                   for b in bank_movs):
+                copia = dict(m)
+                copia["_pendiente"] = True
+                salida.append(copia)
+        return salida
+
+    def _marcar_pendientes_siguiente(self, filas, banco, mes_key, comision=0.0):
+        """Marca los asientos de fin de mes que aparecen en el estado siguiente."""
+        mes_next = self._mes_desplazado(mes_key, 1)
+        if not mes_next:
+            return []
+        dias_desfase = self._dias_desfase_actual()
+        candidatos = []
+        try:
+            anio, mes = [int(x) for x in str(mes_key).split("-")[:2]]
+            ultimo_dia = calendar.monthrange(anio, mes)[1]
+        except Exception:
+            return []
+        for f in filas:
+            if str(f.get("origen", "")) != "sistema":
+                continue
+            if str(f.get("estado", "")).lower() == "conciliado":
+                continue
+            try:
+                dia = int(clave_fecha(f.get("fecha"))[8:10])
+            except Exception:
+                continue
+            # Últimos N días del mes, con el mismo «Días de desfase» de la
+            # Conciliación inteligente.
+            if dia >= ultimo_dia - (dias_desfase - 1):
+                candidatos.append(f)
+        if not candidatos:
+            return []
+        try:
+            lineas_next = self._cargar_movimientos_pdf(banco, mes_next) or []
+            ign_pdf = self.cargar_ignorados(banco).get("estado_cuenta", set())
+            lineas_next = [b for b in lineas_next
+                           if self._clave_ignorado("estado_cuenta", "", 0, b.get("fecha"),
+                                                   b.get("monto"), b.get("descripcion"))
+                           not in ign_pdf]
+        except Exception as error:
+            print("[Conciliación] estado del mes siguiente:", error)
+            lineas_next = []
+        marcados = []
+        if lineas_next:
+            # Estado siguiente cargado: solo se marca si la línea existe de verdad.
+            for f in candidatos:
+                if any(self._asiento_coincide_linea(f, b, comision, dias_desfase)
+                       for b in lineas_next):
+                    f["estado"] = "pendiente"
+                    f["_pendiente_siguiente"] = True
+                    marcados.append(f)
+            return marcados
+        # Estado siguiente todavía NO cargado: los asientos de fin de mes que
+        # tienen factura/soporte quedan como posibles pendientes. Cuando se
+        # cargue el estado, si no aparecen, vuelven a sobrantes.
+        for f in candidatos:
+            tiene_soporte = (bool(str(f.get("documento") or "").strip())
+                             or int(f.get("id_factura") or 0) > 0)
+            if tiene_soporte:
+                f["estado"] = "pendiente"
+                f["_pendiente_siguiente"] = True
+                marcados.append(f)
+        return marcados
+
+    def generar_reporte(self):
         banco = self.banco_seleccionado()
         if not banco:
             self.lbl_resumen.configure(text="⚠️ No hay banco seleccionado.")
             return
-
-        # 🔁 Si no hay estado de cuenta en memoria (o cambió el banco), se recupera
-        #    el último guardado para que la conciliación no se pierda al reentrar.
-        _banco_actual = banco.get("banco", "")
-        if (not getattr(self, "movimientos_pdf", None)
-                or getattr(self, "_banco_pdf", None) != _banco_actual):
-            try:
-                self.movimientos_pdf = self._cargar_movimientos_pdf(banco)
-                self._banco_pdf = _banco_actual
-            except Exception:
-                self.movimientos_pdf = []
-
-        # 🗓️ Periodo elegido: por defecto "Desde la Fecha de Comienzo" (la que se
-        # configura en Configuración General) hasta el día de hoy.
-        etiqueta_periodo = self.cmb_mes.get()
-        mes_key, desde, hasta = self._periodo_conciliacion(etiqueta_periodo)
-
-        # Cada cálculo lleva un token: así un resultado viejo no pisa al nuevo.
-        self._token_reporte = getattr(self, "_token_reporte", 0) + 1
-        token = self._token_reporte
-        self.lbl_resumen.configure(text="⏳ Cargando los movimientos del sistema...")
-
-        def _recolectar(estado):
-            estado["datos"] = self._reunir_movimientos(banco, mes_key, desde, hasta)
-
-        def _aplicar(estado):
-            if token != getattr(self, "_token_reporte", token):
-                return                     # hay un cálculo más reciente en curso
-            if estado.get("error"):
-                self.lbl_resumen.configure(
-                    text=f"❌ No se pudieron cargar los movimientos: {estado['error']}")
-                return
-            try:
-                self._pintar_reporte(banco, etiqueta_periodo, estado.get("datos") or {})
-            except Exception as e:
-                print("[Banco] Error dibujando la conciliación:", e)
-
-        ejecutar_en_hilo(self.parent_frame, _recolectar, al_terminar=_aplicar)
-
-    def asignar_cuenta_a_movimientos(self):
-        """Asigna la cuenta bancaria elegida a los cobros/pagos que no tienen ninguna.
-
-        Los movimientos registrados en Compras y Ventas antes de configurar las
-        cuentas bancarias quedaron sin cuenta: por eso no coincidían con ningún banco
-        y la conciliación salía vacía. Con este botón se les asigna la cuenta que se
-        está conciliando (el módulo de Compras/Ventas queda actualizado) y el saldo
-        del banco empieza a cuadrar.
-        """
-        banco = self.banco_seleccionado()
-        if not banco:
-            messagebox.showwarning("Banco", "Seleccione un banco.", parent=self.parent_frame)
-            return
-        pendientes = [f for f in self.filas_conciliacion
-                      if f.get("sin_cuenta") and f.get("tabla") in ("pagos_comprobantes", "pagos_clientes")]
-        if not pendientes:
-            messagebox.showinfo(
-                "Asignar cuenta",
-                "No hay movimientos del sistema sin cuenta bancaria en la lista actual.\n\n"
-                "Pulse primero «🔄 Cargar Movimientos del Sistema».",
-                parent=self.parent_frame)
-            return
-
-        etiqueta = construir_etiqueta_banco(banco)
-        pagos = len([f for f in pendientes if f.get("tabla") == "pagos_comprobantes"])
-        cobros = len(pendientes) - pagos
-        if not messagebox.askyesno(
-                "Asignar cuenta bancaria",
-                f"Se asignará la cuenta {etiqueta} a {len(pendientes)} movimiento(s) que no tienen "
-                f"ninguna cuenta:\n\n• {pagos} pago(s) de Compras\n• {cobros} cobro(s) de Ventas\n\n"
-                "Se actualizarán los módulos de Compras y Ventas, y el saldo de esta cuenta pasará a "
-                "incluirlos. ¿Deseas continuar?",
-                parent=self.parent_frame):
-            return
-
-        conn = conectar_db(silencioso=True)
-        if not conn:
-            return messagebox.showerror("Sin conexión", "No hay conexión con la base de datos.",
-                                        parent=self.parent_frame)
-        actualizados = 0
+        self._diferencias_importe = []
+        # ⏳ Aviso mientras se consultan los movimientos (como en Eventos)
         try:
-            with conn.cursor() as c:
-                for f in pendientes:
-                    try:
-                        if f.get("tabla") == "pagos_comprobantes":
-                            c.execute("UPDATE pagos_comprobantes SET cuenta_origen = %s WHERE id = %s",
-                                      (etiqueta, f.get("id")))
-                        else:
-                            c.execute("UPDATE pagos_clientes SET cuenta_destino = %s WHERE id = %s",
-                                      (etiqueta, f.get("id")))
-                        actualizados += max(c.rowcount, 0)
-                    except Exception:
-                        conn.rollback()
-            conn.commit()
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron asignar las cuentas:\n{e}",
-                                 parent=self.parent_frame)
-            return
-        finally:
-            liberar_conexion(conn)
-
-        try:
-            from buffer_memoria import cache_sistema
-            cache_sistema.invalidar()      # Compras y Ventas trabajan con caché
+            self.lbl_resumen.configure(text="⏳ Cargando los movimientos del sistema...")
+            self.update_idletasks()
         except Exception:
             pass
 
-        registrar_auditoria(self.usuario_activo, "Banco",
-                            f"Asignó la cuenta {etiqueta} a {actualizados} movimiento(s) sin cuenta")
-        messagebox.showinfo("Cuenta asignada",
-                            f"{actualizados} movimiento(s) quedaron asignados a {etiqueta}.",
-                            parent=self.parent_frame)
-        self.generar_reporte()
+        # 🔁 Se recupera el estado de cuenta guardado si cambió el banco o el MES
+        #    (ahora conviven varios meses por banco y cuenta).
+        _banco_actual = banco.get("banco", "")
+        mes_key = mes_etiqueta_a_key(self.cmb_mes.get())
+        _mes_actual = mes_key or ""
+        # 🔎 Clave del período que se está calculando (para no mezclar meses).
+        self._diferencias_clave = (banco.get("banco", ""),
+                                   banco.get("cuenta", ""),
+                                   mes_key or "")
+        if (not getattr(self, "movimientos_pdf", None)
+                or getattr(self, "_banco_pdf", None) != _banco_actual
+                or getattr(self, "_mes_pdf", "") != _mes_actual):
+            try:
+                self.movimientos_pdf = self._cargar_movimientos_pdf(banco, mes_key)
+                self._banco_pdf = _banco_actual
+                self._mes_pdf = _mes_actual
+            except Exception:
+                self.movimientos_pdf = []
 
-    def _periodo_conciliacion(self, etiqueta):
-        """(mes_key, desde, hasta) según el periodo elegido en el desplegable.
 
-        * "Desde la Fecha de Comienzo": desde la fecha configurada en Configuración
-          General (o sin límite si no hay corte) hasta HOY.
-        * un mes concreto: ese mes.
-        * "Todos los meses": sin filtro de fechas.
-        """
-        etiqueta = (etiqueta or "").strip()
-        if etiqueta == ETIQUETA_DESDE_COMIENZO:
-            fecha_comienzo = obtener_fecha_comienzo() if obtener_fecha_comienzo else None
-            desde = fecha_comienzo.strftime("%Y-%m-%d") if fecha_comienzo else None
-            return None, desde, datetime.now().strftime("%Y-%m-%d")
-        return mes_etiqueta_a_key(etiqueta), None, None
-
-    @staticmethod
-    def _en_periodo(fecha, mes_key=None, desde=None, hasta=None):
-        """True si la fecha cae dentro del periodo pedido."""
-        clave = clave_fecha(fecha)
-        if not clave:
-            # Sin fecha interpretable: solo se muestra cuando no hay filtro
-            return not (mes_key or desde or hasta)
-        if mes_key and not clave.startswith(mes_key):
-            return False
-        if desde and clave < desde:
-            return False
-        if hasta and clave > hasta:
-            return False
-        return True
-
-    def _reunir_movimientos(self, banco, mes_key=None, desde=None, hasta=None):
-        """Reúne los datos de la conciliación SIN tocar la interfaz (segundo plano)."""
-        fecha_inicio = clave_fecha(banco.get("fecha", ""))
-        if fecha_inicio:
-            desde = max(desde or "", fecha_inicio)
         # 🚫 Movimientos que el usuario eliminó de esta conciliación: no se vuelven a cargar
         ignorados = self.cargar_ignorados(banco)
         ign_sistema = ignorados.get("sistema", set())
         ign_pdf = ignorados.get("estado_cuenta", set())
 
+        try:
+            movimientos_sistema = self.cargar_movimientos_sistema(banco, mes=mes_key)
+        except Exception as exc:
+            messagebox.showerror("Banco", str(exc), parent=self.parent_frame)
+            return
         movs_sistema = []
-        movs_totales = []
-        # ⚠️ Se incluyen también los cobros/pagos SIN cuenta bancaria asignada: si no,
-        # no aparecerían en ninguna cuenta y la conciliación saldría vacía.
-        for m in self.cargar_movimientos_sistema(banco, incluir_sin_cuenta=True):
-            if not self._en_periodo(m.get("fecha"), mes_key, desde, hasta):
-                continue
-            # Ocultar una línea no altera el saldo del sistema.
-            if not m.get("sin_cuenta"):
-                movs_totales.append(m)
-            if m.get("sin_cuenta"):
-                m = {**m, "descripcion": f"⚠️ Sin cuenta asignada | {m.get('descripcion', '')}"}
+        for m in movimientos_sistema:
             clave = self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
                                          m.get("id", 0), m.get("fecha"), m.get("monto"),
                                          m.get("descripcion"))
@@ -4348,19 +7645,52 @@ class ModuloBancoApp:
         # (Sí se usan para los totales: son los que dan el saldo del sistema.)
         sys_movs = [m for m in movs_sistema if not m.get("espejo_banco")]
 
+        # 📅 Solo los manuales del MES elegido: los de otros meses aparecían como
+        #    «sobrantes» de este y ensuciaban el cruce.
         manuales = [m for m in self.cargar_manuales(banco)
-                    if self._en_periodo(m.get("fecha"), mes_key, desde, hasta)]
+                    if not mes_key
+                    or normalizar_fecha(m.get("fecha")).startswith(mes_key)]
+
+        # 💳 El banco muestra «principal + comisión» en UNA sola línea (ej. 579.91
+        #     + 4.80 = 584.71). En el sistema la comisión puede estar separada; se
+        #     quita de las listas de cruce y se compara el neto con la comisión.
+        comision_bancaria = cargar_comision_interbancaria()
+
+        def _es_mov_comision(m):
+            desc = _norm_texto(m.get("descripcion", ""))
+            monto_c = abs(float(m.get("monto") or 0))
+            return (m.get("tabla") == "tx_comision" or m.get("es_comision")
+                    or ("comision" in desc and monto_c <= 20))
+
+        sys_movs = [m for m in sys_movs if not _es_mov_comision(m)]
+        manuales = [m for m in manuales if not _es_mov_comision(m)]
 
         bank_movs = []
-        bank_totales = []
+        _pdf_periodo = 0
+        _pdf_ocultas = 0
         for b in self.movimientos_pdf:
-            if not self._en_periodo(b.get("fecha"), mes_key, desde, hasta):
+            if mes_key and not normalizar_fecha(b["fecha"]).startswith(mes_key):
                 continue
-            bank_totales.append(b)
+            _pdf_periodo += 1
             clave = self._clave_ignorado("estado_cuenta", "", 0, b.get("fecha"),
                                          b.get("monto"), b.get("descripcion"))
             if clave not in ign_pdf:
                 bank_movs.append(b)
+            else:
+                _pdf_ocultas += 1
+
+        # ⏳ Asientos de fin del mes anterior que el banco posteó en este mes
+        #    (ej.: pago del 30/09 que aparece el 02/10). Se cruzan aquí para que
+        #    no queden como «faltante» del mes siguiente.
+        try:
+            prev_pend = self._traer_pendientes_mes_anterior(
+                banco, mes_key, sys_movs, bank_movs, comision_bancaria)
+            for m in prev_pend:
+                m["_pendiente"] = True
+                sys_movs.append(m)
+        except Exception as error:
+            print("[Conciliación] pendientes del mes anterior:", error)
+            prev_pend = []
 
         filas = []
         usados = set()
@@ -4371,24 +7701,62 @@ class ModuloBancoApp:
             except Exception:
                 return None
 
-        def _emparejar_todos(lista):
+        def _emparejar_todos(lista, usados=None):
             """Empareja una lista con bank_movs en 3 pasadas.
 
             Pasada 1: misma fecha + mismo monto (exacto).
-            Pasada 2: mismo monto con fecha cercana (hasta 7 días): el sistema
+            Pasada 2: mismo monto con fecha cercana (hasta 31 días): el sistema
                       suele registrar el pago en otra fecha que el banco.
             Pasada 3: monto único en cualquier fecha.
-            Se hace por pasadas para que un movimiento con fecha exacta no
-            pierda su línea del banco a manos de otro con igual monto.
+            Se admite además que la línea del banco sea el principal del sistema
+            MÁS la comisión interbancaria (el banco las muestra juntas:
+            579.91 + 4.80 = 584.71). Se compara por pasadas para que un movimiento
+            con fecha exacta no pierda su línea a manos de otro con igual monto.
             """
+            def _coincide(b, m):
+                try:
+                    bm = float(b["monto"])
+                    mm = float(m["monto"])
+                except Exception:
+                    return False
+                if abs(bm - mm) <= 0.02:
+                    return True                    # mismo importe (tolera 2 céntimos)
+                # El banco cobra la comisión junto con el principal
+                if bm * mm > 0 and abs(abs(bm) - abs(mm) - comision_bancaria) <= 0.02:
+                    return True
+                return False
+
+            if usados is None:
+                usados = set()
             res = {}
+
+            def _coincide_exacto(b, m):
+                try:
+                    return abs(float(b["monto"]) - float(m["monto"])) <= 0.005
+                except Exception:
+                    return False
+
+            # Pasada 0: misma fecha + importe EXACTO. Va primero para que un
+            # asiento de 7,56 no se lleve una línea de 7,55 habiendo una de 7,56.
             for m in lista:
                 sf = normalizar_fecha(m["fecha"])
                 for i, b in enumerate(bank_movs):
                     if i in usados:
                         continue
-                    if sf and normalizar_fecha(b["fecha"]) == sf and abs(b["monto"] - m["monto"]) <= 0.02:
+                    if sf and normalizar_fecha(b["fecha"]) == sf and _coincide_exacto(b, m):
                         usados.add(i); res[id(m)] = i; break
+
+            # Pasada 0b: misma fecha + importe con tolerancia (comisión/redondeo).
+            for m in lista:
+                if id(m) in res:
+                    continue
+                sf = normalizar_fecha(m["fecha"])
+                for i, b in enumerate(bank_movs):
+                    if i in usados:
+                        continue
+                    if sf and normalizar_fecha(b["fecha"]) == sf and _coincide(b, m):
+                        usados.add(i); res[id(m)] = i; break
+            # Pasada 2a: fecha cercana + importe EXACTO.
             for m in lista:
                 if id(m) in res:
                     continue
@@ -4397,46 +7765,215 @@ class ModuloBancoApp:
                 for i, b in enumerate(bank_movs):
                     if i in usados:
                         continue
-                    if abs(b["monto"] - m["monto"]) <= 0.02:
+                    if _coincide_exacto(b, m):
                         bd = _a_date(normalizar_fecha(b["fecha"]))
                         if sd and bd:
                             cands.append((abs((bd - sd).days), i))
                 if cands:
                     cands.sort()
-                    if cands[0][0] <= 7:
+                    if cands[0][0] <= 31:
+                        usados.add(cands[0][1]); res[id(m)] = cands[0][1]
+
+            # Pasada 2b: fecha cercana + importe con tolerancia.
+            for m in lista:
+                if id(m) in res:
+                    continue
+                sd = _a_date(normalizar_fecha(m["fecha"]))
+                cands = []
+                for i, b in enumerate(bank_movs):
+                    if i in usados:
+                        continue
+                    if _coincide(b, m):
+                        bd = _a_date(normalizar_fecha(b["fecha"]))
+                        if sd and bd:
+                            cands.append((abs((bd - sd).days), i))
+                if cands:
+                    cands.sort()
+                    if cands[0][0] <= 31:
                         usados.add(cands[0][1]); res[id(m)] = cands[0][1]
             for m in lista:
                 if id(m) in res:
                     continue
                 cands = [i for i, b in enumerate(bank_movs)
-                         if i not in usados and abs(b["monto"] - m["monto"]) <= 0.02]
+                         if i not in usados and _coincide(b, m)]
                 if len(cands) == 1:
                     usados.add(cands[0]); res[id(m)] = cands[0]
+
+            # 🔁 Corrección de cruces: si dos asientos quedaron con las líneas
+            #    intercambiadas (9,10 con 9,08 y 9,08 con 9,10), se cambian para
+            #    que cada uno tome la línea de su importe exacto.
+            por_id = {id(m): m for m in lista}
+            claves = list(res.keys())
+            for a in range(len(claves)):
+                for b in range(a + 1, len(claves)):
+                    id1, id2 = claves[a], claves[b]
+                    i1, i2 = res[id1], res[id2]
+                    m1, m2 = por_id.get(id1), por_id.get(id2)
+                    if not m1 or not m2:
+                        continue
+                    try:
+                        am1 = float(m1["monto"]); am2 = float(m2["monto"])
+                        bm1 = float(bank_movs[i1]["monto"]); bm2 = float(bank_movs[i2]["monto"])
+                    except Exception:
+                        continue
+                    if am1 * bm2 <= 0 or am2 * bm1 <= 0:
+                        continue
+                    actual = abs(bm1 - am1) + abs(bm2 - am2)
+                    cruzado = abs(bm2 - am1) + abs(bm1 - am2)
+                    if cruzado + 0.001 < actual:
+                        res[id1], res[id2] = i2, i1
             return res
 
         def linea_estado_cuenta(b):
             return {**b, "id": 0, "tipo": "ingreso" if b["monto"] > 0 else "egreso",
                     "origen": "estado_cuenta", "tabla": "", "estado": "conciliado"}
 
-        matches_sys = _emparejar_todos(sys_movs)
+        def _monto_mostrar_con_comision(asiento, linea):
+            """Monto a mostrar: si el banco cobró la comisión en la misma línea,
+            se muestra el total del banco (principal + comisión)."""
+            try:
+                am = abs(float(asiento.get("monto") or 0))
+                bm = abs(float(linea.get("monto") or 0))
+                if abs(bm - am - float(comision_bancaria or 0)) <= 0.02:
+                    return linea.get("monto")
+            except (TypeError, ValueError):
+                pass
+            return None
+
+        usados = set()
+        matches_sys = _emparejar_todos(sys_movs, usados)
         for s in sys_movs:
             idx_match = matches_sys.get(id(s))
             if idx_match is not None:
-                filas.append({**s, "estado": "conciliado"})
-                filas.append(linea_estado_cuenta(bank_movs[idx_match]))
+                # ✅ UNA sola fila por movimiento: se muestra el asiento del sistema
+                #    y se le pega el saldo de la línea del banco. Antes se agregaban
+                #    las dos caras (Sistema + Estado de Cuenta) y se veía duplicado.
+                linea = bank_movs[idx_match]
+                fila = {**s, "estado": "conciliado",
+                        "saldo": linea.get("saldo"),
+                        "fecha_banco": linea.get("fecha"),
+                        "descripcion_banco": linea.get("descripcion")}
+                _mm = _monto_mostrar_con_comision(s, linea)
+                if _mm is not None:
+                    fila["monto_mostrar"] = _mm
+                filas.append(fila)
+            elif str(s.get("estado") or "").lower() == "conciliado":
+                # ✅ ya está conciliado en la base: se respeta su estado
+                filas.append({**s})
             else:
                 filas.append({**s, "estado": "diferencia"})
 
-        # Los movimientos MANUALES también se emparejan con el estado de cuenta: así la
-        # línea del banco no queda como "sin conciliar" por ocultarse su espejo.
-        matches_man = _emparejar_todos(manuales)
+        # Los movimientos MANUALES también se emparejan con el estado de cuenta.
+        matches_man = _emparejar_todos(manuales, usados)
         for m in manuales:
             idx_match = matches_man.get(id(m))
             if idx_match is not None:
-                filas.append({**m, "estado": "conciliado", "origen": "manual"})
-                filas.append(linea_estado_cuenta(bank_movs[idx_match]))
+                linea = bank_movs[idx_match]
+                fila = {**m, "estado": "conciliado", "origen": "manual",
+                        "saldo": linea.get("saldo"),
+                        "fecha_banco": linea.get("fecha"),
+                        "descripcion_banco": linea.get("descripcion")}
+                _mm = _monto_mostrar_con_comision(m, linea)
+                if _mm is not None:
+                    fila["monto_mostrar"] = _mm
+                filas.append(fila)
             else:
-                filas.append({**m, "estado": m.get("estado", "pendiente"), "origen": "manual"})
+                # Sin línea disponible: o no está en el estado de cuenta o su
+                # línea ya la usó el asiento del sistema (manual duplicado).
+                filas.append({**m, "estado": "diferencia", "origen": "manual",
+                              "_sin_pareja": True})
+
+        # 📄 Asientos que NO vienen de Compras (facturas App Grifo, comisiones y los
+        #    registrados desde el banco): antes el cruce los ignoraba, así que sus
+        #    líneas del estado de cuenta quedaban «faltantes» aunque estuvieran.
+        extras = []
+        try:
+            extras = self.cargar_asientos_extra(banco, mes_key)
+        except Exception as error_extra:
+            print("[Conciliación] asientos extra:", error_extra)
+        if extras:
+            matches_ext = _emparejar_todos(extras, usados)
+            for e in extras:
+                idx_match = matches_ext.get(id(e))
+                if idx_match is not None:
+                    linea = bank_movs[idx_match]
+                    filas.append({**e, "estado": "conciliado",
+                                  "saldo": linea.get("saldo"),
+                                  "fecha_banco": linea.get("fecha"),
+                                  "descripcion_banco": linea.get("descripcion")})
+                else:
+                    filas.append({**e, "estado": e.get("estado") or "diferencia"})
+
+        # 🔍 Diferencias de importe entre asientos emparejados y su línea del banco.
+        #    Se guardan para la ventana «Diferencias por asiento».
+        vistos_dif = set()
+
+        def _agregar_dif(asiento, linea):
+            try:
+                am = float(asiento.get("monto") or 0)
+                bm = float(linea.get("monto") or 0)
+            except (TypeError, ValueError):
+                return
+            dif = round(bm - am, 2)
+            if abs(dif) < 0.005:
+                return
+            # La comisión ya registrada en la transferencia no es una diferencia:
+            # el banco cobró principal + comisión y el sistema ya la tiene.
+            try:
+                com_reg = abs(float(asiento.get("comision") or 0))
+            except (TypeError, ValueError):
+                com_reg = 0.0
+            if com_reg > 0 and abs(abs(dif) - com_reg) <= 0.02:
+                return
+            clave = (asiento.get("tabla"), asiento.get("id"),
+                     normalizar_fecha(linea.get("fecha")), round(bm, 2))
+            if clave in vistos_dif:
+                return
+            vistos_dif.add(clave)
+            try:
+                com = abs(float(comision_bancaria or 0))
+            except (TypeError, ValueError):
+                com = 0.0
+            if abs(abs(dif) - com) <= 0.02 and abs(dif) > 0.02:
+                tipo = "comision"
+            elif abs(dif) <= 0.05:
+                tipo = "redondeo"
+            else:
+                tipo = "diferencia"
+            self._diferencias_importe.append({
+                "fecha_sistema": asiento.get("fecha") or "",
+                "fecha_banco": linea.get("fecha") or "",
+                "documento": asiento.get("documento") or "",
+                "descripcion": asiento.get("descripcion") or "",
+                "monto_sistema": am,
+                "monto_banco": bm,
+                "diferencia": dif,
+                "tipo": tipo,
+                "origen": asiento.get("origen") or "",
+                "tabla": asiento.get("tabla") or "",
+                "id": asiento.get("id") or 0,
+            })
+
+        for _s in sys_movs:
+            _j = matches_sys.get(id(_s))
+            if _j is not None:
+                _agregar_dif(_s, bank_movs[_j])
+        for _m in manuales:
+            _j = matches_man.get(id(_m))
+            if _j is not None:
+                _agregar_dif(_m, bank_movs[_j])
+        if extras:
+            for _e in extras:
+                _j = matches_ext.get(id(_e))
+                if _j is not None:
+                    _agregar_dif(_e, bank_movs[_j])
+
+        # 🔎 Si hay un mes seleccionado, la ventana muestra solo ese mes.
+        if mes_key:
+            self._diferencias_importe = [
+                d for d in self._diferencias_importe
+                if normalizar_fecha(d.get("fecha_sistema", "")).startswith(mes_key)
+                or normalizar_fecha(d.get("fecha_banco", "")).startswith(mes_key)]
 
         for i, b in enumerate(bank_movs):
             if i not in usados:
@@ -4445,24 +7982,26 @@ class ModuloBancoApp:
 
         # 🧹 Si se eligió un mes, solo se muestran movimientos de ESE mes
         if mes_key:
-            filas = [f for f in filas if normalizar_fecha(f.get("fecha", "")).startswith(mes_key)]
+            filas = [f for f in filas
+                     if normalizar_fecha(f.get("fecha", "")).startswith(mes_key)
+                     or (f.get("_pendiente")
+                         and normalizar_fecha(f.get("fecha_banco", "")).startswith(mes_key))]
         filas.sort(key=lambda f: (normalizar_fecha(f["fecha"]), f["monto"]))
-        return {"filas": filas, "movs_sistema": movs_totales, "bank_movs": bank_totales,
-                "desde": desde or "", "hasta": hasta or ""}
-
-    def _pintar_reporte(self, banco, etiqueta_periodo, datos):
-        """Dibuja en pantalla la conciliación ya calculada (hilo principal)."""
-        filas = datos.get("filas") or []
-        movs_sistema = datos.get("movs_sistema") or []
-        bank_movs = datos.get("bank_movs") or []
-        desde = datos.get("desde") or ""
-        hasta = datos.get("hasta") or ""
-
         # 🔁 Reaplicar los movimientos ya conciliados (persistidos en la base)
         conciliados = self.cargar_conciliados(banco)
         for f in filas:
+            if f.get("_sin_pareja"):
+                continue
             if self._clave_conciliado_fila(f) in conciliados:
                 f["estado"] = "conciliado"
+        # ⏳ Asientos de fin de mes que aparecen en el estado de cuenta siguiente:
+        #    no se cuentan como sobrantes; quedan pendientes para el mes siguiente.
+        pendientes_siguiente = []
+        try:
+            pendientes_siguiente = self._marcar_pendientes_siguiente(
+                filas, banco, mes_key, comision_bancaria)
+        except Exception as error:
+            print("[Conciliación] pendientes próximo mes:", error)
         self._filas_conc_full = list(filas)
         self.filas_conciliacion = filas
         self.refrescar_tree()
@@ -4470,31 +8009,76 @@ class ModuloBancoApp:
         faltantes = [f for f in filas if f.get("origen") == "estado_cuenta"
                      and f.get("estado") != "conciliado"]
         self._faltantes_estado_cuenta = faltantes
-        # ⚠️ Pagos del sistema que el banco NO cobró en este mes: casi siempre se
-        #    cobran al mes siguiente (el banco los postea con retraso).
-        pendientes_sis = [f for f in filas if f.get("origen") == "sistema"
-                          and f.get("estado") != "conciliado"]
+        # 📅 Solo se puede hablar de SOBRANTES en meses con estado de cuenta cargado:
+        #    si el mes no está cargado (por ejemplo el mes EN CURSO), sus asientos no
+        #    son sobrantes, simplemente todavía no tienen estado de cuenta.
+        periodos_cargados = self._periodos_cargados(banco)
+        # 🛡️ Se guarda en OTRO atributo: llamarlo igual que el método hacía que
+        #    getattr devolviera el método y la tabla reventara al dibujarse.
+        self._periodos_ok = set(periodos_cargados)
+        mes_cargado = (not mes_key) or (mes_key in periodos_cargados)
+        pendientes_sis = [f for f in filas
+                          if f.get("origen") != "estado_cuenta"
+                          and f.get("estado") != "conciliado"
+                          and not f.get("_pendiente_siguiente")
+                          and (not mes_key
+                               or clave_fecha(f.get("fecha"))[:7] in periodos_cargados)]
         self._pendientes_sistema = pendientes_sis
+        self._mes_cargado = mes_cargado
         self._guardar_diferenciales(faltantes, pendientes_sis, banco)
-        self._actualizar_aviso_faltantes(faltantes, pendientes_sis)
+        if not mes_cargado:
+            try:
+                self.lbl_faltantes.configure(
+                    text="📄 No hay estado de cuenta cargado para %s. Los asientos de "
+                         "ese mes quedan «pendientes de estado de cuenta» (no son "
+                         "sobrantes)." % (self.cmb_mes.get() if hasattr(self, "cmb_mes") else mes_key),
+                    text_color="#7f8c8d")
+                self.btn_faltantes.configure(state="disabled")
+            except Exception:
+                pass
+        else:
+            self._actualizar_aviso_faltantes(faltantes, pendientes_sis, _pdf_ocultas, _pdf_periodo,
+                                             pendientes_siguiente=len(pendientes_siguiente))
 
         saldo_inicial = normalizar_monto(banco.get("saldo_inicial", ""))
-        ingresos = sum(m["monto"] for m in movs_sistema if m["monto"] > 0)
-        egresos = sum(-m["monto"] for m in movs_sistema if m["monto"] < 0)
+        # Descartar un asiento TX en conciliación no cambia su efecto contable.
+        # Se conserva la conducta histórica de las demás fuentes.
+        movs_saldo = [m for m in movs_sistema if m.get("tabla") not in ("transferencias_bancarias", "tx_comision")]
+        movs_saldo.extend(m for m in movimientos_sistema if m.get("tabla") in ("transferencias_bancarias", "tx_comision"))
+        # ⏳ Los pendientes del mes anterior se cruzan en este mes; la barra
+        #    superior sigue mostrando el neto crudo del sistema. El detalle
+        #    conciliado (sin pendientes ni duplicados) está en «Resumen del período».
+        try:
+            movs_saldo.extend(prev_pend)
+        except NameError:
+            pass
+        ingresos = sum(m["monto"] for m in movs_saldo if m["monto"] > 0)
+        egresos = sum(-m["monto"] for m in movs_saldo if m["monto"] < 0)
         neto_sistema = ingresos - egresos
         neto_pdf = sum(b["monto"] for b in bank_movs)
         diferencia_mes = neto_sistema - neto_pdf
 
-        def _bonita(iso):
-            return f"{iso[8:10]}/{iso[5:7]}/{iso[0:4]}" if len(iso) == 10 else ""
+        # 📊 Cantidades y totales de cada lado (asientos del sistema vs. líneas del
+        #    estado de cuenta), separando ingresos y egresos.
+        _asientos_lado = [f for f in filas
+                          if f.get("origen") != "estado_cuenta"
+                          and not f.get("_pendiente_siguiente")]
+        _lineas_lado = [f for f in filas if f.get("origen") == "estado_cuenta"]
 
-        rango_txt = ""
-        if desde or hasta:
-            rango_txt = f" ({_bonita(desde) or 'inicio'} al {_bonita(hasta) or 'hoy'})"
+        def _resumen_lado(lista):
+            ingresos_l = [float(f.get("monto") or 0) for f in lista
+                          if float(f.get("monto") or 0) > 0]
+            egresos_l = [float(f.get("monto") or 0) for f in lista
+                         if float(f.get("monto") or 0) < 0]
+            return (len(lista), len(ingresos_l), sum(ingresos_l),
+                    len(egresos_l), -sum(egresos_l))
 
-        if etiqueta_periodo and etiqueta_periodo != "Todos los meses":
-            txt = (f"Banco: {construir_etiqueta_banco(banco)}   |   "
-                   f"Periodo: {etiqueta_periodo}{rango_txt}   |   "
+        _n_asi, _ni_asi, _ti_asi, _ne_asi, _te_asi = _resumen_lado(_asientos_lado)
+        _n_lin, _ni_lin, _ti_lin, _ne_lin, _te_lin = _resumen_lado(_lineas_lado)
+
+        if mes_key:
+            etiqueta_mes = self.cmb_mes.get()
+            txt = (f"Banco: {construir_etiqueta_banco(banco)}   |   Mes: {etiqueta_mes}   |   "
                    f"Sistema (neto): {formatear_monto(neto_sistema)}   |   "
                    f"Estado de cuenta (neto): {formatear_monto(neto_pdf)}   |   "
                    f"Diferencia: {formatear_monto(diferencia_mes)}")
@@ -4512,6 +8096,60 @@ class ModuloBancoApp:
                        f"Movimientos PDF (neto): {formatear_monto(neto_pdf)}   |   "
                        f"(No se detectó saldo final en el PDF)")
         self.lbl_resumen.configure(text=txt)
+        # 📊 Los totales de cada lado se ven en la ventana «Resumen del período»
+        #    (botón), no amontonados en esta barra.
+        self._ultimo_resumen = (_resumen_lado(_asientos_lado), _resumen_lado(_lineas_lado))
+        # 🔎 Recordar a qué banco/mes corresponden las diferencias calculadas.
+        self._diferencias_clave = (banco.get("banco", ""),
+                                   banco.get("cuenta", ""),
+                                   mes_key or "")
+
+    def cargar_asientos_extra(self, banco, mes=None):
+        """Asientos de conciliacion_bancaria que no vienen de pagos/cobros/transferencias.
+
+        Son los registrados desde el estado de cuenta (origen 'e'), las facturas de
+        la App Grifo ('s:facturas_recibidas') y las comisiones ('s:tx_comision').
+        El cruce clásico no los miraba y por eso sus líneas del banco quedaban como
+        «faltantes» aunque el asiento existiera.
+        """
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return []
+        movs = []
+        try:
+            with conn.cursor() as c:
+                c.execute("""
+                    SELECT id, fecha, descripcion, monto, COALESCE(origen,''),
+                           COALESCE(estado,''), COALESCE(tabla,''), COALESCE(categoria,''),
+                           COALESCE(subcategoria,''), COALESCE(evento,''), COALESCE(chofer,''),
+                           COALESCE(comision,0), COALESCE(interbancario,FALSE),
+                           COALESCE(es_cruzada,FALSE), COALESCE(numero_operacion,'')
+                    FROM conciliacion_bancaria
+                    WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                      AND COALESCE(cuenta,'') = %s
+                      AND COALESCE(origen,'') NOT IN (
+                          'manual', 's:pagos_comprobantes', 's:pagos_clientes',
+                          's:transferencias_bancarias')
+                    ORDER BY id
+                """, (banco.get("banco", ""), banco.get("cuenta", "") or ""))
+                for r in c.fetchall():
+                    fecha = r[1]
+                    if mes and not normalizar_fecha(fecha).startswith(mes):
+                        continue
+                    monto = float(r[3] or 0)
+                    movs.append({
+                        "id": r[0], "fecha": fecha, "descripcion": r[2], "monto": monto,
+                        "tipo": "ingreso" if monto > 0 else "egreso",
+                        "estado": r[5], "origen": r[4] or "sistema", "tabla": r[6],
+                        "categoria": r[7], "subcategoria": r[8], "evento": r[9],
+                        "chofer": r[10], "comision": float(r[11] or 0),
+                        "interbancario": bool(r[12]), "es_cruzada": bool(r[13]),
+                        "numero_operacion": r[14]})
+        except Exception as error:
+            print("[Conciliación] cargar asientos extra:", error)
+        finally:
+            liberar_conexion(conn)
+        return movs
 
     def cargar_manuales(self, banco):
         conn = conectar_db(silencioso=True)
@@ -4524,13 +8162,15 @@ class ModuloBancoApp:
                     c.execute("""
                         SELECT id, fecha, descripcion, monto, tipo, estado,
                                COALESCE(categoria, ''), COALESCE(subcategoria, ''),
-                               COALESCE(evento, ''), COALESCE(personal, ''),
+                               COALESCE(evento, ''), COALESCE(chofer, ''),
                                COALESCE(comision, 0), COALESCE(interbancario, FALSE),
                                COALESCE(es_cruzada, FALSE), COALESCE(numero_operacion, '')
                         FROM conciliacion_bancaria
-                        WHERE origen = 'manual' AND banco = %s
+                        WHERE origen = 'manual'
+                          AND UPPER(COALESCE(banco,'')) = UPPER(%s)
+                          AND COALESCE(cuenta,'') = %s
                         ORDER BY id
-                    """, (banco.get("banco", ""),))
+                    """, (banco.get("banco", ""), banco.get("cuenta", "") or ""))
                     filas = c.fetchall()
                 except Exception:
                     # Base de datos anterior sin las columnas de detalle
@@ -4538,19 +8178,21 @@ class ModuloBancoApp:
                     c.execute("""
                         SELECT id, fecha, descripcion, monto, tipo, estado
                         FROM conciliacion_bancaria
-                        WHERE origen = 'manual' AND banco = %s
+                        WHERE origen = 'manual'
+                          AND UPPER(COALESCE(banco,'')) = UPPER(%s)
+                          AND COALESCE(cuenta,'') = %s
                         ORDER BY id
-                    """, (banco.get("banco", ""),))
+                    """, (banco.get("banco", ""), banco.get("cuenta", "") or ""))
                     filas = [tuple(f) + ("", "", "", "", 0, False, False, "") for f in c.fetchall()]
 
                 for (idp, fecha, desc, monto, tipo, estado, categoria, subcategoria,
-                     evento, personal, comision, interbancario, es_cruzada, num_oper) in filas:
+                     evento, chofer, comision, interbancario, es_cruzada, num_oper) in filas:
                     movs.append({
                         "id": idp, "fecha": fecha or "", "descripcion": desc or "",
                         "monto": float(monto or 0), "tipo": tipo or "ingreso",
                         "tabla": "conciliacion", "estado": estado or "pendiente",
                         "categoria": categoria or "", "subcategoria": subcategoria or "",
-                        "evento": evento or "", "personal": personal or "",
+                        "evento": evento or "", "chofer": chofer or "",
                         "comision": float(comision or 0), "interbancario": bool(interbancario),
                         "es_cruzada": bool(es_cruzada),
                         "numero_operacion": num_oper or "",
@@ -4565,12 +8207,28 @@ class ModuloBancoApp:
 
     def _valores_conc(self, f):
         estado = f.get("estado", "pendiente")
-        if estado == "conciliado":
+        # 📅 Si el MES de ese asiento no tiene estado de cuenta cargado, no se puede
+        #    afirmar que esté conciliado: se muestra que falta el estado de cuenta.
+        _mes_f = clave_fecha(f.get("fecha", ""))[:7]
+        _ok_f = getattr(self, "_periodos_ok", None)
+        _ok_f = _ok_f if isinstance(_ok_f, (set, frozenset)) else set()
+        if _mes_f and _mes_f not in _ok_f and f.get("origen") != "estado_cuenta":
+            estado_txt = "⏳ Falta el estado de cuenta"
+        elif f.get("_pendiente_siguiente"):
+            estado_txt = "⏳ Pendiente próximo estado"
+        elif estado == "conciliado":
             estado_txt = "✅ Conciliado"
         elif f.get("origen") == "estado_cuenta":
             estado_txt = "❌ Sin conciliar (Banco)"
         elif estado == "diferencia":
-            estado_txt = "⚠️ Sin conciliar (Sistema)"
+            _mes = clave_fecha(f.get("fecha", ""))[:7]
+            _ok = getattr(self, "_periodos_ok", None)
+            if not isinstance(_ok, (set, frozenset)):
+                _ok = set()
+            if _mes and _mes not in _ok:
+                estado_txt = "⏳ Falta el estado de cuenta"
+            else:
+                estado_txt = "⚠️ Sin conciliar (Sistema)"
         else:
             estado_txt = "📝 Manual / Pendiente"
         if f.get("tipo") == "comision":
@@ -4584,16 +8242,33 @@ class ModuloBancoApp:
         saldo_txt = ""
         if f.get("saldo") is not None:
             saldo_txt = formatear_monto(f["saldo"])
+        monto_txt = f.get("monto_mostrar", f["monto"])
         return (estado_txt, fecha_para_mostrar(f["fecha"]), f.get("documento", ""), f["descripcion"],
-                tipo_txt, formatear_monto(f["monto"]), origen_txt, saldo_txt)
+                tipo_txt, formatear_monto(monto_txt), origen_txt, saldo_txt)
 
     def _tag_conc(self, f):
         estado = f.get("estado", "pendiente")
+        # 📅 Sin estado de cuenta del mes, el asiento no puede pintarse de verde.
+        _mes_t = clave_fecha(f.get("fecha", ""))[:7]
+        _ok_t = getattr(self, "_periodos_ok", None)
+        _ok_t = _ok_t if isinstance(_ok_t, (set, frozenset)) else set()
+        if _mes_t and _mes_t not in _ok_t and f.get("origen") != "estado_cuenta":
+            return "sin_estado"
+        if f.get("_pendiente_siguiente"):
+            return "pendiente"
         if estado == "conciliado":
             return "conciliado"
         if f.get("origen") == "estado_cuenta":
             return "diferencia"
         if estado == "diferencia":
+            # Si el mes de ese asiento no tiene estado de cuenta cargado, no es un
+            # sobrante: solo falta el estado de cuenta (mes en curso, por ejemplo).
+            mes = clave_fecha(f.get("fecha", ""))[:7]
+            _ok = getattr(self, "_periodos_ok", None)
+            if not isinstance(_ok, (set, frozenset)):
+                _ok = set()
+            if mes and mes not in _ok:
+                return "sin_estado"
             return "diferencia"
         return "estado_cuenta"
 
@@ -4687,17 +8362,29 @@ class ModuloBancoApp:
             pass
         self.filtrar_conciliacion_inline()
 
-    def _actualizar_aviso_faltantes(self, faltantes, pendientes_sistema=None):
+    def _actualizar_aviso_faltantes(self, faltantes, pendientes_sistema=None,
+                                    ocultas_pdf=0, total_pdf=0,
+                                    pendientes_siguiente=0):
         """Avisa de lo que falta conciliar (estado de cuenta y pagos del sistema)."""
         try:
             n = len(faltantes or [])
             m = len(pendientes_sistema or [])
             mensajes = []
+            if ocultas_pdf:
+                # 👁️ Sin este aviso, la pantalla parece "no conciliar nada" y no hay
+                #    forma de saber que las líneas del PDF están ocultas.
+                mensajes.append("👁️ %d de %d línea(s) del estado de cuenta están OCULTAS "
+                                "(marcadas como eliminadas): use «Restaurar Eliminados»."
+                                % (ocultas_pdf, total_pdf or ocultas_pdf))
             if n:
-                mensajes.append("⚠️ %d movimiento(s) del estado de cuenta NO están en el sistema." % n)
+                mensajes.append("⚠️ FALTANTES: %d línea(s) del estado de cuenta sin asiento en el sistema." % n)
+            if pendientes_siguiente:
+                mensajes.append("⏳ %d asiento(s) de fin de mes pueden estar en el estado de cuenta "
+                                "del próximo mes; quedan pendientes y no se cuentan como sobrantes."
+                                % pendientes_siguiente)
             if m:
-                mensajes.append("⚠️ %d pago(s) del sistema sin conciliar: puede que el banco "
-                                "los haya cobrado en el mes siguiente." % m)
+                mensajes.append("⚠️ SOBRANTES: %d asiento(s) del sistema que no aparecen en el estado "
+                                "de cuenta (puede que el banco los haya posteado en el mes siguiente)." % m)
             if mensajes:
                 self.lbl_faltantes.configure(text="   ".join(mensajes), text_color="#a04000")
             else:
@@ -4905,19 +8592,18 @@ class ModuloBancoApp:
     def _mostrar_facturas_del_comprobante(self, ruta_comprobante):
         """🔎 Detalle de las facturas que cancela un mismo comprobante de pago."""
         try:
-            filas = facturas_que_cancela_comprobante(ruta_comprobante or "", "")
+            from modulo_compras import (facturas_que_cancela, texto_facturas_canceladas,
+                                        formatear_moneda)
+            filas = facturas_que_cancela(ruta_comprobante or "", "")
         except Exception as e:
             return messagebox.showerror("Comprobante", "No se pudo consultar: %s" % e)
         if not filas:
             return messagebox.showinfo("Comprobante",
                                        "Este comprobante todavía no cancela facturas registradas.")
-        try:
-            from modulo_compras import formatear_moneda as _fm
-        except Exception:
-            _fm = None
         messagebox.showinfo(
             "Facturas que cancela este comprobante",
-            "Cancela %d factura(s):\n\n%s" % (len(filas), texto_facturas_canceladas(filas, _fm)))
+            "Cancela %d factura(s):\n\n%s"
+            % (len(filas), texto_facturas_canceladas(filas)))
 
     def _ruta_existente(self, ruta):
         """Ruta real del archivo (resuelta para este equipo/SO) o '' si no existe."""
@@ -4925,11 +8611,14 @@ class ModuloBancoApp:
         if not ruta:
             return ""
         try:
-            from app_paths import resolver_ruta_archivo as resolver_compartida
-            resuelta = resolver_compartida(ruta)
+            from app_paths import resolver_ruta_archivo
+            resuelta = resolver_ruta_archivo(ruta)
         except Exception:
             resuelta = ""
-        for candidata in (resuelta, resolver_ruta_archivo(ruta), ruta, os.path.abspath(ruta)):
+        base = obtener_ruta_base()
+        nombre = ruta.replace("\\", "/").rsplit("/", 1)[-1]
+        recibo_tx = os.path.join(base, "comprobantes_transferencias", nombre) if base else ""
+        for candidata in (resuelta, ruta, os.path.abspath(ruta), recibo_tx):
             try:
                 if candidata and os.path.isfile(candidata):
                     return candidata
@@ -4937,8 +8626,67 @@ class ModuloBancoApp:
                 continue
         return ""
 
+    def _documento_de_asiento(self, fila):
+        """Busca el PDF (factura o comprobante) asociado a un asiento de la tabla."""
+        candidatos = []
+        try:
+            if fila.get("soporte"):
+                candidatos.append(fila.get("soporte"))
+        except Exception:
+            pass
+        consultas = []
+        origen = str(fila.get("origen") or "")
+        id_movimiento = fila.get("id_movimiento")
+        if id_movimiento:
+            if "pagos_comprobantes" in origen:
+                consultas.append(("SELECT archivo_ruta FROM pagos_comprobantes WHERE id = %s",
+                                  id_movimiento))
+            elif "pagos_clientes" in origen:
+                consultas.append(("SELECT archivo_ruta FROM pagos_clientes WHERE id = %s",
+                                  id_movimiento))
+        if fila.get("id_gasto_compras"):
+            consultas.append(("SELECT archivo_ruta FROM facturas_recibidas WHERE id = %s",
+                              fila.get("id_gasto_compras")))
+        if fila.get("id_factura"):
+            consultas.append(("SELECT archivo_ruta FROM facturas_emitidas WHERE id = %s",
+                              fila.get("id_factura")))
+        # 📎 Asientos MANUALES (y los registrados desde el banco): el archivo está
+        #    en la columna 'soporte' de conciliacion_bancaria. Antes no se miraba,
+        #    así que el clic derecho no encontraba el comprobante.
+        if str(origen) in ("manual", "e") and fila.get("id"):
+            consultas.append(("SELECT soporte FROM conciliacion_bancaria WHERE id = %s",
+                              fila.get("id")))
+        if not consultas:
+            return ""
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return ""
+        try:
+            with conn.cursor() as c:
+                for consulta, parametro in consultas:
+                    try:
+                        c.execute(consulta, (parametro,))
+                        resultado = c.fetchone()
+                        if resultado and resultado[0]:
+                            candidatos.append(resultado[0])
+                            break
+                    except Exception:
+                        conn.rollback()
+        except Exception as error:
+            print("[Banco] búsqueda del documento:", error)
+        finally:
+            liberar_conexion(conn)
+        for ruta in candidatos:
+            if ruta and self._ruta_existente(ruta):
+                return ruta
+        return candidatos[0] if candidatos else ""
+
     def _menu_contextual_movimiento(self, event, tabla, movimientos, acciones=True):
-        """Clic derecho: menú para ver la factura y el comprobante (Windows/Mac)."""
+        """Clic derecho: abre un menú para ver la factura y el comprobante.
+
+        Compatible Windows (botón 3), Linux (botón 3) y macOS (botón 2 y
+        Control+clic). El menú es nativo (tk.Menu) en los tres sistemas.
+        """
         try:
             iid = tabla.identify_row(event.y)
             if not iid:
@@ -4948,22 +8696,34 @@ class ModuloBancoApp:
             if idx < 0 or idx >= len(movimientos):
                 return "break"
             f = movimientos[idx]
+            # 📄 si la fila no trae el archivo, se busca en la base
+            try:
+                if not f.get("archivo_ruta"):
+                    documento = self._documento_de_asiento(f)
+                    if documento:
+                        f["archivo_ruta"] = documento
+            except Exception as error:
+                print("[Banco] documento del asiento:", error)
         except Exception:
             return "break"
 
         menu = tk.Menu(self.parent_frame, tearoff=0)
+
         ruta_factura = self._ruta_existente(self._archivo_factura_de(f.get("id_factura")))
         if ruta_factura:
-            menu.add_command(label="Abrir factura", command=lambda r=ruta_factura: abrir_documento(r))
+            menu.add_command(label="Abrir factura",
+                             command=lambda r=ruta_factura: abrir_documento(r))
         else:
             menu.add_command(label="Abrir factura (sin archivo)", state="disabled")
 
         ruta_soporte = self._ruta_existente(f.get("archivo_ruta"))
         if ruta_soporte:
-            menu.add_command(label="Abrir comprobante de pago", command=lambda r=ruta_soporte: abrir_documento(r))
+            menu.add_command(label="Abrir comprobante de pago",
+                             command=lambda r=ruta_soporte: abrir_documento(r))
             # 🧾 Si ese comprobante cancela VARIAS facturas, se muestran los números
             try:
-                vinculadas = facturas_que_cancela_comprobante(ruta_soporte, "") or []
+                from modulo_compras import facturas_que_cancela
+                vinculadas = facturas_que_cancela(ruta_soporte, "") or []
             except Exception:
                 vinculadas = []
             if len(vinculadas) > 1:
@@ -4977,6 +8737,10 @@ class ModuloBancoApp:
                                  command=lambda r=ruta_soporte: self._mostrar_facturas_del_comprobante(r))
         else:
             menu.add_command(label="Abrir comprobante (sin archivo)", state="disabled")
+
+        if f.get("tabla") in ("transferencias_bancarias", "tx_comision"):
+            menu.add_command(label="Editar transferencia padre",
+                             command=lambda: self._abrir_transferencia_desde_movimiento(f))
 
         if acciones:
             menu.add_separator()
@@ -4999,16 +8763,31 @@ class ModuloBancoApp:
         banco = self.banco_seleccionado()
         guardados = 0
         for f in filas:
-            f["estado"] = "conciliado"
+            # 🛡️ El ✅ se pinta SÓLO si de verdad quedó guardado en la base.
             if self._persistir_conciliado(f, banco):
+                f["estado"] = "conciliado"
                 guardados += 1
         self.refrescar_tree()
+        # 🔄 Volver a calcular el cruce y el aviso naranja: antes solo se pintaba
+        #    la fila de verde y los contadores/estado quedaban viejos.
+        try:
+            self.generar_reporte()
+        except Exception as error:
+            print("[Conciliación] refresco tras conciliar:", error)
         registrar_auditoria(self.usuario_activo, "Banco",
-                            f"Concilió {len(filas)} movimiento(s) en {construir_etiqueta_banco(banco) if banco else 'banco'}")
-        messagebox.showinfo("Conciliación",
-                            f"{len(filas)} movimiento(s) conciliado(s).\n"
-                            f"💾 Guardados en la base de datos: {guardados} de {len(filas)}.",
-                            parent=self.parent_frame)
+                            f"Concilió {guardados} movimiento(s) en "
+                            f"{construir_etiqueta_banco(banco) if banco else 'banco'}")
+        if guardados < len(filas):
+            messagebox.showwarning(
+                "Conciliación",
+                f"Se guardaron {guardados} de {len(filas)} movimiento(s).\n\n"
+                f"Los {len(filas) - guardados} restantes NO se pudieron guardar: "
+                "revise la conexión (o el detalle en la consola) y vuelva a intentarlo.",
+                parent=self.parent_frame)
+        else:
+            messagebox.showinfo("Conciliación",
+                                f"{len(filas)} movimiento(s) conciliado(s) y guardados.",
+                                parent=self.parent_frame)
 
     @staticmethod
     def _clave_conciliado(origen, tabla, idm, fecha, monto, descripcion):
@@ -5058,7 +8837,7 @@ class ModuloBancoApp:
                         base, tabla = "estado_cuenta", ""
                     else:
                         base, tabla = o, ""
-                    if tabla in tx_soporte.TABLAS_TX and _norm_texto(cuenta) != _norm_texto(banco.get("cuenta")):
+                    if tabla in ("transferencias_bancarias", "tx_comision") and _norm_texto(cuenta) != _norm_texto(banco.get("cuenta")):
                         continue
                     claves.add(self._clave_conciliado(base, tabla, idm, fecha, monto, desc))
         except Exception as e:
@@ -5087,76 +8866,71 @@ class ModuloBancoApp:
 
                 # Los movimientos MANUALES ya están en la tabla: solo se cambia su estado
                 if origen == "manual":
-                    c.execute("UPDATE conciliacion_bancaria SET estado='conciliado' WHERE id=%s AND banco=%s",
-                              (idm, banco_nombre))
+                    c.execute("""UPDATE conciliacion_bancaria
+                                 SET estado='conciliado', fecha_conciliacion=%s
+                                 WHERE id=%s AND banco=%s""",
+                              (datetime.now().strftime("%d/%m/%Y"), idm, banco_nombre))
+                    actualizadas = c.rowcount
                     conn.commit()
-                    return True
+                    return actualizadas > 0
 
                 origen_persist = ("s:" + tabla) if origen == "sistema" and tabla else ("e" if origen == "estado_cuenta" else origen)
-                if origen == "sistema" and idm and tabla in tx_soporte.TABLAS_TX:
-                    c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
-                                 WHERE banco=%s AND cuenta=%s AND origen=%s AND id_movimiento=%s
-                                 AND SIGN(monto)=SIGN(%s)""",
-                              (banco_nombre, banco.get("cuenta", ""), origen_persist, idm, monto))
+                # 🎯 El MISMO filtro sirve para buscar y para marcar. Antes solo se
+                #    buscaba (COUNT) y, si la fila ya existía, se devolvía True SIN
+                #    marcarla: el usuario veía "conciliado / guardado" y al recargar
+                #    volvía a ❌ para siempre.
+                if origen == "sistema" and idm and tabla in ("transferencias_bancarias", "tx_comision"):
+                    filtro = ("banco=%s AND cuenta=%s AND origen=%s AND id_movimiento=%s "
+                              "AND SIGN(monto)=SIGN(%s)")
+                    parametros = (banco_nombre, banco.get("cuenta", ""), origen_persist, idm, monto)
                 elif origen == "sistema" and idm:
-                    c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
-                                 WHERE banco=%s AND origen=%s AND id_movimiento=%s""",
-                              (banco_nombre, origen_persist, idm))
+                    filtro = "banco=%s AND origen=%s AND id_movimiento=%s"
+                    parametros = (banco_nombre, origen_persist, idm)
                 else:
-                    c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
-                                 WHERE banco=%s AND origen=%s AND COALESCE(fecha,'')=%s
-                                   AND ABS(COALESCE(monto,0)-%s) < 0.005""",
-                              (banco_nombre, origen_persist, fecha, monto))
+                    filtro = ("banco=%s AND origen=%s AND COALESCE(fecha,'')=%s "
+                              "AND ABS(COALESCE(monto,0)-%s) < 0.005")
+                    parametros = (banco_nombre, origen_persist, fecha, monto)
+
+                c.execute("SELECT COUNT(*) FROM conciliacion_bancaria WHERE " + filtro, parametros)
                 ya_existia = c.fetchone()[0] > 0
                 if ya_existia:
-                    # 🛡️ ya estaba conciliado: se cuenta para avisar al usuario
+                    # ✅ La fila ya estaba (la crea el sync de pagos/cobros con
+                    #    estado=''): se MARCA conciliada, no se duplica.
+                    c.execute("UPDATE conciliacion_bancaria SET estado='conciliado', "
+                              "fecha_conciliacion=%s WHERE " + filtro,
+                              (datetime.now().strftime("%d/%m/%Y"),) + parametros)
+                    actualizadas = c.rowcount
+                    conn.commit()
                     try:
                         self._ya_conciliados = getattr(self, "_ya_conciliados", 0) + 1
                     except Exception:
                         pass
-                reutilizado = 0
-                if not ya_existia:
-                    # 🛡️ Punto 1: mismo banco + monto y fecha ±2 días -> se reutiliza esa fila
-                    try:
-                        c.execute("""SELECT id, fecha FROM conciliacion_bancaria
-                                     WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
-                                       AND ABS(ABS(COALESCE(monto,0)) - ABS(%s)) < 0.01
-                                     ORDER BY id LIMIT 25""", (banco_nombre, monto))
-                        for _id_reuso, _fecha_reuso in (c.fetchall() or []):
-                            # 🏦 el banco puede tardar hasta 4 días en reflejar la
-                            #    transacción en el estado de cuenta
-                            if _dias_entre_fechas(_fecha_reuso, fecha) <= 4:
-                                reutilizado = _id_reuso
-                                break
-                    except Exception as _e_reuso:
-                        print("[Conciliación] búsqueda de asiento equivalente:", _e_reuso)
-                    if reutilizado:
-                        c.execute("""UPDATE conciliacion_bancaria
-                                     SET estado='conciliado', fecha_conciliacion=%s
-                                     WHERE id=%s""",
-                                  (datetime.now().strftime("%d/%m/%Y"), reutilizado))
-                        conn.commit()
-                        try:
-                            self._ya_conciliados = getattr(self, "_ya_conciliados", 0) + 1
-                        except Exception:
-                            pass
-                if not ya_existia and not reutilizado:
-                    c.execute("""INSERT INTO conciliacion_bancaria
-                        (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado, fecha_conciliacion)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'conciliado',%s)""",
-                        (banco_nombre, banco.get("cuenta", ""), fecha, desc, monto,
-                         f.get("tipo", "ingreso"), origen_persist, idm,
-                         datetime.now().strftime("%d/%m/%Y")))
-                    conn.commit()
+                    return actualizadas > 0
+                # 🆕 No existía: se registra ya conciliada.
+                c.execute("""INSERT INTO conciliacion_bancaria
+                    (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado, fecha_conciliacion)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'conciliado',%s)""",
+                    (banco_nombre, banco.get("cuenta", ""), fecha, desc, monto,
+                     f.get("tipo", "ingreso"), origen_persist, idm,
+                     datetime.now().strftime("%d/%m/%Y")))
+                conn.commit()
                 return True
         except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             print("[Conciliación] No se pudo guardar:", e)
             return False
         finally:
             liberar_conexion(conn)
 
     def escanear_comprobante_pago(self, padre, al_terminar):
-        """🖨️ Escanea el comprobante de pago con la multifuncional y arma un PDF."""
+        """🖨️ Escanea el comprobante de pago con la multifuncional y arma un PDF.
+
+        El escaneo corre en segundo plano; al terminar se llama a al_terminar(ruta)
+        con la ruta del PDF (o '' si no se pudo escanear).
+        """
         try:
             import escaner
         except Exception as e:
@@ -5170,14 +8944,23 @@ class ModuloBancoApp:
             # ⚙️ La configuración del escáner se lee del PROPIO módulo (es la misma
             #    que usa Compras, donde el escaneo funciona). Antes se importaba
             #    control_general y esa carga podía dejar la ventana colgada.
+            # 🛠️ Aquí se llamaba a 'cargar_configuracion_regional()', que NO existe
+            #    en este archivo: el NameError se tragaba el except y el escaneo
+            #    usaba siempre los valores por defecto (ignoraba dispositivo, DPI,
+            #    color y modo). Se arma con los valores del módulo + los del equipo.
             config = {}
             try:
-                config = cargar_configuracion_regional() or {}
-            except Exception as e_cfg:
+                config = dict(cargar_config() or {})
+            except Exception:
                 config = {}
+            try:
+                config.update(leer_config_disco() or {})
+            except Exception as e_cfg:
+                print("[Banco] configuración del escáner:", e_cfg)
         except Exception as e:
             messagebox.showerror("Escáner", "No se pudo leer la configuración del escáner:\n%s" % e, parent=padre)
             return al_terminar("")
+
         ventana = padre if padre is not None else getattr(self, "main_root", None)
         prog = ctk.CTkToplevel(ventana)
         prog.title("Escaneando comprobante de pago")
@@ -5192,9 +8975,9 @@ class ModuloBancoApp:
         except Exception:
             pass
         ctk.CTkLabel(prog, text="🖨️ Escaneando el comprobante de pago...",
-                     font=("Arial", 12, "bold"), text_color="#0e7490").pack(pady=(20, 4))
+                     font=(FAMILIA, 12, "bold"), text_color="#0e7490").pack(pady=(20, 4))
         ctk.CTkLabel(prog, text="Coloque el comprobante en el escáner (cristal).",
-                     font=("Arial", 10), text_color="gray").pack()
+                     font=(FAMILIA, 10), text_color="gray").pack()
         # ⏳ Barra SIN animación: la animación deja temporizadores pendientes y
         #    hacía que update_idletasks() no retornara (la ventana se quedaba ahí).
         barra = ctk.CTkProgressBar(prog, width=330, mode="determinate")
@@ -5297,11 +9080,20 @@ class ModuloBancoApp:
         terminar()
 
     def _comprobante_de_movimiento(self, registro):
-        """📎 Comprobante de pago de un movimiento del banco ('' si no hay)."""
+        """📎 Comprobante de pago de un movimiento del banco.
+
+        La tabla de movimientos no guarda el archivo: se busca en el gasto de
+        Compras ('facturas_recibidas') o en el pago ('pagos_comprobantes')
+        enlazados por 'conciliacion_bancaria.id_gasto_compras'.
+        Devuelve '' si no hay ninguno (nunca falla).
+        """
         try:
             ruta = str(registro.get("archivo_ruta") or "").strip()
             if ruta:
                 return ruta
+            # Un id virtual de transferencia nunca es un id de pago manual.
+            if registro.get("tabla") in ("transferencias_bancarias", "tx_comision"):
+                return ""
             id_gasto = int(registro.get("id_gasto_compras") or 0)
             conn = conectar_db(silencioso=True)
             if not conn:
@@ -5345,11 +9137,13 @@ class ModuloBancoApp:
             "principal": str(registro.get("categoria") or ""),
             "sub": str(registro.get("subcategoria") or ""),
             "evento": str(registro.get("evento") or ""),
-            "personal": str(registro.get("personal") or ""),
+            "chofer": str(registro.get("chofer") or ""),
             "numero_operacion": str(registro.get("numero_operacion") or ""),
             "comision": float(registro.get("comision") or 0),
             "interbancario": bool(registro.get("interbancario")),
             "es_cruzada": bool(registro.get("es_cruzada")),
+            # 📎 Comprobante de pago ya cargado (se conserva al editar):
+            #    se busca en el gasto de Compras o en el pago vinculado.
             "comprobante": self._comprobante_de_movimiento(registro),
             "descripcion": "",
         }
@@ -5357,14 +9151,9 @@ class ModuloBancoApp:
         for parte in [p.strip() for p in str(registro.get("descripcion") or "").split(" - ") if p.strip()]:
             bajo = parte.lower()
             if bajo.startswith("evento "):
-                datos["evento"] = datos["evento"] or parte[7:].strip()
-            elif bajo.startswith("placa "):
-                # Movimientos antiguos (programa original): la placa era el evento
                 datos["evento"] = datos["evento"] or parte[6:].strip()
-            elif bajo.startswith("personal "):
-                datos["personal"] = datos["personal"] or parte[9:].strip()
             elif bajo.startswith("chofer "):
-                datos["personal"] = datos["personal"] or parte[7:].strip()
+                datos["chofer"] = datos["chofer"] or parte[7:].strip()
             elif bajo.startswith("comisión interbancaria") or bajo.startswith("comision interbancaria"):
                 datos["interbancario"] = True
                 if not datos["comision"]:
@@ -5390,38 +9179,39 @@ class ModuloBancoApp:
         v.title("Asentar ITF")
         v.geometry("460x360")
         v.transient(self.parent_frame)
+        traer_al_frente(v)
         try:
             v.grab_set()
         except Exception:
             pass
 
         ctk.CTkLabel(v, text="ITF - Impuesto a las Transacciones Financieras",
-                     font=("Arial", 14, "bold"), text_color="#1f538d").pack(pady=(16, 2))
+                     font=(FAMILIA, 14, "bold"), text_color="#1f538d").pack(pady=(16, 2))
         ctk.CTkLabel(v, text="Banco: " + str(banco.get("banco", "")) + " - " + str(banco.get("cuenta", "")),
-                     font=("Arial", 11)).pack(pady=(0, 10))
+                     font=(FAMILIA, 11)).pack(pady=(0, 10))
 
         f = ctk.CTkFrame(v, fg_color="transparent")
         f.pack(fill="x", padx=24, pady=4)
         ctk.CTkLabel(f, text="Fecha (dd/mm/aaaa):", width=150, anchor="w",
-                     font=("Arial", 12, "bold")).pack(side="left")
+                     font=(FAMILIA, 12, "bold")).pack(side="left")
         ent_fecha = ctk.CTkEntry(f, width=170)
         ent_fecha.pack(side="left")
         ent_fecha.insert(0, datetime.now().strftime("%d/%m/%Y"))
-        ctk.CTkButton(f, text="📅", width=42, font=("Arial", 13, "bold"),
+        ctk.CTkButton(f, text="📅", width=42, font=(FAMILIA, 13, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=lambda: CalendarioNativo(v, ent_fecha)).pack(side="left", padx=(6, 0))
 
         f2 = ctk.CTkFrame(v, fg_color="transparent")
         f2.pack(fill="x", padx=24, pady=4)
         ctk.CTkLabel(f2, text="N° de transaccion:", width=150, anchor="w",
-                     font=("Arial", 12, "bold")).pack(side="left")
+                     font=(FAMILIA, 12, "bold")).pack(side="left")
         ent_num = ctk.CTkEntry(f2, width=200)
         ent_num.pack(side="left")
 
         f3 = ctk.CTkFrame(v, fg_color="transparent")
         f3.pack(fill="x", padx=24, pady=4)
         ctk.CTkLabel(f3, text="Monto del ITF (S/):", width=150, anchor="w",
-                     font=("Arial", 12, "bold")).pack(side="left")
+                     font=(FAMILIA, 12, "bold")).pack(side="left")
         ent_monto = ctk.CTkEntry(f3, width=200)
         ent_monto.pack(side="left")
 
@@ -5455,7 +9245,7 @@ class ModuloBancoApp:
         f_pie = ctk.CTkFrame(v, fg_color="transparent")
         f_pie.pack(side="bottom", fill="x", pady=16)
         ctk.CTkButton(f_pie, text="Guardar ITF", width=150, fg_color="#27ae60", hover_color="#1e8449",
-                      font=("Arial", 12, "bold"), command=guardar).pack(side="left", padx=40)
+                      font=(FAMILIA, 12, "bold"), command=guardar).pack(side="left", padx=40)
         ctk.CTkButton(f_pie, text="Cancelar", width=110, fg_color="#7f8c8d", hover_color="#606b6b",
                       command=v.destroy).pack(side="left")
 
@@ -5505,7 +9295,7 @@ class ModuloBancoApp:
             pass
 
         cats = cargar_categorias_gastos()
-        principales = ordenar_categorias_principales(list(cats.keys())) or ["Producción de Eventos"]
+        principales = ordenar_categorias_principales(list(cats.keys())) or ["Gastos Operativos"]
         comision = cargar_comision_interbancaria()
         en_edicion = bool(registro)
         datos_ini = (self._datos_iniciales_pago(registro, cats, principales) if en_edicion else {})
@@ -5517,21 +9307,22 @@ class ModuloBancoApp:
         v.geometry("580x700")
         v.minsize(520, 480)
         v.transient(self.parent_frame)
+        traer_al_frente(v)
         v.grab_set()
 
         TITULO_BASE = ("✏️ Editar Ingreso / Egreso" if en_edicion
                        else "➕ Registro de Ingresos / Egresos / Cruzadas")
         lbl_titulo = ctk.CTkLabel(v, text=TITULO_BASE,
-                                  font=("Arial", 15, "bold"), text_color="#1f538d")
+                                  font=(FAMILIA, 15, "bold"), text_color="#1f538d")
         lbl_titulo.pack(pady=(15, 5))
 
-        # 💰 EGRESO (pago) o INGRESO (cobro): cambia el título y la categoría principal
+        # 💰 EGRESO (pago) o INGRESO (cobro)
         f_tipo = ctk.CTkFrame(v, fg_color="transparent")
         f_tipo.pack(fill="x", padx=16, pady=(0, 4))
-        ctk.CTkLabel(f_tipo, text="Tipo de movimiento:", font=("Arial", 11, "bold")
+        ctk.CTkLabel(f_tipo, text="Tipo de movimiento:", font=(FAMILIA, 11, "bold")
                      ).pack(side="left", padx=(0, 8))
         seg_tipo = ctk.CTkSegmentedButton(f_tipo, values=["Egreso (pago)", "Ingreso (cobro)"],
-                                          font=("Arial", 10, "bold"))
+                                          font=(FAMILIA, 10, "bold"))
         seg_tipo.set("Ingreso (cobro)" if str(datos_ini.get("tipo") or "").lower() == "ingreso"
                      else "Egreso (pago)")
         seg_tipo.pack(side="left")
@@ -5548,13 +9339,13 @@ class ModuloBancoApp:
         if principal_ini and principal_ini not in principales:
             principales = principales + [principal_ini]
 
-        ctk.CTkLabel(f, text="Categoría Principal:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Categoría Principal:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         cmb_principal = ctk.CTkComboBox(f, values=principales, width=300, state="readonly")
         cmb_principal.pack(fill="x", pady=(0, 8))
         cmb_principal.set(principal_ini or principales[0])
 
         sub_ini = str(datos_ini.get("sub") or "")
-        ctk.CTkLabel(f, text="Categoría:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Categoría:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         subs_inicial = list(cats.get(cmb_principal.get(), []) or ["(Sin categoría)"])
         if sub_ini and sub_ini not in subs_inicial:
             subs_inicial.append(sub_ini)
@@ -5562,41 +9353,41 @@ class ModuloBancoApp:
         cmb_sub.pack(fill="x", pady=(0, 8))
         cmb_sub.set(sub_ini or subs_inicial[0])
 
-        # 🎪 Evento asociado: la dimensión de trabajo de este sistema de EVENTOS
-        # (en el programa original este desplegable mostraba las placas de la flota).
-        # ⚡ Las listas que vienen de Supabase (eventos, personal y proveedores) NO se
-        # consultan aquí: la ventana abre al instante con lo que ya está en la caché
-        # del sistema y el resto se completa después, en segundo plano.
-        eventos = leer_cache("lista_eventos_aprobados")
-        if "OFICINA | Trabajos Internos" not in eventos:
-            eventos = ["OFICINA | Trabajos Internos"] + eventos
-        lbl_evento = ctk.CTkLabel(f, text="Evento Asociado:", font=("Arial", 11, "bold"))
-        cmb_evento = ctk.CTkComboBox(f, values=["Ninguno"] + eventos, width=300)
+        # Tercer desplegable: evento (solo para Gastos Operativos)
+        eventos = cargar_eventos()
+        lbl_evento = ctk.CTkLabel(f, text="Evento Asociado:", font=(FAMILIA, 11, "bold"))
+        # "Ninguno" primero: así un pago que no es de un vehículo (o una edición
+        # que no tenía evento) no queda con una evento asignada por descuido.
+        cmb_evento = ctk.CTkComboBox(f, values=["Ninguno"] + eventos, width=300, state="readonly")
         cmb_evento.set("Ninguno")
 
-        # 👤 Personal / beneficiario: se pide solo en los pagos de planilla o de
-        # personal del evento (en el original eran los choferes de la flota).
-        personal_nomina = leer_cache("banco_lista_personal")
-        lbl_personal = ctk.CTkLabel(f, text="Personal / Beneficiario (planilla):",
-                                    font=("Arial", 11, "bold"))
-        cmb_personal = ctk.CTkComboBox(f, values=["Ninguno"] + personal_nomina, width=300)
-        cmb_personal.set("Ninguno")
+        # Cuarto desplegable: chofer (solo para categorías de Planilla / Sueldos)
+        choferes = cargar_choferes()
+        lbl_chofer = ctk.CTkLabel(f, text="Chofer (planilla):", font=(FAMILIA, 11, "bold"))
+        cmb_chofer = ctk.CTkComboBox(f, values=["Ninguno"] + choferes, width=300, state="readonly")
+        cmb_chofer.set("Ninguno")
 
-        def actualizar_personal():
-            if es_categoria_personal(f"{cmb_principal.get()} {cmb_sub.get()}"):
-                lbl_personal.pack(anchor="w", pady=(0, 2), before=btn_gestion)
-                cmb_personal.pack(fill="x", pady=(0, 8), before=btn_gestion)
+        def actualizar_chofer():
+            if es_categoria_planilla(f"{cmb_principal.get()} {cmb_sub.get()}"):
+                lbl_chofer.pack(anchor="w", pady=(0, 2), before=btn_gestion)
+                cmb_chofer.pack(fill="x", pady=(0, 8), before=btn_gestion)
             else:
-                lbl_personal.pack_forget()
-                cmb_personal.pack_forget()
+                lbl_chofer.pack_forget()
+                cmb_chofer.pack_forget()
 
         def on_principal(_=None):
             subs = cats.get(cmb_principal.get(), []) or ["(Sin categoría)"]
             cmb_sub.configure(values=subs)
             cmb_sub.set(subs[0])
-            actualizar_personal()
+            if cmb_principal.get() == "Gastos Operativos":
+                lbl_evento.pack(anchor="w", pady=(0, 2), before=btn_gestion)
+                cmb_evento.pack(fill="x", pady=(0, 8), before=btn_gestion)
+            else:
+                lbl_evento.pack_forget()
+                cmb_evento.pack_forget()
+            actualizar_chofer()
         cmb_principal.configure(command=on_principal)
-        cmb_sub.configure(command=lambda _=None: actualizar_personal())
+        cmb_sub.configure(command=lambda _=None: actualizar_chofer())
 
         def _al_cambiar_tipo(_valor=None):
             """Pone la categoría Ingresos al elegir ingreso y cambia el título."""
@@ -5624,21 +9415,18 @@ class ModuloBancoApp:
         def recargar_categorias_combos():
             nonlocal cats, principales
             cats = cargar_categorias_gastos()
-            principales = ordenar_categorias_principales(list(cats.keys())) or ["Producción de Eventos"]
+            principales = ordenar_categorias_principales(list(cats.keys())) or ["Gastos Operativos"]
             cmb_principal.configure(values=principales)
             cmb_principal.set(principales[0])
             on_principal()
 
         def abrir_gestion():
-            # Categorías de gastos del sistema: al guardar y cerrar se recargan
-            # aquí los desplegables con la lista nueva.
+            # Misma ventana que usa el módulo de Compras ("⚙️" del formulario):
+            # al guardar y cerrar se recargan aquí los desplegables.
             self.gestionar_categorias(al_guardar=recargar_categorias_combos)
-        btn_gestion = ctk.CTkButton(f, text="⚙️ Gestionar Categorías", height=26, font=("Arial", 11),
+        btn_gestion = ctk.CTkButton(f, text="⚙️ Gestionar Categorías", height=26, font=(FAMILIA, 11),
                                     fg_color="#8e44ad", hover_color="#703688", command=abrir_gestion)
         btn_gestion.pack(fill="x", pady=(0, 8))
-        # 🎪 El evento se pide SIEMPRE: en este sistema todo movimiento se imputa a un evento.
-        lbl_evento.pack(anchor="w", pady=(0, 2), before=btn_gestion)
-        cmb_evento.pack(fill="x", pady=(0, 8), before=btn_gestion)
         on_principal()
 
         # En edición se restauran los valores guardados (on_principal los reinicia)
@@ -5651,34 +9439,34 @@ class ModuloBancoApp:
         if evento_ini and evento_ini not in ("Ninguno", "(Sin eventos)"):
             valores_evento = list(cmb_evento.cget("values"))
             if evento_ini not in valores_evento:
-                valores_evento.append(evento_ini)        # evento ya no aprobado / antiguo
+                valores_evento.append(evento_ini)          # evento que ya no está en la flota
                 cmb_evento.configure(values=valores_evento)
             cmb_evento.set(evento_ini)
-        personal_ini = str(datos_ini.get("personal") or "")
-        if personal_ini:
-            valores_personal = list(cmb_personal.cget("values"))
-            if personal_ini not in valores_personal:
-                valores_personal.append(personal_ini)
-                cmb_personal.configure(values=valores_personal)
-            cmb_personal.set(personal_ini)
-        actualizar_personal()
+        chofer_ini = str(datos_ini.get("chofer") or "")
+        if chofer_ini:
+            valores_chofer = list(cmb_chofer.cget("values"))
+            if chofer_ini not in valores_chofer:
+                valores_chofer.append(chofer_ini)
+                cmb_chofer.configure(values=valores_chofer)
+            cmb_chofer.set(chofer_ini)
+        actualizar_chofer()
 
-        ctk.CTkLabel(f, text="Fecha (DD/MM/AAAA):", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Fecha (DD/MM/AAAA):", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         f_fecha = ctk.CTkFrame(f, fg_color="transparent")
         f_fecha.pack(fill="x", pady=(0, 8))
         ent_fecha = ctk.CTkEntry(f_fecha)
         ent_fecha.pack(side="left", fill="x", expand=True)
         ent_fecha.insert(0, str(datos_ini.get("fecha") or datetime.now().strftime("%d/%m/%Y")))
-        ctk.CTkButton(f_fecha, text="📅", width=42, font=("Arial", 13, "bold"),
+        ctk.CTkButton(f_fecha, text="📅", width=42, font=(FAMILIA, 13, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=lambda: CalendarioNativo(v, ent_fecha)).pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(f, text="N° de Operación (opcional):", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="N° de Operación (opcional):", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         ent_operacion = ctk.CTkEntry(f, placeholder_text="Ej.: 00123456 / constancia de la transferencia")
         ent_operacion.pack(fill="x", pady=(0, 8))
         ent_operacion.insert(0, str(datos_ini.get("numero_operacion") or ""))
 
-        ctk.CTkLabel(f, text="Descripción:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Descripción:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         ent_desc = ctk.CTkEntry(f)
         ent_desc.pack(fill="x", pady=(0, 8))
         ent_desc.insert(0, str(datos_ini.get("descripcion") or ""))
@@ -5686,20 +9474,20 @@ class ModuloBancoApp:
         # 📎 Comprobante del movimiento: se puede ESCANEAR CON EL TELÉFONO
         estado_soporte = {"ruta": str(datos_ini.get("soporte") or "")}
         ctk.CTkLabel(f, text="Comprobante (soporte del banco):",
-                     font=("Arial", 11, "bold")).pack(anchor="w")
+                     font=(FAMILIA, 11, "bold")).pack(anchor="w")
         f_soporte = ctk.CTkFrame(f, fg_color="transparent")
         f_soporte.pack(fill="x", pady=(0, 4))
         btn_soporte_tel = ctk.CTkButton(f_soporte, text="📱 Escanear con el teléfono", width=190,
-                                        font=("Arial", 10, "bold"), fg_color="#5b2c6f",
+                                        font=(FAMILIA, 10, "bold"), fg_color="#5b2c6f",
                                         hover_color="#4a2360")
         btn_soporte_tel.pack(side="left")
-        ctk.CTkButton(f_soporte, text="📎 Archivo", width=90, font=("Arial", 10, "bold"),
+        ctk.CTkButton(f_soporte, text="📎 Archivo", width=90, font=(FAMILIA, 10, "bold"),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=lambda: _elegir_soporte_archivo()).pack(side="left", padx=6)
-        ctk.CTkButton(f_soporte, text="🗏 Ver", width=70, font=("Arial", 10, "bold"),
+        ctk.CTkButton(f_soporte, text="🗏 Ver", width=70, font=(FAMILIA, 10, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=lambda: _ver_soporte()).pack(side="left")
-        lbl_soporte = ctk.CTkLabel(f, text="", font=("Arial", 9), text_color="#7f8c8d")
+        lbl_soporte = ctk.CTkLabel(f, text="", font=(FAMILIA, 9), text_color="#7f8c8d")
         lbl_soporte.pack(anchor="w", pady=(0, 8))
 
         def _pintar_soporte():
@@ -5716,6 +9504,14 @@ class ModuloBancoApp:
         def _fijar_soporte(ruta_sop):
             estado_soporte["ruta"] = str(ruta_sop or "")
             _pintar_soporte()
+            # 🔁 Un mismo comprobante sirve para los dos campos: si el de PAGO está
+            #    vacío, se copia ahí también.
+            try:
+                if ruta_sop and not (ruta_comprobante.get("ruta") or ""):
+                    ruta_comprobante["ruta"] = str(ruta_sop)
+                    actualizar_lbl_comprobante()
+            except Exception as error_sync:
+                print("[Banco] sincronizar comprobante:", error_sync)
 
         def _ver_soporte():
             ruta_sop = estado_soporte["ruta"]
@@ -5743,9 +9539,76 @@ class ModuloBancoApp:
             except Exception:
                 config_esc = {}
 
+            def _completar_con_texto(texto):
+                """🧠 Con el texto del OCR completa N° de operación, fecha y monto."""
+                if not texto:
+                    return
+                avisos = []
+                try:
+                    from modulo_compras import (extraer_numero_operacion,
+                                                extraer_fecha_comprobante)
+                    numero_leido = extraer_numero_operacion(texto)
+                    fecha_leida = extraer_fecha_comprobante(texto)
+                except Exception as error_op:
+                    print("[Banco] OCR número/fecha:", error_op)
+                    numero_leido, fecha_leida = "", ""
+                try:
+                    monto_leido = monto_del_comprobante(texto)
+                except Exception:
+                    monto_leido = 0.0
+                try:
+                    if numero_leido and not ent_operacion.get().strip():
+                        ent_operacion.insert(0, numero_leido)
+                        avisos.append("N° operación: " + numero_leido)
+                except Exception:
+                    pass
+                try:
+                    if fecha_leida:
+                        ent_fecha.delete(0, "end")
+                        ent_fecha.insert(0, fecha_leida)
+                        avisos.append("Fecha: " + fecha_leida)
+                except Exception:
+                    pass
+                try:
+                    if monto_leido and not ent_monto.get().strip():
+                        from modulo_compras import formatear_numero_entrada
+                        ent_monto.insert(0, formatear_numero_entrada("%.2f" % float(monto_leido)))
+                        avisos.append("Monto: %.2f" % float(monto_leido))
+                except Exception:
+                    pass
+                if avisos:
+                    try:
+                        messagebox.showinfo(
+                            "Comprobante",
+                            "Se leyó el comprobante con OCR y se completó:\n"
+                            + " · ".join(avisos), parent=v)
+                    except Exception:
+                        pass
+
             def al_recibir(rutas, tipo_doc):
-                if rutas:
-                    _fijar_soporte(rutas[0])
+                if not rutas:
+                    return
+                _fijar_soporte(rutas[0])
+                # 🧠 OCR en segundo plano: no congela la ventana mientras lee
+                paginas = list(rutas or [])
+
+                def trabajo_ocr():
+                    texto = ""
+                    try:
+                        import escaner as _esc
+                        texto = _esc.texto_de_resultados(_esc.ocr_paginas(paginas)) or ""
+                    except Exception as error_ocr:
+                        print("[Banco] OCR del comprobante:", error_ocr)
+                    try:
+                        v.after(0, lambda: _completar_con_texto(texto))
+                    except Exception:
+                        pass
+
+                try:
+                    threading.Thread(target=trabajo_ocr, daemon=True).start()
+                except Exception as error_hilo:
+                    print("[Banco] hilo de OCR:", error_hilo)
+                    _completar_con_texto("")
 
             try:
                 escaner_movil.escanear_desde_telefono(
@@ -5758,7 +9621,7 @@ class ModuloBancoApp:
         btn_soporte_tel.configure(command=_escanear_soporte_telefono)
         _pintar_soporte()
 
-        ctk.CTkLabel(f, text="Monto:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Monto:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         ent_monto = ctk.CTkEntry(f)
         ent_monto.pack(fill="x", pady=(0, 8))
         if datos_ini.get("monto"):
@@ -5768,22 +9631,22 @@ class ModuloBancoApp:
 
         # 💰 Igual que en Compras: el monto se puede digitar SIN IGV (monto base) o
         # CON IGV (total del documento); lo que falte se calcula automáticamente.
-        ctk.CTkLabel(f, text="Tipo de Monto a Ingresar:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(f, text="Tipo de Monto a Ingresar:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         seg_monto = ctk.CTkSegmentedButton(
             f, values=["Monto Base (sin IGV)", "Monto con IGV (Total)"],
-            font=("Arial", 10, "bold"), command=lambda _v: actualizar_total())
+            font=(FAMILIA, 10, "bold"), command=lambda _v: actualizar_total())
         seg_monto.pack(fill="x", pady=(0, 6))
         seg_monto.set("Monto Base (sin IGV)")
 
         f_igv = ctk.CTkFrame(f, fg_color="transparent")
         f_igv.pack(fill="x", pady=(0, 2))
-        ctk.CTkLabel(f_igv, text="IGV (%):", font=("Arial", 11, "bold")).pack(side="left")
+        ctk.CTkLabel(f_igv, text="IGV (%):", font=(FAMILIA, 11, "bold")).pack(side="left")
         ent_igv = ctk.CTkEntry(f_igv, width=70)
         ent_igv.pack(side="left", padx=(6, 0))
         ent_igv.insert(0, "0")
         ent_igv.bind("<KeyRelease>", lambda e: actualizar_total())
 
-        lbl_igv_det = ctk.CTkLabel(f, text="", font=("Arial", 10), text_color="#555555",
+        lbl_igv_det = ctk.CTkLabel(f, text="", font=(FAMILIA, 10), text_color="#555555",
                                    wraplength=520, justify="left")
         lbl_igv_det.pack(anchor="w", pady=(0, 8))
 
@@ -5808,12 +9671,12 @@ class ModuloBancoApp:
         chk_inter.pack(anchor="w", pady=(0, 4))
         f_com = ctk.CTkFrame(f, fg_color="transparent")
         f_com.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(f_com, text="Comisión (S/.):", font=("Arial", 11, "bold")).pack(side="left")
+        ctk.CTkLabel(f_com, text="Comisión (S/.):", font=(FAMILIA, 11, "bold")).pack(side="left")
         ent_comision = ctk.CTkEntry(f_com, width=90)
         ent_comision.pack(side="left", padx=6)
         comision_ini = datos_ini.get("comision")
         ent_comision.insert(0, f"{(float(comision_ini) if comision_ini else comision):.2f}")
-        lbl_total = ctk.CTkLabel(f_com, text=f"Total: {formatear_monto(0)}", font=("Arial", 12, "bold"),
+        lbl_total = ctk.CTkLabel(f_com, text=f"Total: {formatear_monto(0)}", font=(FAMILIA, 12, "bold"),
                                  text_color="#1f538d")
         lbl_total.pack(side="right")
 
@@ -5834,16 +9697,14 @@ class ModuloBancoApp:
         actualizar_total()   # muestra de una vez el total y el detalle base/IGV
 
         # ------------------------------------------------------------------
-        # UNIFICACIÓN CON COMPRAS CRUZADAS (pago a tercero)
-        # Al marcar el check se habilitan los datos del tercero y el PDF del soporte
+        # 📎 COMPROBANTE DE PAGO (opcional): PDF o imagen del voucher
         # ------------------------------------------------------------------
-        # 📎 COMPROBANTE DE PAGO (opcional): cargar, escanear o ver el voucher
         ruta_comprobante = {"ruta": str(datos_ini.get("comprobante") or "")}
         ctk.CTkLabel(f, text="📎 Comprobante de pago (opcional):",
-                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(6, 0))
+                     font=(FAMILIA, 11, "bold")).pack(anchor="w", pady=(6, 0))
         f_comp = ctk.CTkFrame(f, fg_color="transparent")
         f_comp.pack(fill="x", pady=(0, 4))
-        lbl_comprobante = ctk.CTkLabel(f, text="Sin comprobante cargado", font=("Arial", 10),
+        lbl_comprobante = ctk.CTkLabel(f, text="Sin comprobante cargado", font=(FAMILIA, 10),
                                        text_color="#999999", anchor="w", justify="left")
 
         def actualizar_lbl_comprobante():
@@ -5853,6 +9714,16 @@ class ModuloBancoApp:
             else:
                 lbl_comprobante.configure(text="Sin comprobante cargado", text_color="#999999")
 
+        def _fijar_comprobante(ruta_comp):
+            """Fija el comprobante de pago y, si no hay soporte del banco, lo copia."""
+            ruta_comprobante["ruta"] = str(ruta_comp or "")
+            actualizar_lbl_comprobante()
+            try:
+                if ruta_comp and not (estado_soporte.get("ruta") or ""):
+                    _fijar_soporte(ruta_comp)
+            except Exception as error_sync:
+                print("[Banco] sincronizar soporte:", error_sync)
+
         def cargar_comprobante():
             try:
                 from tkinter import filedialog
@@ -5861,16 +9732,34 @@ class ModuloBancoApp:
                     filetypes=[("PDF o imagen", "*.pdf *.jpg *.jpeg *.png"), ("Todos los archivos", "*.*")])
             except Exception as e:
                 return messagebox.showerror("Comprobante", "No se pudo abrir el selector: " + str(e), parent=v)
-            if ruta:
-                ruta_comprobante["ruta"] = ruta
-                actualizar_lbl_comprobante()
+            if not ruta:
+                return
+            _fijar_comprobante(ruta)
+
+        def ver_comprobante():
+            ruta = ruta_comprobante.get("ruta") or ""
+            if ruta and os.path.isfile(ruta):
+                abrir_documento(ruta)
+            elif ruta:
+                messagebox.showwarning("Comprobante", "El archivo ya no está en esa ubicación:\n" + ruta, parent=v)
+            else:
+                messagebox.showinfo("Comprobante",
+                                    "Todavía no ha cargado el comprobante de pago.\n"
+                                    "Use el botón «📎 Cargar comprobante».", parent=v)
+
+        ctk.CTkButton(f_comp, text="📎 Cargar comprobante de pago (PDF/JPG)", height=30,
+                      font=(FAMILIA, 11, "bold"), fg_color="#16a085", hover_color="#11806a",
+                      command=cargar_comprobante).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(f_comp, text="👁️ Ver", width=70, height=30, font=(FAMILIA, 11, "bold"),
+                      fg_color="#5d6d7e", hover_color="#4a5967",
+                      command=ver_comprobante).pack(side="left", padx=(6, 0))
 
         def escanear_comprobante():
+            """🖨️ Escanea el comprobante con la multifuncional."""
             def al_terminar(ruta, numero="", fecha_leida="", monto_leido=0.0):
                 if not ruta:
                     return
-                ruta_comprobante["ruta"] = ruta
-                actualizar_lbl_comprobante()
+                _fijar_comprobante(ruta)
                 avisos = []
                 try:
                     if numero and not ent_operacion.get().strip():
@@ -5898,83 +9787,74 @@ class ModuloBancoApp:
                                     + os.path.basename(ruta) + detalle, parent=v)
             self.escanear_comprobante_pago(v, al_terminar)
 
-        def ver_comprobante():
-            ruta = ruta_comprobante.get("ruta") or ""
-            if ruta and os.path.isfile(ruta):
-                abrir_documento(ruta)
-            elif ruta:
-                messagebox.showwarning("Comprobante", "El archivo ya no está en esa ubicación:\n" + ruta, parent=v)
-            else:
-                messagebox.showinfo("Comprobante", "Todavía no ha cargado el comprobante de pago.", parent=v)
-
-        ctk.CTkButton(f_comp, text="📎 Cargar", width=110, height=30, font=("Arial", 11, "bold"),
-                      fg_color="#16a085", hover_color="#11806a",
-                      command=cargar_comprobante).pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(f_comp, text="🖨️ Escanear", width=120, height=30, font=("Arial", 11, "bold"),
+        ctk.CTkButton(f_comp, text="🖨️ Escanear", width=120, height=30, font=(FAMILIA, 11, "bold"),
                       fg_color="#0e7490", hover_color="#155e75",
                       command=escanear_comprobante).pack(side="left", padx=(6, 0))
-        ctk.CTkButton(f_comp, text="👁️ Ver", width=70, height=30, font=("Arial", 11, "bold"),
-                      fg_color="#5d6d7e", hover_color="#4a5967",
-                      command=ver_comprobante).pack(side="left", padx=(6, 0))
 
-        def consultar_facturas_canceladas():
-            ruta = ruta_comprobante.get("ruta") or ""
-            operacion = ""
+        def escanear_comprobante_telefono():
+            """📱 Abre el QR y espera la foto del teléfono."""
             try:
-                operacion = ent_operacion.get().strip()
-            except Exception:
-                pass
-            filas = facturas_que_cancela_comprobante(ruta, operacion)
-            if not filas:
-                return messagebox.showinfo(
-                    "Comprobante",
-                    "Este comprobante todavía no cancela ninguna factura registrada.\n\n"
-                    "Los números aparecerán cuando se guarden pagos con este mismo comprobante "
-                    "o N° de operación.", parent=v)
-            messagebox.showinfo("Facturas que cancela este comprobante",
-                                "Cancela %d factura(s):\n\n%s"
-                                % (len(filas), texto_facturas_canceladas(filas)), parent=v)
+                import escaner_movil as _mov
+                _mov.escanear_reusando_flujo(
+                    parent=v,
+                    config=cargar_config(),
+                    funcion=escanear_comprobante,
+                    etiqueta="Banco · comprobante de pago")
+            except Exception as e:
+                messagebox.showerror("Escáner por teléfono", str(e), parent=v)
 
 
         lbl_comprobante.pack(anchor="w", pady=(0, 6))
         actualizar_lbl_comprobante()
 
+        # 📱 Escanear el comprobante con el teléfono (fila propia, ancho completo)
+        _fila_tel_banco = ctk.CTkFrame(f, fg_color="transparent")
+        _fila_tel_banco.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(_fila_tel_banco, text="📱 Escanear con el teléfono",
+                      height=30, font=(FAMILIA, 11, "bold"),
+                      fg_color="#8e44ad", hover_color="#6c3483",
+                      command=escanear_comprobante_telefono
+                      ).pack(side="left", fill="x", expand=True)
+
+        # ------------------------------------------------------------------
+        # UNIFICACIÓN CON COMPRAS CRUZADAS (pago a tercero)
+        # Al marcar el check se habilitan los datos del tercero y el PDF del soporte
+        # ------------------------------------------------------------------
         var_cruzada = tk.BooleanVar(value=False)
         chk_cruzada = ctk.CTkCheckBox(f, text="🔁 Es compra cruzada (factura pagada por un tercero)",
-                                      font=("Arial", 11, "bold"), variable=var_cruzada)
+                                      font=(FAMILIA, 11, "bold"), variable=var_cruzada)
         if not en_edicion:
             chk_cruzada.pack(anchor="w", pady=(4, 4))
         elif datos_ini.get("es_cruzada"):
             # La compra cruzada ya quedó registrada en Compras: al editar no se repite
             ctk.CTkLabel(f, text=("🔁 Este pago se registró como COMPRA CRUZADA en el módulo de Compras.\n"
                                   "Aquí solo se modifican los datos del movimiento bancario."),
-                         font=("Arial", 11, "italic"), text_color="#7d3c98",
+                         font=(FAMILIA, 11, "italic"), text_color="#7d3c98",
                          justify="left").pack(anchor="w", pady=(6, 4))
 
         estado_cruzada = {"soporte": "", "factura": ""}
         f_cruzada = ctk.CTkFrame(f, fg_color="#f4ecf7", corner_radius=8,
                                  border_width=1, border_color="#d7bde2")
 
-        ctk.CTkLabel(f_cruzada, text="Proveedor de la factura:", font=("Arial", 11, "bold")).pack(
+        ctk.CTkLabel(f_cruzada, text="Proveedor de la factura:", font=(FAMILIA, 11, "bold")).pack(
             anchor="w", padx=10, pady=(8, 0))
-        cmb_cruz_prov = ctk.CTkComboBox(
-            f_cruzada, values=leer_cache("lista_proveedores_combobox") or ["⏳ Cargando proveedores..."],
-            width=300)
+        cmb_cruz_prov = ctk.CTkComboBox(f_cruzada, values=cargar_proveedores() or ["(Sin proveedores)"],
+                                        width=300)
         cmb_cruz_prov.pack(fill="x", padx=10, pady=(0, 6))
         cmb_cruz_prov.set("")
 
-        ctk.CTkLabel(f_cruzada, text="N° Documento / Factura (opcional):", font=("Arial", 11, "bold")).pack(
+        ctk.CTkLabel(f_cruzada, text="N° Documento / Factura (opcional):", font=(FAMILIA, 11, "bold")).pack(
             anchor="w", padx=10)
         ent_cruz_nro = ctk.CTkEntry(f_cruzada)
         ent_cruz_nro.pack(fill="x", padx=10, pady=(0, 6))
 
-        ctk.CTkLabel(f_cruzada, text="Pagado a (tercero):", font=("Arial", 11, "bold")).pack(
+        ctk.CTkLabel(f_cruzada, text="Pagado a (tercero):", font=(FAMILIA, 11, "bold")).pack(
             anchor="w", padx=10)
         ent_cruz_tercero = ctk.CTkEntry(f_cruzada)
         ent_cruz_tercero.pack(fill="x", padx=10, pady=(0, 6))
 
         lbl_cruz_soporte = ctk.CTkLabel(f_cruzada, text="📄 Factura de compra: sin cargar\n🧾 Soporte del pago: sin cargar",
-                                        font=("Arial", 11, "italic"), text_color="#7d3c98",
+                                        font=(FAMILIA, 11, "italic"), text_color="#7d3c98",
                                         wraplength=400, justify="left")
         lbl_cruz_soporte.pack(anchor="w", padx=10, pady=(0, 4))
 
@@ -6046,17 +9926,17 @@ class ModuloBancoApp:
         f_btn_cruz = ctk.CTkFrame(f_cruzada, fg_color="transparent")
         f_btn_cruz.pack(fill="x", padx=10, pady=(0, 10))
         ctk.CTkButton(f_btn_cruz, text="🧾 Cargar Factura de Compra y Comprobante de Pago", height=30,
-                      font=("Arial", 11, "bold"), fg_color="#2980b9", hover_color="#1f618d",
+                      font=(FAMILIA, 11, "bold"), fg_color="#2980b9", hover_color="#1f618d",
                       command=cargar_documentos_cruzada).pack(fill="x")
         f_ver_cruz = ctk.CTkFrame(f_cruzada, fg_color="transparent")
         f_ver_cruz.pack(fill="x", padx=10, pady=(0, 10))
-        ctk.CTkButton(f_ver_cruz, text="👁 Ver factura", width=110, height=26, font=("Arial", 11),
+        ctk.CTkButton(f_ver_cruz, text="👁 Ver factura", width=110, height=26, font=(FAMILIA, 11),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=lambda: ver_documento_cruzada("factura")).pack(side="left")
-        ctk.CTkButton(f_ver_cruz, text="👁 Ver comprobante", width=140, height=26, font=("Arial", 11),
+        ctk.CTkButton(f_ver_cruz, text="👁 Ver comprobante", width=140, height=26, font=(FAMILIA, 11),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=lambda: ver_documento_cruzada("soporte")).pack(side="left", padx=6)
-        ctk.CTkButton(f_ver_cruz, text="🔄 Intercambiar", width=120, height=26, font=("Arial", 11),
+        ctk.CTkButton(f_ver_cruz, text="🔄 Intercambiar", width=120, height=26, font=(FAMILIA, 11),
                       fg_color="#8e44ad", hover_color="#703688",
                       command=intercambiar_documentos).pack(side="left")
 
@@ -6092,26 +9972,17 @@ class ModuloBancoApp:
             sub = cmb_sub.get()
             if sub == "(Sin categoría)":
                 sub = ""
-            # 🎪 Evento al que se imputa el movimiento (dimensión del sistema de eventos)
             evento = ""
-            ev = cmb_evento.get().strip()
-            if ev and ev not in ("Ninguno", "(Sin eventos)"):
-                evento = ev
-            # 👤 Personal / beneficiario, solo en los pagos de planilla o personal
-            personal_pago = ""
-            if es_categoria_personal(f"{principal} {sub}"):
-                pv = cmb_personal.get().strip()
-                if pv and pv != "Ninguno":
-                    personal_pago = pv
+            if principal == "Gastos Operativos":
+                pv = cmb_evento.get().strip()
+                if pv and pv not in ("Ninguno", "(Sin eventos)"):
+                    evento = pv
+            chofer = ""
+            if es_categoria_planilla(f"{principal} {sub}"):
+                chv = cmb_chofer.get().strip()
+                if chv and chv != "Ninguno":
+                    chofer = chv
             fecha = ent_fecha.get().strip() or datetime.now().strftime("%d/%m/%Y")
-            # 🚀 Corte del sistema: no se registran movimientos anteriores a la fecha de comienzo
-            if validar_fecha_registro is not None:
-                try:
-                    permitido, aviso = validar_fecha_registro(fecha)
-                except Exception:
-                    permitido, aviso = True, ""
-                if not permitido:
-                    return messagebox.showwarning("Fecha fuera del corte del sistema", aviso, parent=v)
             desc_manual = ent_desc.get().strip()
             numero_operacion = ent_operacion.get().strip()
 
@@ -6126,8 +9997,8 @@ class ModuloBancoApp:
                 partes.append(sub)
             if evento:
                 partes.append(f"Evento {evento}")
-            if personal_pago:
-                partes.append(f"Personal {personal_pago}")
+            if chofer:
+                partes.append(f"Chofer {chofer}")
             if desc_manual:
                 partes.append(desc_manual)
             if inter:
@@ -6167,10 +10038,10 @@ class ModuloBancoApp:
                             c.execute("""
                                 UPDATE conciliacion_bancaria
                                 SET fecha=%s, descripcion=%s, monto=%s, tipo=%s,
-                                    categoria=%s, subcategoria=%s, evento=%s, personal=%s,
+                                    categoria=%s, subcategoria=%s, evento=%s, chofer=%s,
                                     comision=%s, interbancario=%s, numero_operacion=%s, soporte=%s
                                 WHERE id=%s
-                            """, (fecha, desc, monto_final, tipo, principal, sub, evento, personal_pago,
+                            """, (fecha, desc, monto_final, tipo, principal, sub, evento, chofer,
                                   com, bool(inter), numero_operacion,
                                   estado_soporte["ruta"], id_edicion))
                             try:
@@ -6185,13 +10056,13 @@ class ModuloBancoApp:
                             c.execute("""
                                 INSERT INTO conciliacion_bancaria
                                 (banco, cuenta, fecha, descripcion, monto, tipo, origen, id_movimiento, estado,
-                                 categoria, subcategoria, evento, personal, comision, interbancario, es_cruzada,
+                                 categoria, subcategoria, evento, chofer, comision, interbancario, es_cruzada,
                                  numero_operacion, soporte)
                                 VALUES (%s, %s, %s, %s, %s, %s, 'manual', 0, 'pendiente',
                                         %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 RETURNING id
                             """, (banco.get("banco", ""), banco.get("cuenta", ""), fecha, desc,
-                                  monto_final, tipo, principal, sub, evento, personal_pago, com,
+                                  monto_final, tipo, principal, sub, evento, chofer, com,
                                   bool(inter), es_cruzada, numero_operacion,
                                   estado_soporte["ruta"]))
                             try:
@@ -6226,7 +10097,7 @@ class ModuloBancoApp:
             # para que se vea en las dos pestañas de ese módulo y en sus reportes.
             if tipo == "egreso" and not es_cruzada:
                 categoria_gasto = f"{principal} - {sub}".strip(" -") if sub else principal
-                proveedor_gasto = (desc_manual or (f"Personal {personal_pago}" if personal_pago else "")
+                proveedor_gasto = (desc_manual or (f"Chofer {chofer}" if chofer else "")
                                    or (f"Evento {evento}" if evento else "") or sub or principal)
                 self.registrar_egreso_en_compras({
                     "fecha": fecha, "total": total, "descripcion": desc or desc_manual,
@@ -6248,7 +10119,6 @@ class ModuloBancoApp:
                     "tercero": ent_cruz_tercero.get().strip(),
                     "categoria": f"{principal} - {sub}".strip(" -") if sub else principal,
                     "descripcion": desc,
-                    "evento": evento,
                     "soporte_origen": estado_cruzada["soporte"],
                     "factura_origen": estado_cruzada["factura"],
                     "banco": construir_etiqueta_banco(banco),
@@ -6278,44 +10148,12 @@ class ModuloBancoApp:
             self.generar_reporte()
 
         ctk.CTkButton(f_pie, text=("💾 Guardar Cambios" if en_edicion else "✅ Guardar"),
-                      width=160, height=36, font=("Arial", 13, "bold"),
+                      width=160, height=36, font=(FAMILIA, 13, "bold"),
                       fg_color="#27ae60", hover_color="#1e8449",
                       command=guardar).pack(pady=10)
-        ctk.CTkButton(f_pie, text="✖ Cancelar", width=110, height=36, font=("Arial", 12),
+        ctk.CTkButton(f_pie, text="✖ Cancelar", width=110, height=36, font=(FAMILIA, 12),
                       fg_color="#7f8c8d", hover_color="#606b6b",
                       command=v.destroy).pack(pady=(0, 10))
-
-        # ------------------------------------------------------------------
-        # ⚡ LISTAS DE SUPABASE EN SEGUNDO PLANO
-        # Cada consulta tarda entre 0,5 y 5 s: si se hicieran al construir la
-        # ventana, esta tardaría varios segundos en abrir. Se traen aparte y, al
-        # llegar, se completan los desplegables sin perder lo ya elegido.
-        # ------------------------------------------------------------------
-        def _traer_listas(estado):
-            estado["eventos"] = cargar_eventos()
-            estado["personal"] = cargar_personal_eventos()
-            estado["proveedores"] = cargar_proveedores()
-
-        def _completar_combo(combo, nuevos, texto_vacio):
-            valores = [str(x) for x in (nuevos or [])] or [texto_vacio]
-            actual = combo.get().strip()
-            if actual and actual not in valores:
-                valores.append(actual)        # elegido antes o escrito a mano
-            combo.configure(values=valores)
-            if actual:
-                combo.set(actual)
-
-        def _aplicar_listas(estado):
-            try:
-                if not v.winfo_exists():
-                    return
-            except Exception:
-                return
-            _completar_combo(cmb_evento, ["Ninguno"] + list(estado.get("eventos") or []), "Ninguno")
-            _completar_combo(cmb_personal, ["Ninguno"] + list(estado.get("personal") or []), "Ninguno")
-            _completar_combo(cmb_cruz_prov, list(estado.get("proveedores") or []), "(Sin proveedores)")
-
-        ejecutar_en_hilo(v, _traer_listas, al_terminar=_aplicar_listas)
 
     def _formatear_entrada_monto(self, entry):
         """Da formato con separador de miles al escribir un monto en un campo de texto."""
@@ -6352,8 +10190,6 @@ class ModuloBancoApp:
         impuesto_bd = impuesto_cruz if impuesto_cruz is not None else 0.0
         categoria = datos.get("categoria") or "Compra Cruzada"
         descripcion = (datos.get("descripcion") or "").strip() or "Compra cruzada pagada por tercero"
-        # 🎪 Evento al que se imputa la compra (columna evento_asociado del módulo de Compras)
-        evento_cruz = str(datos.get("evento") or "").strip()
         # Cuenta bancaria con la que salió el dinero (se muestra en Compras)
         cuenta_banco = str(datos.get("banco") or "").strip()
         num_operacion_cruz = str(datos.get("numero_operacion") or "").strip()
@@ -6368,21 +10204,28 @@ class ModuloBancoApp:
         if (origen_soporte and os.path.isfile(origen_soporte)) or            (origen_factura and os.path.isfile(origen_factura)):
             base = obtener_ruta_base()
             if not base:
-                messagebox.showwarning("Almacenamiento",
-                                       "No se encontró la carpeta de archivos del sistema "
-                                       "(revise la ruta de Google Drive en Configuración General).",
-                                       parent=parent)
+                try:
+                    from politica_almacenamiento import advertir
+                    advertir(parent)
+                except Exception:
+                    messagebox.showwarning("Almacenamiento bloqueado",
+                                           "Este equipo no está autorizado a guardar archivos.",
+                                           parent=parent)
                 return False, ""
             marca = datetime.now().strftime('%Y%m%d%H%M%S')
+            _fecha_doc = locals().get("fecha") or datetime.now().strftime("%d/%m/%Y")
             if origen_factura and os.path.isfile(origen_factura):
                 try:
-                    carpeta = os.path.normpath(os.path.join(base, "facturas_recibidas"))
-                    if not os.path.exists(carpeta):
-                        os.makedirs(carpeta)
+                    # 📁 Estructura: Compras/<Mes año>/<RUC - Proveedor>/Facturas/
+                    from estructura_archivos import ruta_documento
                     prov_limpio = re.sub(r'[\\/*?:"<>|]', '-', proveedor).replace(" ", "_")[:40]
                     ext = os.path.splitext(origen_factura)[1] or ".pdf"
-                    ruta_factura = os.path.normpath(os.path.join(
-                        carpeta, f"Cruzada_{marca}_{prov_limpio}{ext}"))
+                    ruta_factura = ruta_documento("compra_factura",
+                                                  f"Cruzada_{marca}_{prov_limpio}{ext}",
+                                                  ruta_base=base, fecha=_fecha_doc,
+                                                  nombre=proveedor)
+                    if not ruta_factura:
+                        raise RuntimeError("No se pudo preparar la carpeta de destino")
                     shutil.copy2(origen_factura, ruta_factura)
                 except Exception as e:
                     messagebox.showerror("Error", f"Fallo al guardar la factura de compra:\n{e}",
@@ -6390,12 +10233,15 @@ class ModuloBancoApp:
                     return False, ""
             if origen_soporte and os.path.isfile(origen_soporte):
                 try:
-                    carpeta = os.path.normpath(os.path.join(base, "soportes_pagos_terceros"))
-                    if not os.path.exists(carpeta):
-                        os.makedirs(carpeta)
+                    # 📁 Estructura: Compras/<Mes año>/<RUC - Proveedor>/Comprobantes de pago/
+                    from estructura_archivos import ruta_documento
                     ext = os.path.splitext(origen_soporte)[1] or ".pdf"
-                    ruta_soporte = os.path.normpath(os.path.join(
-                        carpeta, f"Soporte_{marca}_{nro or 'sin_doc'}{ext}"))
+                    ruta_soporte = ruta_documento("compra_comprobante",
+                                                  f"Soporte_{marca}_{nro or 'sin_doc'}{ext}",
+                                                  ruta_base=base, fecha=_fecha_doc,
+                                                  nombre=proveedor)
+                    if not ruta_soporte:
+                        raise RuntimeError("No se pudo preparar la carpeta de destino")
                     shutil.copy2(origen_soporte, ruta_soporte)
                 except Exception as e:
                     messagebox.showerror("Error", f"Fallo al guardar el soporte del pago a tercero:\n{e}",
@@ -6446,7 +10292,7 @@ class ModuloBancoApp:
                          categoria, ruc, pagado_por_tercero, soporte_pago_tercero, es_compra_cruzada)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    """, ("FACTURA", nro, fecha, proveedor, descripcion, evento_cruz,
+                    """, ("FACTURA", nro, fecha, proveedor, descripcion, "",
                             subtotal_bd, impuesto_bd, total, ruta_para_guardar(ruta_factura), 0, 0, 0,
                             categoria, "", tercero, ruta_para_guardar(ruta_soporte), True))
                     try:
@@ -6516,13 +10362,15 @@ class ModuloBancoApp:
         categoria = str(datos.get("categoria") or "").strip() or "GENERAL / NO ASIGNADO"
         descripcion = str(datos.get("descripcion") or "").strip()
         proveedor = str(datos.get("proveedor") or "").strip() or descripcion or categoria
-        # 🎪 Evento asociado: se guarda en 'facturas_recibidas.evento_asociado', que es
-        # la misma columna que usa el módulo de Compras para imputar el gasto al evento.
         evento = str(datos.get("evento") or "").strip()
         banco_txt = str(datos.get("banco") or "").strip()
         num_operacion = str(datos.get("numero_operacion") or "").strip()
         soporte = str(datos.get("soporte") or "").strip()
-        soporte_bd = ruta_para_guardar(soporte) if soporte else ""
+        try:
+            from app_paths import ruta_para_guardar
+            soporte_bd = ruta_para_guardar(soporte) if soporte else ""
+        except Exception:
+            soporte_bd = soporte
         id_gasto = int(datos.get("id_gasto") or 0)
 
         # 💰 Detalle base + IGV definido en la ventana de pago (opcional).
@@ -6541,6 +10389,9 @@ class ModuloBancoApp:
                     sets = ["fecha=%s", "total=%s", "subtotal=%s", "categoria=%s", "descripcion=%s",
                             "proveedor=%s", "evento_asociado=%s"]
                     params = [fecha, total, subtotal_bd, categoria, descripcion, proveedor, evento]
+                    if soporte_bd:      # 📎 comprobante nuevo (no borra el anterior)
+                        sets.append("archivo_ruta=%s")
+                        params.append(soporte_bd)
                     if impuesto_dato is not None:
                         sets.append("impuesto=%s")
                         params.append(impuesto_bd)
@@ -6554,7 +10405,7 @@ class ModuloBancoApp:
                             archivo_ruta=COALESCE(NULLIF(%s, ''), archivo_ruta)
                         WHERE id_factura=%s
                     """, (total, fecha, banco_txt, categoria, proveedor, num_operacion,
-                          soporte_bd, id_gasto))
+                    soporte_bd, id_gasto))
                 else:
                     c.execute("""
                         INSERT INTO facturas_recibidas
@@ -6597,8 +10448,8 @@ class ModuloBancoApp:
         return id_gasto
 
     def gestionar_categorias(self, al_guardar=None):
-        # Categorías de gastos guardadas en la configuración del sistema (las mismas
-        # para todos los equipos). "al_guardar" refresca los combos al cerrar.
+        # Ventana compartida con el módulo de Compras: mismas categorías guardadas.
+        # "al_guardar" se ejecuta al guardar y cerrar, para refrescar los combos.
         return abrir_gestion_categorias_gastos(self.parent_frame, al_guardar=al_guardar)
 
     def corregir_movimiento(self):
@@ -6608,15 +10459,8 @@ class ModuloBancoApp:
                                 parent=self.parent_frame)
             return
         f = filas[0]
-        if f.get("tabla") in tx_soporte.TABLAS_TX:
-            try:
-                tx = next((t for t in self.cargar_transferencias() if t["id"] == f.get("id")), None)
-            except RuntimeError as exc:
-                messagebox.showerror("Transferencia", str(exc), parent=self.parent_frame)
-                return
-            if tx:
-                self._preparar_form_transferencia(tx)
-                self.tabview.set(" 🔄 Transferencias ")
+        if f.get("tabla") in ("transferencias_bancarias", "tx_comision"):
+            self._abrir_transferencia_desde_movimiento(f)
             return
 
         # Los pagos registrados desde este módulo ("➕ Registrar Pago / Compra
@@ -6629,28 +10473,29 @@ class ModuloBancoApp:
         v.title("Corregir Movimiento")
         v.geometry("460x400")
         v.transient(self.parent_frame)
+        traer_al_frente(v)
         v.grab_set()
 
-        ctk.CTkLabel(v, text=f"✏️ Corregir: {f['descripcion'][:40]}", font=("Arial", 13, "bold"),
+        ctk.CTkLabel(v, text=f"✏️ Corregir: {f['descripcion'][:40]}", font=(FAMILIA, 13, "bold"),
                      text_color="#1f538d").pack(pady=(15, 5))
         frm = ctk.CTkFrame(v, fg_color="transparent")
         frm.pack(fill="x", padx=20)
 
-        ctk.CTkLabel(frm, text="Fecha:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(frm, text="Fecha:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         f_fecha = ctk.CTkFrame(frm, fg_color="transparent")
         f_fecha.pack(fill="x", pady=(0, 8))
         ent_fecha = ctk.CTkEntry(f_fecha)
         ent_fecha.pack(side="left", fill="x", expand=True)
         ent_fecha.insert(0, f["fecha"])
-        ctk.CTkButton(f_fecha, text="📅", width=42, font=("Arial", 13, "bold"),
+        ctk.CTkButton(f_fecha, text="📅", width=42, font=(FAMILIA, 13, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=lambda: CalendarioNativo(v, ent_fecha)).pack(side="left", padx=(6, 0))
 
-        ctk.CTkLabel(frm, text="Descripción:", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(frm, text="Descripción:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         ent_desc = ctk.CTkEntry(frm)
         ent_desc.pack(fill="x", pady=(0, 8)); ent_desc.insert(0, f["descripcion"])
 
-        ctk.CTkLabel(frm, text="Monto (negativo = egreso):", font=("Arial", 11, "bold")).pack(anchor="w")
+        ctk.CTkLabel(frm, text="Monto (negativo = egreso):", font=(FAMILIA, 11, "bold")).pack(anchor="w")
         ent_monto = ctk.CTkEntry(frm)
         ent_monto.pack(fill="x", pady=(0, 8)); ent_monto.insert(0, f"{f['monto']:.2f}")
 
@@ -6704,7 +10549,12 @@ class ModuloBancoApp:
             f["descripcion"] = desc
             registrar_auditoria(self.usuario_activo, "Banco", f"Corrigió movimiento: {desc[:60]}")
             v.destroy()
-            self.refrescar_tree()
+            self._cache_asientos = None
+            self._cache_saldos_extra = None
+            try:
+                self.generar_reporte()
+            except Exception as error:
+                print("[Conciliación] refresco tras corregir:", error)
 
         ctk.CTkButton(v, text="✅ Guardar", width=140, fg_color="#27ae60", command=guardar).pack(pady=10)
 
@@ -6775,26 +10625,115 @@ class ModuloBancoApp:
                                         soportes_a_revisar.append(ruta_soporte)
                                     if borrado:
                                         gastos_borrados += 1
+                                # 🧹 SIN RASTROS: se borran también sus filas en los
+                                #    diferenciales y en la auditoría del módulo, para que
+                                #    no quede ninguna copia ni vuelva a aparecer.
+                                _fecha_m = str(f.get("fecha") or "")
+                                _monto_m = float(f.get("monto") or 0)
+                                _cuenta_m = banco.get("cuenta", "") if banco else ""
+                                try:
+                                    c.execute("""DELETE FROM conciliacion_diferenciales
+                                                 WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                                   AND COALESCE(cuenta,'') = %s
+                                                   AND (fecha = %s OR fecha = %s)
+                                                   AND ABS(COALESCE(monto,0) - %s) < 0.005""",
+                                              (nombre_banco, _cuenta_m, _fecha_m,
+                                               fecha_para_mostrar(_fecha_m), _monto_m))
+                                    c.execute("""DELETE FROM conciliacion_auditoria
+                                                 WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                                   AND COALESCE(cuenta,'') = %s
+                                                   AND ABS(COALESCE(importe_banco,0) - %s) < 0.005
+                                                   AND (fecha_banco = %s OR fecha_banco = %s)""",
+                                              (nombre_banco, _cuenta_m, abs(_monto_m),
+                                               _fecha_m, fecha_para_mostrar(_fecha_m)))
+                                except Exception as error_rastros:
+                                    conn.rollback()
+                                    print("[Conciliación] limpiar rastros:", error_rastros)
+                                # 🚫 Si este asiento estaba cruzado con una línea del banco,
+                                #    se descarta TAMBIÉN esa línea. Si no, al recalcular
+                                #    volvía a salir como faltante y se volvía a guardar el
+                                #    diferencial: parecía que el borrado «no funcionaba».
+                                # 🚫 Se descarta la línea del banco equivalente (misma
+                                #    fecha e importe), esté cruzada o no. Si no, al
+                                #    recalcular volvía a salir como faltante y parecía
+                                #    que el borrado «se restauraba».
+                                try:
+                                    _cuenta_l = banco.get("cuenta", "") if banco else ""
+                                    c.execute("""SELECT fecha, monto, descripcion
+                                                 FROM conciliacion_movimientos_pdf
+                                                 WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                                   AND COALESCE(cuenta,'') = %s
+                                                   AND (fecha = %s OR fecha = %s)
+                                                   AND ABS(COALESCE(monto,0) - %s) < 0.01""",
+                                              (nombre_banco, _cuenta_l, _fecha_m,
+                                               fecha_para_mostrar(_fecha_m), _monto_m))
+                                    for _lf, _lm, _ld in c.fetchall():
+                                        self._registrar_ignorado(c, banco, {
+                                            "origen": "estado_cuenta", "fecha": _lf,
+                                            "monto": _lm, "descripcion": _ld or ""})
+                                except Exception as error_linea:
+                                    print("[Conciliación] descartar línea del banco:", error_linea)
                             elif origen == "sistema" and idp:
-                                if f.get("tabla") in tx_soporte.TABLAS_TX:
+                                if f.get("tabla") in ("transferencias_bancarias", "tx_comision"):
                                     c.execute("""DELETE FROM conciliacion_bancaria
                                         WHERE origen = ANY(%s) AND id_movimiento=%s AND banco=%s
                                         AND cuenta=%s AND SIGN(monto)=SIGN(%s)""",
                                         (["s:" + f["tabla"], "sistema:" + f["tabla"]], idp,
                                          nombre_banco, banco.get("cuenta", ""), f.get("monto", 0)))
                                 else:
+                                    # 🛡️ Se guarda como 's:<tabla>' (o 'sistema:<tabla>' en
+                                    #    datos viejos): antes se borraba con origen='sistema'
+                                    #    y no borraba NADA, dejando la fila conciliada.
                                     c.execute("""DELETE FROM conciliacion_bancaria
-                                                 WHERE origen = 'sistema' AND id_movimiento = %s AND banco = %s""",
-                                              (idp, nombre_banco))
+                                                 WHERE origen = ANY(%s) AND id_movimiento = %s
+                                                   AND banco = %s""",
+                                              (["s:" + str(f.get("tabla") or ""),
+                                                "sistema:" + str(f.get("tabla") or "")],
+                                               idp, nombre_banco))
                                 borrados_db += max(c.rowcount, 0)
                                 # 🚫 Queda descartado: no vuelve a aparecer al recargar la lista
                                 self._registrar_ignorado(c, banco, f)
                                 ignorados_nuevos += 1
+                            elif str(origen or "") == "e" or str(origen or "").startswith("s:"):
+                                # 📄 Asientos que NO vienen de Compras: los registrados
+                                #    desde el banco ('e'), las facturas App Grifo y las
+                                #    comisiones ('s:*'). Antes no tenían rama y el botón
+                                #    Eliminar NO hacía nada con ellos.
+                                if idp:
+                                    c.execute("DELETE FROM conciliacion_bancaria WHERE id = %s", (idp,))
+                                    borrados_db += max(c.rowcount, 0)
+                                    try:
+                                        _cuenta_x = banco.get("cuenta", "") if banco else ""
+                                        _fecha_x = str(f.get("fecha") or "")
+                                        c.execute("""SELECT fecha, monto, descripcion
+                                                     FROM conciliacion_movimientos_pdf
+                                                     WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                                       AND COALESCE(cuenta,'') = %s
+                                                       AND (fecha = %s OR fecha = %s)
+                                                       AND ABS(COALESCE(monto,0) - %s) < 0.01""",
+                                                  (nombre_banco, _cuenta_x, _fecha_x,
+                                                   fecha_para_mostrar(_fecha_x),
+                                                   float(f.get("monto") or 0)))
+                                        for _lf, _lm, _ld in c.fetchall():
+                                            self._registrar_ignorado(c, banco, {
+                                                "origen": "estado_cuenta", "fecha": _lf,
+                                                "monto": _lm, "descripcion": _ld or ""})
+                                    except Exception as error_lin:
+                                        print("[Conciliación] descartar línea (extra):", error_lin)
+                                    self._registrar_ignorado(c, banco, f)
+                                    ignorados_nuevos += 1
                             elif origen == "estado_cuenta":
+                                # 🛡️ Se guarda como origen 'e' y la fecha en dd/mm/aaaa
+                                #    (la fila llega en ISO): antes se comparaba
+                                #    'estado_cuenta' + fecha ISO y nunca borraba nada.
                                 c.execute("""DELETE FROM conciliacion_bancaria
-                                             WHERE origen = 'estado_cuenta' AND banco = %s
-                                               AND fecha = %s AND monto = %s AND descripcion = %s""",
-                                          (nombre_banco, f.get("fecha", ""),
+                                             WHERE origen = ANY(%s) AND banco = %s
+                                               AND fecha = ANY(%s)
+                                               AND ABS(COALESCE(monto,0) - %s) < 0.005
+                                               AND COALESCE(descripcion,'') = %s""",
+                                          (["e", "estado_cuenta"], nombre_banco,
+                                           [str(f.get("fecha", "")),
+                                            fecha_para_mostrar(f.get("fecha", ""))],
                                            f.get("monto", 0), f.get("descripcion", "")))
                                 borrados_db += max(c.rowcount, 0)
                                 # 🚫 Queda descartado: no vuelve a aparecer (ni releyendo el PDF)
@@ -6813,6 +10752,12 @@ class ModuloBancoApp:
         for ruta_soporte in soportes_a_revisar:
             borrar_soporte_si_huerfano(ruta_soporte)
 
+        # 📄 También se quita de los archivos de respaldo JSON (respaldo_*.json):
+        #    si se eliminó, no debe quedar ni en la base ni en el respaldo.
+        for f_borrada in filas:
+            self._quitar_de_respaldos(nombre_banco, f_borrada.get("fecha"),
+                                      f_borrada.get("monto"))
+
         # El módulo de Compras trabaja con caché: se limpia para que el cambio se vea al instante
         if gastos_borrados:
             try:
@@ -6825,11 +10770,27 @@ class ModuloBancoApp:
         self.filas_conciliacion = [f for i, f in enumerate(self.filas_conciliacion)
                                    if i not in excluir]
         self.refrescar_tree()
+        # 🔄 La base ya quedó actualizada (commit). Ahora se vuelve a calcular el
+        #    cruce para que el aviso, la diferencia y la tabla queden al día sin
+        #    tener que pulsar otro botón.
+        self._cache_asientos = None
+        self._cache_saldos_extra = None
+        try:
+            self.generar_reporte()
+        except Exception as error:
+            print("[Conciliación] refresco tras eliminar:", error)
 
         registrar_auditoria(self.usuario_activo, "Banco",
                             f"Eliminó {len(filas)} movimiento(s) de la conciliación "
                             f"en {construir_etiqueta_banco(banco) if banco else 'banco'}"
                             + (f" (y {gastos_borrados} gasto(s) de Compras)" if gastos_borrados else ""))
+
+        # 💰 El saldo debe reflejar lo eliminado ya mismo (sin pulsar «Actualizar»)
+        try:
+            self._datos_saldos = None
+            self.actualizar_saldos_boton()
+        except Exception as error_saldos:
+            print("[Conciliación] refresco de saldos:", error_saldos)
 
         msg = f"{len(filas)} movimiento(s) eliminado(s) de la conciliación."
         if borrados_db:
@@ -6863,8 +10824,9 @@ class ModuloBancoApp:
                 for f in self.filas_conciliacion:
                     tipo = "Ingreso" if f["monto"] >= 0 else "Egreso"
                     estado = f.get("estado", "pendiente")
+                    monto_export = f.get("monto_mostrar", f["monto"])
                     out.write(sep.join([estado, f["fecha"], f["descripcion"],
-                                        tipo, f"{f['monto']:.2f}", f.get("origen", "")]) + "\n")
+                                        tipo, f"{float(monto_export):.2f}", f.get("origen", "")]) + "\n")
             messagebox.showinfo("Exportar", f"Reporte guardado en:\n{ruta}", parent=self.parent_frame)
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar:\n{e}", parent=self.parent_frame)
@@ -6877,7 +10839,9 @@ class ModuloBancoApp:
         v.title("Texto Extraído del Estado de Cuenta")
         v.geometry("820x560")
         v.transient(self.parent_frame)
-        txt = tk.Text(v, wrap="word", font=("Consolas", 10))
+        traer_al_frente(v)
+        txt = tk.Text(v, wrap="word",
+                      font=("Menlo", 10) if sys.platform == "darwin" else ("Consolas", 10))
         txt.pack(fill="both", expand=True, padx=10, pady=10)
         txt.insert("1.0", self.texto_pdf)
         txt.configure(state="disabled")

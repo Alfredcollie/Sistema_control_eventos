@@ -183,6 +183,18 @@ jobs:
     - name: Compilar con PyInstaller (macOS)
       run: pyinstaller --noconfirm --windowed --name "ControlEventos" --icon "Ico_Collie_Software.icns" --add-data "web_app:web_app" --add-data "logo.png:." --add-data "Logo_Collie_Software.png:." --add-data "LogoCotizacion.png:." --add-data "LogoCotizacion.jpg:." --add-data "config_local.json:." --add-binary "${RCLONE_BIN}:." --collect-all customtkinter --collect-all keyring --collect-all segno --collect-all pymupdf --collect-all certifi --hidden-import escaner --hidden-import escaner_movil --hidden-import lector_orden_compra --hidden-import config_nube --hidden-import cifrado_rclone --hidden-import politica_almacenamiento --hidden-import nube_archivos --hidden-import tareas_seguras control_general.py --hidden-import Vision --hidden-import Quartz --hidden-import objc --hidden-import objc._objc
 
+    # 📶 macOS 14/15 pide permiso para RED LOCAL: el escáner (multifuncional)
+    # y el servidor del teléfono (http://IP:8765) necesitan este permiso. Sin estas
+    # claves, macOS deniega el acceso y la app "no encuentra" el escáner.
+    - name: Permiso de red local para el escáner (macOS)
+      run: |
+        PLIST="$PWD/dist/ControlEventos.app/Contents/Info.plist"
+        plutil -replace NSLocalNetworkUsageDescription -string "Control Eventos usa la red local para encontrar la multifuncional (escaneo de comprobantes) y para recibir fotos del teléfono." "$PLIST" 2>/dev/null \
+          || plutil -insert NSLocalNetworkUsageDescription -string "Control Eventos usa la red local para encontrar la multifuncional (escaneo de comprobantes) y para recibir fotos del teléfono." "$PLIST" || true
+        plutil -replace NSBonjourServices -json '["_uscan._tcp","_uscans._tcp","_ipp._tcp","_ipps._tcp","_http._tcp"]' "$PLIST" 2>/dev/null \
+          || plutil -insert NSBonjourServices -json '["_uscan._tcp","_uscans._tcp","_ipp._tcp","_ipps._tcp","_http._tcp"]' "$PLIST" || true
+        plutil -p "$PLIST" | grep -E "NSLocalNetwork|NSBonjour" || echo "Aviso: no se pudieron escribir las claves de red local."
+
     - name: Asegurar config_local.json junto al ejecutable (macOS)
       run: |
         APP="dist/ControlEventos.app/Contents/MacOS"

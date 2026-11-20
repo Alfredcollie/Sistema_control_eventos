@@ -21,6 +21,23 @@ try:
 except Exception:
     def cargar_configuracion_regional():
         return {}
+
+def _parsear_monto(texto):
+    """Lee '1.234,56', '1,234.56', '1234.56' o '86,87'."""
+    s = re.sub(r"[^\d.,-]", "", str(texto or ""))
+    if not s:
+        return 0.0
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
 import importlib
 import unicodedata
 
@@ -1881,12 +1898,12 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_m, text="Precio Lista (S/.):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_lista = ctk.CTkEntry(f_m, width=200)
         ent_m_lista.pack(anchor="w", padx=10, pady=2)
-        ent_m_lista.insert(0, f"{datos[0]:.2f}")
+        ent_m_lista.insert(0, formatear_numero(datos[0]))
         
         ctk.CTkLabel(f_m, text="Precio con Descuento (S/.):", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_desc = ctk.CTkEntry(f_m, width=200)
         ent_m_desc.pack(anchor="w", padx=10, pady=2)
-        ent_m_desc.insert(0, f"{datos[1]:.2f}")
+        ent_m_desc.insert(0, formatear_numero(datos[1]))
         
         ctk.CTkLabel(f_m, text="Tipo de Ganancia:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         cmb_m_tipo = ctk.CTkComboBox(f_m, values=["Monto Fijo", "Porcentaje (%)"], state="readonly", width=200)
@@ -1896,7 +1913,7 @@ class VentanaEtapaProveedores:
         ctk.CTkLabel(f_m, text="Valor de Ganancia:", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=(5, 2))
         ent_m_val = ctk.CTkEntry(f_m, width=200)
         ent_m_val.pack(anchor="w", padx=10, pady=2)
-        ent_m_val.insert(0, f"{datos[3]:.2f}")
+        ent_m_val.insert(0, formatear_numero(datos[3]))
         
         f_m_header = ctk.CTkFrame(f_m, fg_color="transparent")
         f_m_header.pack(fill="x", pady=(10, 2), padx=10)
@@ -1917,7 +1934,7 @@ class VentanaEtapaProveedores:
             try:
                 mc = int(ent_m_cant.get().strip())
                 m_dcred = 0 
-                ml, md, mv = float(ent_m_lista.get()), float(ent_m_desc.get()), float(ent_m_val.get())
+                ml, md, mv = _parsear_monto(ent_m_lista.get()), _parsear_monto(ent_m_desc.get()), _parsear_monto(ent_m_val.get())
             except ValueError:
                 messagebox.showwarning("Error numérico", "Valores inválidos.", parent=v_m)
                 return
@@ -2167,9 +2184,9 @@ class VentanaEtapaProveedores:
                 (cat_limpia, 130, "w"), 
                 (prov_limpio, 140, "w"), 
                 (str(cant_r), 40, "center"), 
-                (f"S/. {pl_r:.2f}", 70, "e"), 
-                (f"S/. {pd_r:.2f}", 50, "e"), 
-                (f"S/. {pf_r:.2f}", 80, "e"), 
+                (f"S/. {formatear_numero(pl_r)}", 70, "e"), 
+                (f"S/. {formatear_numero(pd_r)}", 50, "e"), 
+                (f"S/. {formatear_numero(pf_r)}", 80, "e"), 
                 (f"S/. {formatear_numero(ganancia_item)}", 85, "e", "#1e8449")
             ]
             

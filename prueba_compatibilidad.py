@@ -189,7 +189,8 @@ def probar_ventanas(modulo):
 
 
 MODULOS = ["control_general", "app_paths", "escaner", "escaner_movil", "clientes",
-           "modulo_compras", "modulo_ventas"]
+           "modulo_compras", "modulo_ventas", "modulo_banco", "conciliacion_inteligente",
+           "bancos", "formato_numeros", "politica_almacenamiento", "config_nube"]
 
 
 # =========================================================

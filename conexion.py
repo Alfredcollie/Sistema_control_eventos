@@ -161,9 +161,18 @@ def conectar_db(silencioso=False):
 
 
 def liberar_conexion(conn):
-    """Devuelve la conexión al pool para que sea reutilizada por otro proceso."""
+    """Devuelve la conexión al pool para que sea reutilizada por otro proceso.
+
+    Antes de devolverla se deshace cualquier transacción abierta: si una consulta
+    falló y no se hizo rollback, la conexión volvía al pool EN ERROR y la
+    siguiente consulta fallaba con «current transaction is aborted».
+    """
     global _connection_pool
     if _connection_pool and conn:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         try:
             _connection_pool.putconn(conn)
         except Exception:

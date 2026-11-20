@@ -8,6 +8,8 @@ import json
 from conexion import conectar_db, liberar_conexion
 from cifrado_rclone import cifrar_texto, descifrar_texto
 
+CLAVE_BANCOS = "cuentas_bancarias"
+CLAVE_GRIFO = "cuenta_grifo_pagos"
 CLAVE_RCLONE = "rclone_sync"
 CLAVE_RCLONE_TOKEN = "rclone_token"
 
@@ -84,6 +86,33 @@ def clave_existe_en_nube(clave):
         return False
     finally:
         liberar_conexion(conn)
+
+
+def cargar_bancos():
+    """Lista de cuentas bancarias de la empresa (desde Supabase)."""
+    raw = _cargar_clave(CLAVE_BANCOS, "[]")
+    try:
+        datos = json.loads(raw) if raw else []
+        if isinstance(datos, list):
+            return datos
+    except Exception:
+        pass
+    return []
+
+
+def guardar_bancos(lista_bancos):
+    """Guarda la lista de cuentas bancarias en Supabase (como JSON)."""
+    return _guardar_clave(CLAVE_BANCOS, json.dumps(lista_bancos or [], ensure_ascii=False))
+
+
+def cargar_cuenta_grifo():
+    """Cuenta asignada para pagos del App Grifo (desde Supabase)."""
+    return (_cargar_clave(CLAVE_GRIFO, "") or "").strip()
+
+
+def guardar_cuenta_grifo(cuenta):
+    """Guarda la cuenta del App Grifo en Supabase."""
+    return _guardar_clave(CLAVE_GRIFO, cuenta or "")
 
 
 def cargar_rclone_sync():

@@ -146,15 +146,52 @@ SUBCARPETAS_CONOCIDAS = (
 )
 
 
+def es_ruta_de_windows(ruta):
+    """True si el texto tiene forma de ruta de Windows ('C:\\...' o 'C:/...')."""
+    texto = str(ruta or "").strip()
+    return (len(texto) > 2 and texto[0].isalpha()
+            and texto[1] == ":" and texto[2] in ("\\", "/"))
+
+
+def ruta_utilizable(ruta):
+    """Ruta normalizada para ESTE equipo, o "" si viene de otro sistema operativo.
+
+    Una ruta de Windows ('C:/Users/...') en macOS NO es absoluta: POSIX la toma
+    como un único nombre relativo y acaba creando una carpeta basura llamada
+    'C:' o guardando archivos dentro del propio .app (que es de solo lectura).
+    """
+    texto = str(ruta or "").strip()
+    if not texto:
+        return ""
+    if sys.platform != "win32" and es_ruta_de_windows(texto):
+        return ""
+    return os.path.expanduser(texto)
+
+
+# Rutas ya avisadas (el aviso se imprime una sola vez por ruta).
+_RUTAS_AVISADAS = set()
+
+
 def ruta_drive_configurada():
-    """Carpeta local configurada en Configuración del Sistema (ruta_drive)."""
+    """Carpeta local configurada en Configuración del Sistema (ruta_drive).
+
+    Devuelve "" si la ruta guardada es de otro sistema operativo: así el programa
+    no trabaja sobre una carpeta fantasma (ver 'ruta_utilizable').
+    """
     try:
         datos = cargar_config_local()
         if isinstance(datos, dict):
-            return str(datos.get("ruta_drive", "") or "").strip()
+            ruta = str(datos.get("ruta_drive", "") or "").strip()
+            if ruta and not ruta_utilizable(ruta):
+                if ruta not in _RUTAS_AVISADAS:
+                    _RUTAS_AVISADAS.add(ruta)
+                    print("[Rutas] Se ignora una carpeta de otro sistema operativo:", ruta)
+                return ""
+            return ruta
     except Exception:
         pass
     return ""
+
 
 
 def _normalizar_nombre(nombre):

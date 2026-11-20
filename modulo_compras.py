@@ -33,6 +33,111 @@ from datetime import datetime
 
 # 🚀 IMPORTAMOS NUESTRAS NUEVAS HERRAMIENTAS CORPORATIVAS
 from conexion import conectar_db, registrar_auditoria, liberar_conexion
+import tabla_universal as _tabla_universal
+
+# =========================================================
+# ⚠️ AVISO: cambio de fecha entre meses con/sin estado de cuenta
+# ---------------------------------------------------------
+# En los meses con estado de cuenta cargado el saldo lo manda el BANCO y el
+# movimiento del sistema NO se suma; en los meses sin estado sí se suma.
+# Si al editar un cobro/pago la fecha pasa de un tipo de mes al otro, el saldo
+# cambia en el importe del movimiento. Se avisa antes de guardar.
+# =========================================================
+def _aviso_cambio_mes_estado_cuenta(cuenta_texto, fecha_anterior, fecha_nueva,
+                                    monto_firmado, parent=None):
+    """True = continuar; False = cancelar el cambio de fecha."""
+    def _mes(texto):
+        s = str(texto or "").strip()
+        m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)
+        if m:
+            return "%s-%s" % (m.group(1), m.group(2))
+        m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
+        if m:
+            return "%s-%02d" % (m.group(3), int(m.group(2)))
+        return ""
+
+    mes_viejo, mes_nuevo = _mes(fecha_anterior), _mes(fecha_nueva)
+    if not mes_viejo or not mes_nuevo or mes_viejo == mes_nuevo:
+        return True
+
+    texto_cuenta = str(cuenta_texto or "").strip()
+    if not texto_cuenta or texto_cuenta.startswith("("):
+        return True
+    if any(k in texto_cuenta.lower() for k in ("efectivo", "caja chica", "tarjeta", "cheque", "otro")):
+        return True
+
+    if " - " in texto_cuenta:
+        banco, cuenta = [p.strip() for p in texto_cuenta.split(" - ", 1)]
+    else:
+        banco, cuenta = "", texto_cuenta
+        m = re.search(r"([0-9][0-9\-]{5,})", texto_cuenta)
+        if m:
+            cuenta = m.group(1).strip("-")
+            banco = texto_cuenta.replace(m.group(1), "").strip(" -")
+    if not cuenta:
+        return True
+
+    conn = None
+    try:
+        try:
+            conn = conectar_db(silencioso=True)
+        except TypeError:
+            conn = conectar_db()
+        if not conn:
+            return True
+        with conn.cursor() as c:
+            if banco:
+                c.execute("""SELECT DISTINCT COALESCE(periodo, ''), COALESCE(fecha, '')
+                             FROM conciliacion_movimientos_pdf
+                             WHERE UPPER(COALESCE(banco, '')) = UPPER(%s)
+                               AND COALESCE(cuenta, '') = %s""", (banco, cuenta))
+            else:
+                c.execute("""SELECT DISTINCT COALESCE(periodo, ''), COALESCE(fecha, '')
+                             FROM conciliacion_movimientos_pdf
+                             WHERE COALESCE(cuenta, '') = %s""", (cuenta,))
+            filas = c.fetchall()
+    except Exception:
+        return True
+    finally:
+        if conn:
+            liberar_conexion(conn)
+
+    meses = set()
+    for periodo, fecha in filas:
+        mes = str(periodo or "").strip()[:7] or _mes(fecha)
+        if mes:
+            meses.add(mes)
+
+    con_viejo = mes_viejo in meses
+    con_nuevo = mes_nuevo in meses
+    if con_viejo == con_nuevo:
+        return True
+
+    monto = float(monto_firmado or 0)
+    impacto = -monto if (con_nuevo and not con_viejo) else monto
+    if abs(impacto) < 0.005:
+        return True
+
+    _MESES = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+              "agosto", "setiembre", "octubre", "noviembre", "diciembre")
+    def _legible(m):
+        try:
+            anio, mes = str(m).split("-")
+            return "%s %s" % (_MESES[int(mes) - 1], anio)
+        except Exception:
+            return str(m)
+    detalle = (f"{_legible(mes_viejo)} tiene estado de cuenta cargado y {_legible(mes_nuevo)} no."
+               if con_viejo else
+               f"{_legible(mes_nuevo)} tiene estado de cuenta cargado y {_legible(mes_viejo)} no.")
+    return messagebox.askyesno(
+        "Cambio de fecha con estado de cuenta",
+        "⚠️ CAMBIO DE FECHA ENTRE MESES CON ESTADO DE CUENTA" + chr(10) + chr(10)
+        + f"Vas a cambiar la fecha del {fecha_anterior} al {fecha_nueva}." + chr(10)
+        + detalle + chr(10) + chr(10)
+        + f"Al guardar, el saldo de {banco or 'el banco'} cambiará en {formatear_moneda(impacto)}." + chr(10) + chr(10)
+        + "¿Deseas continuar?",
+        parent=parent)
+
 from buffer_memoria import cache_sistema
 
 # 📁 Rutas portables: la BD guarda rutas RELATIVAS a la carpeta sincronizada,
@@ -1833,7 +1938,9 @@ def extraer_fecha_comprobante(texto, formato="DD/MM/AAAA"):
     numeros = re.compile(r"\b(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2,4})\b")
     # 📅 "12 de Octubre del 2026", "12 Octubre 2026" (vouchers del banco)
     #    y "Lunes, 12 OCT 2026": el "de" es opcional y se aceptan abreviaturas.
-    escrito = re.compile(r"\b(\d{1,2})\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
+    # El día debe ser 1-31: con \d{1,2} el "00" de un importe ("120.00")
+    # se tomaba como día y arruinaba la lectura de "Domingo 08 Noviembre 2026".
+    escrito = re.compile(r"\b(0?[1-9]|[12]\d|3[01])\s+(?:DE\s+)?([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]{3,})\s+(?:DE\s+|DEL\s+)?(\d{2,4})\b")
 
     import datetime as _dt
     _hoy = _dt.date.today()
@@ -3077,7 +3184,7 @@ class FacturasRecibidasTab:
         
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
-        self.registros_por_pagina = 55
+        self.registros_por_pagina = 100000   # 🔎 carga todo para buscar/ordenar por cualquier columna
 
         # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
         self.mes_filtro = mes_en_curso()
@@ -3126,7 +3233,16 @@ class FacturasRecibidasTab:
             "ALTER TABLE facturas_recibidas ADD COLUMN IF NOT EXISTS delivery NUMERIC DEFAULT 0",
                     "ALTER TABLE pagos_comprobantes ADD COLUMN IF NOT EXISTS cuenta_origen VARCHAR(255) DEFAULT ''",
                     "ALTER TABLE pagos_comprobantes ADD COLUMN IF NOT EXISTS numero_operacion VARCHAR(100) DEFAULT ''",
-                ):
+                
+                      # 🚫 FACTURAS DUPLICADAS: la base rechaza una factura repetida
+                      #    del mismo proveedor con el mismo número de documento.
+                      "CREATE UNIQUE INDEX IF NOT EXISTS facturas_recibidas_sin_duplicados ON facturas_recibidas (UPPER(TRIM(COALESCE(proveedor, ''))), UPPER(TRIM(COALESCE(numero_documento, '')))) WHERE COALESCE(numero_documento, '') <> ''",
+                      # 🚫 PAGOS HUÉRFANOS: al borrar una factura, sus pagos quedan como
+                      #    «sin factura» (id_factura = 0) en vez de apuntar a la nada.
+                      "CREATE OR REPLACE FUNCTION f_detach_pagos_factura() RETURNS trigger AS $$ BEGIN UPDATE pagos_comprobantes SET id_factura = 0 WHERE id_factura = OLD.id; RETURN OLD; END; $$ LANGUAGE plpgsql",
+                      "DROP TRIGGER IF EXISTS trg_detach_pagos_factura ON facturas_recibidas",
+                      "CREATE TRIGGER trg_detach_pagos_factura BEFORE DELETE ON facturas_recibidas FOR EACH ROW EXECUTE FUNCTION f_detach_pagos_factura()",
+                  ):
                     try:
                         cursor.execute(sentencia)
                         conn.commit()
@@ -3768,7 +3884,7 @@ class FacturasRecibidasTab:
                 print("Aviso - monto del comprobante:", e_monto)
             if monto_total > 0:
                 self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                self.ent_subtotal.insert(0, formatear_numero_entrada(monto_total))
                 self._poner_modo_monto("CON_IGV")
 
             resultado = getattr(self, "_escaneo_actual", {}) or {}
@@ -3952,7 +4068,7 @@ class FacturasRecibidasTab:
 
             if monto_total > 0:
                 self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                self.ent_subtotal.insert(0, formatear_numero_entrada(monto_total))
                 self._poner_modo_monto("CON_IGV")
 
             self.ruta_archivo_temp = ruta
@@ -4074,7 +4190,7 @@ class FacturasRecibidasTab:
                             monto_total = 0.0
                 if monto_total > 0:
                     self.ent_subtotal.delete(0, tk.END)
-                    self.ent_subtotal.insert(0, f"{monto_total:.2f}")
+                    self.ent_subtotal.insert(0, formatear_numero_entrada(monto_total))
                     self._poner_modo_monto("CON_IGV")
 
             self.ruta_archivo_temp = ruta
@@ -4373,7 +4489,7 @@ class FacturasRecibidasTab:
         ctk.CTkLabel(f_com_cruz, text="Comisión (S/.):", font=("Arial", 10, "bold")).pack(side="left", padx=(10, 4))
         self.ent_comision = ctk.CTkEntry(f_com_cruz, width=80)
         self.ent_comision.pack(side="left")
-        self.ent_comision.insert(0, f"{cargar_comision_interbancaria_config():.2f}")
+        self.ent_comision.insert(0, formatear_numero_entrada(cargar_comision_interbancaria_config()))
         # El resumen se recalcula MIENTRAS se escribe (y al pegar) la comisión
         for _evento in ("<KeyRelease>", "<FocusOut>", "<<Paste>>"):
             self.ent_comision.bind(_evento, lambda _e: self._actualizar_total_cruzada(), add="+")
@@ -4528,6 +4644,7 @@ class FacturasRecibidasTab:
         self.tabla.column("neto", width=85, anchor="e")
         
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "proveedor", "evento", "neto"))
+        _tabla_universal.conectar_orden(self.tabla)
         # 🖱️ Un clic SELECCIONA la fila; el DOBLE clic abre la factura adjunta
         #    (el mismo comportamiento que el programa de Flota).
         self.tabla.bind("<Double-1>", self.abrir_archivo, add="+")
@@ -5592,6 +5709,25 @@ class FacturasRecibidasTab:
             
         try:
             cursor = conn.cursor()
+            # 🚫 FACTURA DUPLICADA: se rechaza antes de insertar (mismo proveedor y
+            #    mismo número de documento). La base además tiene un índice único.
+            if str(nro_doc or "").strip():
+                cursor.execute("""
+                    SELECT id FROM facturas_recibidas
+                    WHERE UPPER(TRIM(COALESCE(proveedor, ''))) = UPPER(TRIM(%s))
+                      AND UPPER(TRIM(COALESCE(numero_documento, ''))) = UPPER(TRIM(%s))
+                    LIMIT 1
+                """, (prov, nro_doc))
+                existente = cursor.fetchone()
+                if existente:
+                    liberar_conexion(conn)
+                    messagebox.showerror(
+                        "Factura duplicada",
+                        "Esa factura YA está registrada y no se puede cargar dos veces.\n\n"
+                        "   Proveedor: %s\n   N° documento: %s\n   Registro existente: id %s"
+                        % (prov, nro_doc, existente[0]),
+                        parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+                    return
             cursor.execute("""
                 INSERT INTO facturas_recibidas (tipo_documento, numero_documento, fecha, proveedor, descripcion, evento_asociado, subtotal, impuesto, total, archivo_ruta, dias_credito, det_porcentaje, det_monto, categoria,
                                                 pagado_por_tercero, soporte_pago_tercero, es_compra_cruzada, comision_interbancaria, es_interbancario, delivery)
@@ -5850,7 +5986,7 @@ class FacturasRecibidasTab:
     def _pintar_tabla(self, rows, token):
         if token != getattr(self, "_carga_facr_token", 0): 
             return
-            
+        _tabla_universal.limpiar(self.tabla)
         self.tabla.delete(*self.tabla.get_children())
             
         for r in rows:
@@ -5870,6 +6006,7 @@ class FacturasRecibidasTab:
             else: 
                 self.btn_sig.configure(state="disabled")
         avisar_tabla_vacia(self, rows, "facturas_recibidas", "facturas recibidas", "fecha")
+        _tabla_universal.refrescar(self.tabla)
 
     def abrir_datos_bancarios(self, event=None):
         """🖱️ CLIC DERECHO sobre una factura: abre la ventana con los datos bancarios
@@ -6705,9 +6842,9 @@ class FacturasRecibidasTab:
                     igv = total - base
                 else:
                     base, igv = total, 0.0
-                _poner_campo(e_sub, "%.2f" % base)
-                _poner_campo(e_imp, "%.2f" % igv)
-                _poner_campo(e_tot, "%.2f" % total)
+                _poner_campo(e_sub, formatear_numero_entrada(base))
+                _poner_campo(e_imp, formatear_numero_entrada(igv))
+                _poner_campo(e_tot, formatear_numero_entrada(total))
             _al_elegir_proveedor()
             _calc()
 
@@ -7085,7 +7222,7 @@ class FacturasRecibidasTab:
                 nro = ent_nro.get().strip()
                 fec = ent_fec.get().strip()
                 dias = int(ent_dias.get().strip() or 0)
-                sub = float(ent_sub.get().strip() or 0)
+                sub = _a_numero(ent_sub.get() or 0)
                 det_pct = float(ent_det.get().strip() or 0)
                 concepto_edit = ent_concepto.get().strip()
                 categoria_edit = cmb_cat_edit.get().strip() or "GENERAL / NO ASIGNADO"
@@ -7181,7 +7318,7 @@ class CuentasPorPagarTab:
         
         # 🚀 VARIABLES LAZY LOADING
         self.pagina_actual = 1
-        self.registros_por_pagina = 55
+        self.registros_por_pagina = 100000   # 🔎 carga todo para buscar/ordenar por cualquier columna
 
         # 🗓️ Filtro por mes: por defecto se muestra el MES EN CURSO
         self.mes_filtro = mes_en_curso()
@@ -7271,6 +7408,7 @@ class CuentasPorPagarTab:
         self.tabla.column("archivos", width=100, anchor="center")
 
         self.tabla.config(displaycolumns=("num", "fecha", "nro_doc", "proveedor", "evento", "concepto", "neto_facturado", "pagado", "saldo", "archivos"))
+        _tabla_universal.conectar_orden(self.tabla)
         # 🖱️ Un clic SELECCIONA la fila; el DOBLE clic abre el comprobante de pago
         self.tabla.bind("<Double-1>", self.abrir_todos_los_archivos, add="+")
         # 🖱️ CLIC DERECHO en una factura: datos bancarios del proveedor
@@ -8632,7 +8770,7 @@ class CuentasPorPagarTab:
                              vencimientos=None):
         if token_actual != getattr(self, '_carga_pagos_token', token_actual):
             return
-            
+        _tabla_universal.limpiar(self.tabla)
         self.tabla.delete(*self.tabla.get_children())
         # 🖱️ Vencimiento de cada fila, para el cuadrito que sale al pasar el mouse
         self.vencimientos_filas = {}
@@ -8658,6 +8796,7 @@ class CuentasPorPagarTab:
             else: 
                 self.btn_sig.configure(state="disabled")
         avisar_tabla_vacia(self, filas_resultado, "facturas_recibidas", "facturas por pagar", "fecha")
+        _tabla_universal.refrescar(self.tabla)
 
     def abrir_pago_de_factura(self, id_factura, escanear=False):
         """Abre 'Registrar Pago' para una factura concreta (la selecciona en la tabla).
@@ -8945,7 +9084,7 @@ class CuentasPorPagarTab:
 
         def procesar_pago(event=None):
             try:
-                monto_val = float(ent_monto.get().strip())
+                monto_val = _a_numero(ent_monto.get())
             except ValueError:
                 return messagebox.showerror("Error", "Ingrese un monto numérico válido.", parent=v_pago)
 
@@ -9616,7 +9755,7 @@ class CuentasPorPagarTab:
             def guardar_mod(event=None):
                 nonlocal saldo_actual_global
                 try:
-                    nuevo_monto = float(ent_mod_monto.get().strip())
+                    nuevo_monto = _a_numero(ent_mod_monto.get())
                 except ValueError:
                     return messagebox.showerror("Error", "Monto inválido", parent=v_mod_pago)
 
@@ -9642,6 +9781,9 @@ class CuentasPorPagarTab:
                         ent_mod_fecha.get().strip() or fecha_actual)
                     nueva_cuenta = cmb_mod_cuenta.get().strip()
                     if nueva_cuenta == "(No especificada)": nueva_cuenta = ""
+                    if not _aviso_cambio_mes_estado_cuenta(nueva_cuenta or cuenta_actual, fecha_actual,
+                                                           nueva_fecha, -nuevo_monto, parent=v_mod_pago):
+                        return
                     conn = obtener_conexion_segura(parent=v_mod_pago)
                     if not conn: return
                     cursor = conn.cursor()

@@ -907,19 +907,51 @@ def formatear_moneda(valor):
     return f"{simbolo} {str_val}"
 
 def desformatear_numero(valor_str):
-    if not valor_str: return 0.0
+    """Convierte un texto de número a float, sin importar cómo esté escrito.
+
+    Acepta "1234.56", "1.234,56", "1234,56", "1,234.56" y con símbolo de moneda.
+    Regla: si aparecen los dos separadores, el ÚLTIMO es el decimal; si hay uno
+    solo, es decimal cuando le siguen 1 o 2 dígitos ("1234.56") y de miles
+    cuando le siguen 3 ("1.234").
+    """
+    if valor_str is None:
+        return 0.0
+    if isinstance(valor_str, (int, float)):
+        return float(valor_str)
     simbolo = CONFIG_REGIONAL.get("simbolo_moneda", "S/.")
-    formato = CONFIG_REGIONAL.get("formato_numero", "1,000.00")
-    val = str(valor_str).replace(simbolo, "").strip()
-    if formato == "1.000,00":
-        val = val.replace(".", "").replace(",", ".")
-    else:
-        val = val.replace(",", "")
-    try: 
-        return float(val)
-    except ValueError: 
+    texto = str(valor_str).replace(simbolo, "")
+    texto = re.sub(r"[^\d,.\-]", "", texto).strip()
+    if not texto:
+        return 0.0
+    negativo = texto.startswith("-")
+    texto = texto.lstrip("-")
+    if not texto:
         return 0.0
 
+    tiene_punto = "." in texto
+    tiene_coma = "," in texto
+    if tiene_punto and tiene_coma:
+        if texto.rfind(".") > texto.rfind(","):
+            texto = texto.replace(",", "")                      # 1,234.56
+        else:
+            texto = texto.replace(".", "").replace(",", ".")    # 1.234,56
+    elif tiene_coma:
+        partes = texto.split(",")
+        if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+            texto = "".join(partes)                            # 1,234,567
+        else:
+            texto = "".join(partes[:-1]) + "." + partes[-1]    # 1234,56
+    elif tiene_punto:
+        partes = texto.split(".")
+        if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+            texto = "".join(partes)                            # 1.234.567
+        else:
+            texto = "".join(partes[:-1]) + "." + partes[-1]    # 1234.56
+    try:
+        valor = float(texto)
+    except ValueError:
+        return 0.0
+    return -valor if negativo else valor
 def obtener_ruta_base_drive():
     ruta = CONFIG_REGIONAL.get("ruta_drive", "").strip()
     if ruta: 
@@ -2330,13 +2362,16 @@ def _serie_ocr_normalizada(serie):
     # Solo se corrigen los DÍGITOS: la letra inicial (E/F/B) se respeta.
     return serie[:1] + serie[1:].translate(tabla) if len(serie) > 1 else serie
 
-def normalizar_numero_comprobante(numero, rellenar_hasta=8):
+def normalizar_numero_comprobante(numero, rellenar_hasta=0):
     """Devuelve el N° de comprobante completo, conservando los ceros.
 
-    El OCR (o el parseo) puede dejar el correlativo sin sus ceros a la
-    izquierda: F001-6485 -> F001-00006485. El formato SUNAT de las facturas
-    y boletas electrónicas usa 8 dígitos, así que se completa hasta 8.
-    Si el texto no tiene forma de serie-correlativo, se devuelve igual.
+    Se devuelve el número TAL COMO VIENE: si la factura dice E001-166 se deja
+    E001-166 (las facturas físicas usan pocos dígitos). Antes se completaba
+    siempre a 8 dígitos (E001-00000166) y el número no coincidía con el papel.
+
+    Solo se normaliza la SERIE (corrige letras que el OCR confunde con
+    números: EOOI -> E001). Si el texto no tiene forma de serie-correlativo,
+    se devuelve igual.
     """
     texto = str(numero or "").strip().upper()
     if not texto:
@@ -6725,18 +6760,18 @@ class FacturasRecibidasTab:
             side="right", padx=(6, 0))
         e_ev = combo_campo("Evento Asociado:", _valores("combo_evento"), evento_i)
 
-        e_sub = campo("Subtotal (base):", "%.2f" % float(sub_i or 0))
-        e_imp = campo("IGV / Impuesto:", "%.2f" % float(imp_i or 0))
-        e_tot = campo("Total (con IGV):", "%.2f" % float(tot_i or 0))
-        e_detp = campo("Detracción / Retención (%):", "%.2f" % float(det_pct_i or 0))
-        e_detm = campo("Monto de detracción:", "%.2f" % float(det_monto_i or 0))
+        e_sub = campo("Subtotal (base):", formatear_numero_entrada(float(sub_i or 0)))
+        e_imp = campo("IGV / Impuesto:", formatear_numero_entrada(float(imp_i or 0)))
+        e_tot = campo("Total (con IGV):", formatear_numero_entrada(float(tot_i or 0)))
+        e_detp = campo("Detracción / Retención (%):", formatear_numero_entrada(float(det_pct_i or 0)))
+        e_detm = campo("Monto de detracción:", formatear_numero_entrada(float(det_monto_i or 0)))
 
         f_del = ctk.CTkFrame(f, fg_color="transparent")
         f_del.pack(fill="x", pady=(8, 0))
         var_del = tk.BooleanVar(value=float(delivery_i or 0) > 0)
         ctk.CTkCheckBox(f_del, text="🚚 Delivery (monto fuera de la factura)", variable=var_del,
                         font=("Arial", 11, "bold"), checkbox_width=18, checkbox_height=18).pack(anchor="w")
-        e_del = campo("Monto de delivery (suma al débito):", "%.2f" % float(delivery_i or 0))
+        e_del = campo("Monto de delivery (suma al débito):", formatear_numero_entrada(float(delivery_i or 0)))
 
         lbl_neto = ctk.CTkLabel(f, text="", font=("Arial", 12, "bold"), text_color="#1f538d")
         lbl_neto.pack(anchor="w", pady=(8, 4))
@@ -8134,7 +8169,7 @@ class CuentasPorPagarTab:
             if _monto and float(_monto) > 0:
                 try:
                     ent_monto.delete(0, tk.END)
-                    ent_monto.insert(0, "%.2f" % float(_monto))
+                    ent_monto.insert(0, formatear_numero_entrada(float(_monto)))
                 except Exception:
                     pass
                 try:
@@ -8998,7 +9033,7 @@ class CuentasPorPagarTab:
         var_comision = tk.BooleanVar(value=False)
         ent_comision = ctk.CTkEntry(fila_com, width=90, placeholder_text="0.00")
         try:
-            ent_comision.insert(0, "%.2f" % float(cargar_comision_interbancaria_config()))
+            ent_comision.insert(0, formatear_numero_entrada(float(cargar_comision_interbancaria_config())))
         except Exception:
             ent_comision.insert(0, "0.00")
 
@@ -9016,7 +9051,7 @@ class CuentasPorPagarTab:
         def _aplicar_comision():
             try:
                 ent_monto.delete(0, "end")
-                ent_monto.insert(0, "%.2f" % _total_a_pagar())
+                ent_monto.insert(0, formatear_numero_entrada(_total_a_pagar()))
                 actualizar_calc()
             except Exception:
                 pass
@@ -9192,7 +9227,7 @@ class CuentasPorPagarTab:
             if cancela:
                 try:
                     ent_monto.delete(0, "end")
-                    ent_monto.insert(0, "%.2f" % float(saldo_actual))
+                    ent_monto.insert(0, formatear_numero_entrada(float(saldo_actual)))
                 except Exception as e_monto:
                     print("Aviso - monto del pago total:", e_monto)
             def al_terminar(ruta, numero_operacion="", fecha_leida="", monto_leido=0.0):
@@ -9306,7 +9341,7 @@ class CuentasPorPagarTab:
             if _monto and float(_monto) > 0:
                 try:
                     ent_monto.delete(0, "end")
-                    ent_monto.insert(0, "%.2f" % float(_monto))
+                    ent_monto.insert(0, formatear_numero_entrada(float(_monto)))
                     actualizar_calc()
                 except Exception:
                     pass

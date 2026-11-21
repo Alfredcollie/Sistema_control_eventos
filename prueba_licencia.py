@@ -85,29 +85,61 @@ def _probar_respaldo_embebido(vl):
 
 
 def _probar_config_con_bom():
-    """Comprueba que la configuración se lea aunque el archivo tenga BOM."""
+    """Comprueba el cargador REAL de configuración con un archivo que tenga BOM.
+
+    En el Mac, el config_local.json del .app puede venir con BOM; con 'utf-8'
+    el json fallaba y la app se quedaba sin credenciales de licencia.
+    """
     import json
     import tempfile
+    try:
+        import app_paths
+    except Exception as error:
+        _fallo("cargar app_paths", str(error)[:80])
+        return False
+
+    # Algunos programas usan otro cargador (config_licencia.json): en ese caso
+    # se verifica en el código que tolere el BOM.
+    if not hasattr(app_paths, "cargar_config_local"):
+        try:
+            import validacion_licencia as _vl
+            fuente = open(_vl.__file__, "r", encoding="utf-8").read()
+            if "utf-8-sig" in fuente:
+                _ok("el cargador de licencia tolera BOM (verificado en el código)")
+                return True
+        except Exception:
+            pass
+        print("   Aviso: este programa usa otro cargador de configuración (se omite).")
+        return True
+
     ruta = os.path.join(tempfile.gettempdir(), "prueba_config_bom.json")
+    original = getattr(app_paths, "CONFIG_FILE", None)
     bien = False
     try:
         with open(ruta, "w", encoding="utf-8-sig") as archivo:
-            json.dump({"supabase_lic_user": "prueba"}, archivo)
-        with open(ruta, "r", encoding="utf-8-sig") as archivo:
-            datos = json.load(archivo)
-        bien = datos.get("supabase_lic_user") == "prueba"
+            json.dump({"supabase_lic_user": "prueba-bom",
+                       "supabase_lic_password": "prueba-bom"}, archivo)
+        if original is not None:
+            app_paths.CONFIG_FILE = ruta
+        datos = app_paths.cargar_config_local() or {}
+        bien = str(datos.get("supabase_lic_user") or "") == "prueba-bom"
     except Exception as error:
-        _fallo("lectura de config con BOM", str(error)[:60])
+        _fallo("cargador de configuración con BOM", str(error)[:80])
         return False
     finally:
+        try:
+            if original is not None:
+                app_paths.CONFIG_FILE = original
+        except Exception:
+            pass
         try:
             os.remove(ruta)
         except Exception:
             pass
     if bien:
-        _ok("lectura de config_local.json aunque tenga BOM")
+        _ok("el cargador real lee config_local.json aunque tenga BOM")
     else:
-        _fallo("lectura de config_local.json con BOM")
+        _fallo("el cargador real NO lee config con BOM")
     return bien
 
 

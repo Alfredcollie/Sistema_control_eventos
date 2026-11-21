@@ -163,6 +163,10 @@ class _Manejador(BaseHTTPRequestHandler):
         self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(cuerpo)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        # Evita que el navegador guarde versiones viejas de la app (caché).
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         try:
             self.wfile.write(cuerpo)

@@ -473,14 +473,51 @@ def formatear_numero_entrada(valor):
         return "%.2f" % float(valor or 0)
 
 def desformatear_numero(valor_str):
-    simbolo = CONFIG_REGIONAL.get("simbolo_moneda", "S/.")
-    formato = CONFIG_REGIONAL.get("formato_numero", "1,000.00")
-    val = str(valor_str).replace(simbolo, "").strip()
-    if formato == "1.000,00": val = val.replace(".", "").replace(",", ".")
-    else: val = val.replace(",", "")
-    try: return float(val)
-    except ValueError: return 0.0
+    """Convierte un texto de número a float, sin importar cómo esté escrito.
 
+    Acepta "1234.56", "1.234,56", "1234,56", "1,234.56" y con símbolo de moneda.
+    Regla: si aparecen los dos separadores, el ÚLTIMO es el decimal; si hay uno
+    solo, es decimal cuando le siguen 1 o 2 dígitos ("1234.56") y de miles
+    cuando le siguen 3 ("1.234").
+    """
+    if valor_str is None:
+        return 0.0
+    if isinstance(valor_str, (int, float)):
+        return float(valor_str)
+    simbolo = CONFIG_REGIONAL.get("simbolo_moneda", "S/.")
+    texto = str(valor_str).replace(simbolo, "")
+    texto = re.sub(r"[^\d,.\-]", "", texto).strip()
+    if not texto:
+        return 0.0
+    negativo = texto.startswith("-")
+    texto = texto.lstrip("-")
+    if not texto:
+        return 0.0
+
+    tiene_punto = "." in texto
+    tiene_coma = "," in texto
+    if tiene_punto and tiene_coma:
+        if texto.rfind(".") > texto.rfind(","):
+            texto = texto.replace(",", "")                      # 1,234.56
+        else:
+            texto = texto.replace(".", "").replace(",", ".")    # 1.234,56
+    elif tiene_coma:
+        partes = texto.split(",")
+        if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+            texto = "".join(partes)                            # 1,234,567
+        else:
+            texto = "".join(partes[:-1]) + "." + partes[-1]    # 1234,56
+    elif tiene_punto:
+        partes = texto.split(".")
+        if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+            texto = "".join(partes)                            # 1.234.567
+        else:
+            texto = "".join(partes[:-1]) + "." + partes[-1]    # 1234.56
+    try:
+        valor = float(texto)
+    except ValueError:
+        return 0.0
+    return -valor if negativo else valor
 def obtener_ruta_base_drive():
     ruta = CONFIG_REGIONAL.get("ruta_drive", "").strip()
     if ruta: 
@@ -1807,7 +1844,7 @@ class FacturasEmitidasTab:
                 monto_base = total / 1.18 if "Factura" in self.combo_tipo.get() else total
             if monto_base > 0:
                 self.ent_subtotal.delete(0, tk.END)
-                self.ent_subtotal.insert(0, "%.2f" % monto_base)
+                self.ent_subtotal.insert(0, formatear_numero_entrada(monto_base))
                 relleno = True
 
             # 🧾 El total impreso manda (aunque la base redondeada dé 1 céntimo más)

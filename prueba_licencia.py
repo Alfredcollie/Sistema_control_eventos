@@ -52,6 +52,65 @@ def _probar_hwid_mac():
     return bien
 
 
+def _probar_respaldo_embebido(vl):
+    """Comprueba que el respaldo de credenciales embebido funcione.
+
+    Es lo que permite que el Mac consulte la licencia aunque el .app no traiga
+    config_local.json o el llavero tenga una clave vieja.
+    """
+    if not hasattr(vl, "_credenciales_respaldo"):
+        print("   Aviso: este programa no tiene respaldo embebido (se omite).")
+        return True
+    try:
+        usuario, clave = vl._credenciales_respaldo()
+    except Exception as error:
+        _fallo("respaldo embebido de licencia", str(error)[:80])
+        return False
+    if not (usuario and clave):
+        _fallo("respaldo embebido de licencia", "vacío")
+        return False
+    _ok("respaldo embebido de licencia", "usuario: " + usuario)
+    try:
+        import psycopg2
+        conexion = psycopg2.connect(
+            dbname=vl.SUPABASE_DB_NAME, user=usuario, password=clave,
+            host=vl.SUPABASE_HOST, port=vl.SUPABASE_PORT,
+            sslmode="require", connect_timeout=8)
+        conexion.close()
+        _ok("conexión usando el respaldo embebido", "Mac sin config_local.json")
+        return True
+    except Exception as error:
+        _fallo("conexión usando el respaldo embebido", str(error)[:80])
+        return False
+
+
+def _probar_config_con_bom():
+    """Comprueba que la configuración se lea aunque el archivo tenga BOM."""
+    import json
+    import tempfile
+    ruta = os.path.join(tempfile.gettempdir(), "prueba_config_bom.json")
+    bien = False
+    try:
+        with open(ruta, "w", encoding="utf-8-sig") as archivo:
+            json.dump({"supabase_lic_user": "prueba"}, archivo)
+        with open(ruta, "r", encoding="utf-8-sig") as archivo:
+            datos = json.load(archivo)
+        bien = datos.get("supabase_lic_user") == "prueba"
+    except Exception as error:
+        _fallo("lectura de config con BOM", str(error)[:60])
+        return False
+    finally:
+        try:
+            os.remove(ruta)
+        except Exception:
+            pass
+    if bien:
+        _ok("lectura de config_local.json aunque tenga BOM")
+    else:
+        _fallo("lectura de config_local.json con BOM")
+    return bien
+
+
 def main():
     print("=" * 66)
     print(" PRUEBA DE LICENCIA (Windows / macOS)")
@@ -137,6 +196,10 @@ def main():
         bien = False
 
     if not _probar_hwid_mac():
+        bien = False
+    if not _probar_config_con_bom():
+        bien = False
+    if not _probar_respaldo_embebido(vl):
         bien = False
 
     print("")

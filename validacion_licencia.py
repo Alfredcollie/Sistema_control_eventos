@@ -146,6 +146,22 @@ def _log_licencia(mensaje):
         pass
 
 
+def _credenciales_respaldo():
+    """Par de respaldo EMBEBIDO (solo lectura de licencias).
+
+    Se usa si el .app/.exe no trae config_local.json o el llavero tiene una
+    clave vieja: así la app nunca se queda sin poder consultar la licencia.
+    Va en base64, no en texto plano, para que no se lea a simple vista.
+    """
+    try:
+        import base64 as _b64
+        usuario = _b64.b64decode(b"cG9zdGdyZXMubnFqZnB0bXVwbnJrbWd2bmJ5bHk=").decode()
+        clave = _b64.b64decode(b"STJOOXhWNjZQeVk3azVuMQ==").decode()
+        return usuario, clave
+    except Exception:
+        return "", ""
+
+
 def candidatos_credenciales_licencia():
     """Pares (usuario, contraseña) a probar, en orden.
 
@@ -181,6 +197,11 @@ def candidatos_credenciales_licencia():
     p = os.environ.get("SUPABASE_LIC_PASSWORD")
     if u and p:
         pares.append((u, p))
+
+    # 4) respaldo embebido: por si el equipo no tiene config_local.json
+    u_r, p_r = _credenciales_respaldo()
+    if u_r and p_r:
+        pares.append((u_r, p_r))
 
     # sin repetidos, conservando el orden
     vistos, salida = set(), []
@@ -220,7 +241,8 @@ def consultar_licencia_supabase(hwid):
     if conn is None:
         _log_licencia("FALLO al conectar: %s" % str(ultimo_error)[:300])
         return False, ("No hay conexión a Internet o el servidor de licencias no responde.\n\n"
-                       f"Detalle: {str(ultimo_error)[:120]}")
+                       f"Detalle: {str(ultimo_error)[:120]}\n"
+                       f"Credenciales probadas: {len(pares)}")
 
     try:
         cursor = conn.cursor()

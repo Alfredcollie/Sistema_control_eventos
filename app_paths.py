@@ -117,7 +117,7 @@ def cargar_config_local():
         try:
             if not os.path.exists(ruta):
                 continue
-            with open(ruta, "r", encoding="utf-8") as f:
+            with open(ruta, "r", encoding="utf-8-sig") as f:
                 datos = json.load(f)
             if not isinstance(datos, dict):
                 continue

@@ -10,11 +10,16 @@ import json
 import os
 
 _CACHE = {}
+_CACHE_MTIME = [None]
 
 
 def _config():
-    if _CACHE:
-        return _CACHE
+    """Lee la configuración y la refresca si el archivo cambió.
+
+    Antes se cacheaba para siempre: si el usuario cambiaba el formato en
+    Configuración General, Compras/Ventas seguían mostrando el formato viejo
+    hasta reiniciar el programa. Ahora se compara la fecha de modificación.
+    """
     config = {"simbolo_moneda": "S/.", "formato_numero": "1,000.00"}
     try:
         from app_paths import CONFIG_FILE
@@ -22,12 +27,20 @@ def _config():
     except Exception:
         ruta = os.path.join(os.path.expanduser("~"), "config.json")
     try:
+        mtime = os.stat(ruta).st_mtime_ns if os.path.exists(ruta) else None
+    except Exception:
+        mtime = None
+    if _CACHE and mtime is not None and _CACHE_MTIME[0] == mtime:
+        return _CACHE
+    try:
         if os.path.exists(ruta):
             with open(ruta, "r", encoding="utf-8") as archivo:
                 config.update(json.load(archivo) or {})
     except Exception:
         pass
+    _CACHE.clear()
     _CACHE.update(config)
+    _CACHE_MTIME[0] = mtime
     return _CACHE
 
 

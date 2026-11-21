@@ -4,6 +4,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 import psycopg2
 import subprocess
+import re
 import sys
 import os
 import uuid
@@ -84,19 +85,46 @@ def obtener_hwid():
                 timeout=15
             ).decode("utf-8", errors="ignore").strip()
         elif sys.platform == "darwin":
-            out = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]).decode("utf-8", "replace")
-            hwid = ""
-            for linea in out.splitlines():
+            # 🍎 ioreg con RUTA COMPLETA: dentro del .app compilado (PyInstaller) el
+            #    PATH es limitado y "ioreg" a secas NO se encuentra; entonces se caía
+            #    al identificador de red (distinto del registrado) y la licencia no
+            #    aparecía: el programa pedía registrarse en el Mac.
+            out = ""
+            for comando in (["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]):
+                try:
+                    out = subprocess.check_output(comando, timeout=15).decode("utf-8", "replace")
+                    if "IOPlatformUUID" in out:
+                        break
+                except Exception:
+                    out = ""
+            for linea in (out or "").splitlines():
                 if "IOPlatformUUID" in linea:
-                    hwid = linea.split('"')[-2]
-                    break
+                    parecido = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', linea)
+                    if parecido:
+                        hwid = parecido.group(1).strip().upper()
+                        break
             if not hwid:
-                raise RuntimeError("IOPlatformUUID no encontrado")
+                # Respaldo: system_profiler (también con ruta completa)
+                for comando in (["/usr/sbin/system_profiler", "SPHardwareDataType"],
+                                ["system_profiler", "SPHardwareDataType"]):
+                    try:
+                        salida_sp = subprocess.check_output(comando, timeout=20).decode("utf-8", "replace")
+                        parecido = re.search(r"Hardware\s+UUID:\s*([A-Fa-f0-9-]+)", salida_sp, re.IGNORECASE)
+                        if parecido:
+                            hwid = parecido.group(1).strip().upper()
+                            break
+                    except Exception:
+                        continue
         else:
             hwid = subprocess.check_output(["/bin/cat", "/etc/machine-id"]).decode("utf-8", "replace").strip()
     except Exception:
         hwid = str(uuid.UUID(int=uuid.getnode())).upper()
-    return hwid
+    # 🔤 macOS devuelve el UUID con distinta capitalización o con espacios: se
+    #    normaliza (sin comillas ni espacios, en mayúsculas) para que coincida
+    #    con el HWID registrado en la base de licencias.
+    hwid = str(hwid or "").strip().strip('"').strip()
+    return hwid.upper()
 
 def _log_licencia(mensaje):
     """Escribe un registro de diagnóstico en la carpeta de datos real de la app."""
@@ -166,6 +194,7 @@ def candidatos_credenciales_licencia():
 def consultar_licencia_supabase(hwid):
     """Se conecta a Supabase y verifica el estado de TODAS las licencias asociadas a este HWID y Software"""
     pares = candidatos_credenciales_licencia()
+    _log_licencia("HWID consultado=%r" % (hwid,))
     _log_licencia("candidatos=%d usuarios=%s" % (len(pares), [u for u, _p in pares]))
     if not pares:
         _log_licencia("SIN credenciales: llavero/config/entorno vacíos")
@@ -200,7 +229,8 @@ def consultar_licencia_supabase(hwid):
             SELECT e.estado, e.fecha_vencimiento, l.estado, l.fecha_vencimiento
             FROM lic_equipos e
             JOIN lic_asignaciones l ON e.licencia_id = l.id
-            WHERE e.hwid = %s AND l.software = %s
+            WHERE UPPER(TRIM(e.hwid)) = UPPER(TRIM(%s))
+              AND UPPER(TRIM(l.software)) = UPPER(TRIM(%s))
         """
         cursor.execute(query, (hwid, SOFTWARE_ASIGNADO))
         resultados = cursor.fetchall()
@@ -208,7 +238,9 @@ def consultar_licencia_supabase(hwid):
         _log_licencia("CONEXION OK: %d registro(s) de licencia" % len(resultados))
 
         if not resultados:
-            return False, f"Este equipo no cuenta con una licencia para el software '{SOFTWARE_ASIGNADO}'.\nCopie el HWID a continuación y envíelo a soporte."
+            return False, ("Este equipo no cuenta con una licencia para el software "
+                           f"'{SOFTWARE_ASIGNADO}'.\n\nHWID consultado:\n{hwid}\n\n"
+                           "Copie ese código y envíelo a soporte para registrarlo.")
 
         hoy = datetime.now()
         fmt = "%d/%m/%Y"

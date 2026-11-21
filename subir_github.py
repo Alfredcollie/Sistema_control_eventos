@@ -21,6 +21,11 @@ Opciones:
     --no-compilar  sube sin lanzar la compilación
     --version X.Y.Z   publica esa versión sin preguntar
     --no-release      sube sin crear etiqueta ni release
+    --sin-pruebas     sube SIN correr las verificaciones previas (no recomendado)
+
+Antes de subir se ejecutan SIEMPRE:
+    * prueba_compatibilidad.py  (Windows/macOS)
+    * prueba_licencia.py        (licencia, incluida la lectura del HWID en macOS)
 
 PROGRAMA: EVENTOS
 REPOSITORIO: https://github.com/Alfredcollie/Sistema_control_eventos
@@ -34,6 +39,14 @@ import sys
 import datetime
 import io
 import re
+
+# 📺 En consolas Windows (cp1252) los símbolos de las pruebas rompían el script:
+#    se fuerza UTF-8 con reemplazo para que nunca falle al imprimir.
+for _flujo in (sys.stdout, sys.stderr):
+    try:
+        _flujo.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 RAMA_PREFERIDA = "main"
@@ -444,6 +457,43 @@ def publicar_release(version, rama, forzar=False):
     return True
 
 
+# =========================================================
+# ✅ VERIFICACIONES OBLIGATORIAS ANTES DE SUBIR
+#    - Compatibilidad Windows/macOS (prueba_compatibilidad.py)
+#    - Licencia para Mac (prueba_licencia.py)
+#    Si alguna falla, NO se sube nada. Para saltarlas: --sin-pruebas
+# =========================================================
+VERIFICACIONES = (
+    ("prueba_compatibilidad.py", "Compatibilidad Windows/macOS", ["--sin-pausa"]),
+    ("prueba_licencia.py", "Licencia (Windows/macOS)", []),
+)
+
+
+def verificaciones_previas(argumentos=None):
+    """Ejecuta las pruebas obligatorias. True si todo pasa."""
+    argumentos = argumentos or []
+    if "--sin-pruebas" in argumentos or "--forzar" in argumentos:
+        print("")
+        print(" ⚠️  Verificaciones OMITIDAS por pedido explícito (--sin-pruebas).")
+        return True
+    print("")
+    print("--- Verificaciones previas ----------------------------------------")
+    todo_ok = True
+    for script, descripcion, extra in VERIFICACIONES:
+        ruta = os.path.join(REPO, script)
+        if not os.path.isfile(ruta):
+            print("   Aviso: no se encontró %s: se omite." % script)
+            continue
+        print("")
+        resultado = subprocess.run([sys.executable, ruta] + list(extra), cwd=REPO)
+        if resultado.returncode != 0:
+            print("   FALLO: %s" % descripcion)
+            todo_ok = False
+        else:
+            print("   OK: %s" % descripcion)
+    return todo_ok
+
+
 def main():
     argumentos = sys.argv[1:]
     solo_estado = "--estado" in argumentos or "--dry-run" in argumentos
@@ -470,6 +520,13 @@ def main():
         print("")
         print(" ⚠️  Esta carpeta NO es un repositorio git.")
         print("     Copie aquí los archivos o pida que se prepare el repositorio.")
+        return 1
+
+    # 🚦 Se verifica antes de tocar nada: si algo falla, no se sube.
+    if not verificaciones_previas(argumentos):
+        print("")
+        print(" ⛔ NO se subió nada: corrija las verificaciones previas.")
+        print("     (para subir igual, use:  --sin-pruebas)")
         return 1
 
     rama = rama_actual()

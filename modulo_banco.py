@@ -557,6 +557,34 @@ def guardar_comision_interbancaria(valor):
     return guardar_config_disco(cfg)
 
 
+CLAVE_CAJA_CHICA = "caja_chica_inicial"
+
+
+def cargar_caja_chica_inicial():
+    """Saldo inicial del efectivo en caja chica (0 si no se configuró)."""
+    try:
+        valor = leer_config_disco().get(CLAVE_CAJA_CHICA, "0")
+        return float(str(valor).replace(",", "."))
+    except Exception:
+        return 0.0
+
+
+def guardar_caja_chica_inicial(valor):
+    try:
+        cfg = leer_config_disco()
+        cfg[CLAVE_CAJA_CHICA] = "%.2f" % float(valor)
+        return guardar_config_disco(cfg)
+    except Exception as error:
+        print("[Caja Chica] no se pudo guardar el saldo inicial:", error)
+        return False
+
+
+def _es_cuenta_caja(cuenta):
+    """¿La cuenta es efectivo / caja chica? (no es una cuenta bancaria)."""
+    texto = str(cuenta or "").upper()
+    return ("CAJA" in texto) or ("EFECTIVO" in texto)
+
+
 def cargar_eventos(usar_cache=True):
     """Eventos a los que se puede asociar un movimiento bancario.
 
@@ -2563,6 +2591,137 @@ class ModuloBancoApp:
         ctk.CTkLabel(f_total, text=formatear_monto(total_general), font=(FAMILIA, 16, "bold"),
                      text_color="white").pack(side="right", padx=15, pady=12)
 
+        # 💵 CAJA CHICA: no es una cuenta bancaria; se muestra aparte y NO suma
+        #    al total de bancos.
+        try:
+            self._crear_tarjeta_caja_chica(datos)
+        except Exception as error_caja:
+            print("[Caja Chica] no se pudo dibujar la tarjeta:", error_caja)
+
+    def _resumen_caja_chica(self, datos=None):
+        """Saldo de caja chica: inicial + cobros en efectivo − pagos en efectivo."""
+        inicial = cargar_caja_chica_inicial()
+        if datos is None:
+            datos = getattr(self, "_datos_saldos", None)
+        if datos is None:
+            try:
+                datos = self._cargar_movimientos_crudos()
+            except Exception:
+                datos = {}
+        movs = []
+        for f in (datos.get("pagos") or []):
+            try:
+                if _es_cuenta_caja(f[4]):
+                    movs.append({"fecha": f[1] or "",
+                                 "descripcion": "Pago " + str(f[2] or ""),
+                                 "monto": -abs(float(f[3] or 0))})
+            except Exception:
+                continue
+        for f in (datos.get("cobros") or []):
+            try:
+                if _es_cuenta_caja(f[4]):
+                    movs.append({"fecha": f[1] or "",
+                                 "descripcion": "Cobro " + str(f[2] or ""),
+                                 "monto": abs(float(f[3] or 0))})
+            except Exception:
+                continue
+        mes = getattr(self, "mes_saldos", None)
+        if mes:
+            movs = [m for m in movs
+                    if clave_fecha(m["fecha"]) and clave_fecha(m["fecha"])[:7] <= mes]
+        saldo = round(inicial + sum(m["monto"] for m in movs), 2)
+        return {"inicial": inicial, "saldo": saldo, "movimientos": movs,
+                "ingresos": round(sum(m["monto"] for m in movs if m["monto"] > 0), 2),
+                "egresos": round(sum(-m["monto"] for m in movs if m["monto"] < 0), 2)}
+
+    def _crear_tarjeta_caja_chica(self, datos=None):
+        caja = self._resumen_caja_chica(datos)
+        card = ctk.CTkFrame(self.scroll_saldos, corner_radius=10, fg_color="#fffdf5",
+                            border_width=1, border_color="#e8d9a8")
+        card.pack(fill="x", pady=(12, 6), padx=5)
+        fila = ctk.CTkFrame(card, fg_color="transparent")
+        fila.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(fila, text="💵 Caja Chica", font=(FAMILIA, 15, "bold"),
+                     text_color="#7d6608").pack(side="left")
+        ctk.CTkLabel(fila, text=formatear_monto(caja["saldo"]),
+                     font=(FAMILIA, 16, "bold"),
+                     text_color="#27ae60" if caja["saldo"] >= 0 else "#c0392b").pack(side="right")
+        ctk.CTkLabel(fila, text="Saldo según caja", font=(FAMILIA, 10, "italic"),
+                     text_color="#7f8c8d").pack(side="right", padx=(0, 8))
+        det = ctk.CTkFrame(card, fg_color="transparent")
+        det.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(det, text=f"Saldo inicial: {formatear_monto(caja['inicial'])}",
+                     font=(FAMILIA, 11), text_color="gray").pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(det, text=f"+ Cobros en efectivo: {formatear_monto(caja['ingresos'])}",
+                     font=(FAMILIA, 11), text_color="#27ae60").pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(det, text=f"− Pagos en efectivo: {formatear_monto(caja['egresos'])}",
+                     font=(FAMILIA, 11), text_color="#c0392b").pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(card,
+                     text=("El efectivo NO suma al total de bancos. Los pagos registrados "
+                           "como «Efectivo / Caja Chica» salen de este saldo."),
+                     font=(FAMILIA, 10, "italic"), text_color="#7f8c8d",
+                     justify="left", wraplength=900).pack(anchor="w", padx=12, pady=(0, 4))
+        btns = ctk.CTkFrame(card, fg_color="transparent")
+        btns.pack(fill="x", padx=12, pady=(0, 10))
+        ctk.CTkButton(btns, text="⚙️ Saldo inicial", width=150,
+                      font=(FAMILIA, 11, "bold"), fg_color="#b9770e",
+                      hover_color="#7e5109",
+                      command=self._editar_saldo_caja).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btns, text="👁 Ver Movimientos", width=170,
+                      font=(FAMILIA, 11, "bold"), fg_color="#34495e",
+                      hover_color="#2c3e50",
+                      command=self._ver_movimientos_caja).pack(side="left")
+
+    def _editar_saldo_caja(self):
+        actual = cargar_caja_chica_inicial()
+        valor = simpledialog.askstring("Caja Chica",
+                                       "Saldo inicial de caja chica (S/):",
+                                       initialvalue="%.2f" % actual,
+                                       parent=self.parent_frame)
+        if valor is None:
+            return
+        try:
+            nuevo = float(str(valor).replace(",", ".").strip() or 0)
+        except Exception:
+            return messagebox.showerror("Caja Chica", "Monto inválido.",
+                                        parent=self.parent_frame)
+        guardar_caja_chica_inicial(nuevo)
+        try:
+            self.actualizar_saldos_boton()
+        except Exception:
+            self.refrescar_saldos()
+
+    def _ver_movimientos_caja(self):
+        caja = self._resumen_caja_chica()
+        v = ctk.CTkToplevel(self.parent_frame)
+        v.title("💵 Caja Chica · movimientos")
+        v.geometry("720x430")
+        try:
+            v.transient(self.parent_frame)
+            v.resizable(True, True)
+        except Exception:
+            pass
+        traer_al_frente(v)
+        ctk.CTkLabel(v, text="Movimientos en efectivo (cobros y pagos)",
+                     font=(FAMILIA, 14, "bold")).pack(pady=(12, 4))
+        ctk.CTkLabel(v, text=f"Saldo actual: {formatear_monto(caja['saldo'])}",
+                     font=(FAMILIA, 12, "bold"), text_color="#7d6608").pack(pady=(0, 8))
+        marco = ctk.CTkFrame(v, fg_color="transparent")
+        marco.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        cols = ("fecha", "descripcion", "monto")
+        tabla = ttk.Treeview(marco, columns=cols, show="headings", height=12)
+        preparar_colores_montos(tabla)
+        for col, txt, ancho in (("fecha", "Fecha", 100),
+                                ("descripcion", "Descripción", 420),
+                                ("monto", "Monto", 130)):
+            tabla.heading(col, text=txt)
+            tabla.column(col, width=ancho, anchor="w" if col == "descripcion" else "center")
+        tabla.pack(fill="both", expand=True)
+        for m in sorted(caja["movimientos"], key=lambda x: clave_fecha(x["fecha"])):
+            tabla.insert("", "end", values=(fecha_para_mostrar(m["fecha"]),
+                                            m["descripcion"],
+                                            formatear_monto(m["monto"])))
+
     def _crear_tarjeta_banco(self, banco, resumen, idx):
         etiqueta = construir_etiqueta_banco(banco) or f"Banco {idx + 1}"
         card = ctk.CTkFrame(self.scroll_saldos, corner_radius=10, fg_color="#f8f9fa",
@@ -2581,6 +2740,8 @@ class ModuloBancoApp:
                          font=(FAMILIA, 11, "italic"), text_color="#7f8c8d").pack(side="left", padx=(10, 0))
         ctk.CTkLabel(fila_titulo, text=resumen["saldo_actual_txt"], font=(FAMILIA, 16, "bold"),
                      text_color="#27ae60" if resumen["saldo_actual"] >= 0 else "#c0392b").pack(side="right")
+        ctk.CTkLabel(fila_titulo, text="Saldo según sistema", font=(FAMILIA, 10, "italic"),
+                     text_color="#7f8c8d").pack(side="right", padx=(0, 8))
 
         fila_det = ctk.CTkFrame(card, fg_color="transparent")
         fila_det.pack(fill="x", padx=12, pady=(0, 6))
@@ -2594,14 +2755,43 @@ class ModuloBancoApp:
         ctk.CTkLabel(fila_det, text=f"({resumen['n_movimientos']} movimientos{sufijo})",
                      font=(FAMILIA, 10, "italic"), text_color="#7f8c8d").pack(side="left")
 
-        # 🏦 Si el saldo corrido del estado de cuenta no coincide con la suma de
-        #    los movimientos leídos, se explica el ajuste (el banco es la verdad).
-        _ajuste = float(resumen.get("ajuste_estado") or 0)
-        if abs(_ajuste) >= 0.005:
+        # 🏦 Comparación con el último estado de cuenta cargado (informativa).
+        #    El saldo grande es el del SISTEMA; el banco postea tarjetas y
+        #    transferencias unos días después, así que se muestran los dos y la
+        #    diferencia. Nunca reemplaza al saldo: solo lo explica.
+        _saldo_banco = resumen.get("saldo_banco")
+        if _saldo_banco is not None:
+            _dif = float(resumen.get("diferencia") or 0)
+            _color_dif = "#1e8449" if abs(_dif) < 0.005 else "#b9770e"
+            _fila_banco = ctk.CTkFrame(card, fg_color="#fdfefe", border_width=1,
+                                       border_color="#eaecee")
+            _fila_banco.pack(fill="x", padx=12, pady=(0, 6))
+            ctk.CTkLabel(
+                _fila_banco,
+                text=(f"🏦 Banco según estado de cuenta al {resumen.get('banco_fecha', '')}: "
+                      f"{resumen.get('saldo_banco_txt', '')}   ·   "
+                      f"Diferencia: {resumen.get('diferencia_txt', '')}"),
+                font=(FAMILIA, 11, "bold"), text_color=_color_dif).pack(
+                    side="left", padx=8, pady=4)
             ctk.CTkLabel(card,
-                         text=(f"🏦 Saldo según estado de cuenta del banco: ajuste de "
-                               f"{formatear_monto(_ajuste)} sobre la suma de movimientos."),
+                         text=("La diferencia son movimientos ya registrados que el banco "
+                               "postea días después (tarjetas, transferencias), o líneas del "
+                               "estado de cuenta que todavía no tienen asiento."),
+                         font=(FAMILIA, 10, "italic"), text_color="#7f8c8d",
+                         justify="left", wraplength=900).pack(anchor="w", padx=12, pady=(0, 4))
+        elif resumen.get("banco_periodo"):
+            ctk.CTkLabel(card,
+                         text=("📄 El estado de cuenta cargado (al %s) no trae saldo corrido "
+                               "legible: no se puede comparar el saldo del banco. Las líneas "
+                               "sí se cruzan en la pestaña 🧾 Conciliación."
+                               % resumen.get("banco_fecha", "")),
                          font=(FAMILIA, 10, "italic"), text_color="#b9770e",
+                         justify="left", wraplength=900).pack(anchor="w", padx=12, pady=(0, 4))
+        else:
+            ctk.CTkLabel(card,
+                         text=("📄 Sin estado de cuenta cargado para comparar: el saldo es "
+                               "solo el del sistema."),
+                         font=(FAMILIA, 10, "italic"), text_color="#7f8c8d",
                          justify="left", wraplength=900).pack(anchor="w", padx=12, pady=(0, 4))
 
         # 📄 Qué estados de cuenta están CARGADOS para esta cuenta (a la vista).
@@ -2649,6 +2839,11 @@ class ModuloBancoApp:
 
     def _movimientos_para_saldo(self, banco, movs_sistema):
         """Movimientos que debe sumar la tarjeta de saldo.
+
+        ⚠️ YA NO SE USA para el saldo: el saldo ahora es siempre el del sistema
+        (`_movimientos_para_libro`) y el estado de cuenta se compara aparte
+        (`_saldo_segun_banco`). Se conserva por compatibilidad con el código
+        antiguo.
 
         En los meses con estado de cuenta cargado manda el BANCO: se usan sus
         líneas tal cual, estén o no conciliadas, porque el saldo bancario incluye
@@ -2749,14 +2944,141 @@ class ModuloBancoApp:
                 salida.extend(manuales_por_mes.get(mes, []))
         return salida
 
-    def calcular_resumen(self, banco, datos=None, mes=None):
-        """Saldo del banco. Si se pasa 'datos' (movimientos crudos ya leídos de
-        la base) no se vuelve a consultar Supabase.
+    def _movimientos_para_libro(self, banco, movs_sistema, ignorados=None):
+        """Movimientos que forman el saldo DEL SISTEMA (libros).
 
-        El saldo se arma con los movimientos REALES del banco: en los meses con
-        estado de cuenta cargado se usan sus líneas (conciliadas o no) y en los
-        meses sin estado se usan los movimientos del sistema y los manuales.
-        Así entran efectivo, transferencias, comisiones, etc.
+        Solo lo registrado en el programa: cobros, pagos, transferencias y
+        movimientos manuales (menos los que el usuario descartó). El estado de
+        cuenta NO entra acá: es la otra mitad de la conciliación y se compara
+        aparte con `_saldo_segun_banco`.
+
+        Antes el saldo cambiaba de fuente según el mes (PDF si había estado de
+        cuenta, sistema si no), así que borrar un asiento de un mes con PDF no
+        movía nada. Ahora el saldo siempre es el mismo: los libros.
+        """
+        movs_sistema = list(movs_sistema or [])
+
+        try:
+            _ignorados = ignorados if isinstance(ignorados, dict) else self.cargar_ignorados(banco)
+        except Exception:
+            _ignorados = {"sistema": set(), "estado_cuenta": set()}
+        _ign_sistema = _ignorados.get("sistema", set())
+        movs_sistema = [
+            m for m in movs_sistema
+            if self._clave_ignorado(m.get("origen", "sistema"), m.get("tabla", ""),
+                                    m.get("id", 0), m.get("fecha"), m.get("monto"),
+                                    m.get("descripcion", "")) not in _ign_sistema
+        ]
+
+        # Manuales (egresos/ingresos registrados directo en el banco) que no
+        # dupliquen un asiento del sistema con la misma fecha e importe.
+        clave_cache = (str(banco.get("banco", "")), str(banco.get("cuenta", "") or ""))
+        extras = (getattr(self, "_cache_saldos_extra", None) or {}).get(clave_cache) or {}
+        manuales = extras.get("manuales")
+        if manuales is None:
+            try:
+                manuales = self.cargar_manuales(banco) or []
+            except Exception as error:
+                print("[Saldos] no se pudieron leer los movimientos manuales:", error)
+                manuales = []
+
+        pendientes = {}
+        for m in movs_sistema:
+            clave = (clave_fecha(m.get("fecha")), round(float(m.get("monto") or 0), 2))
+            pendientes[clave] = pendientes.get(clave, 0) + 1
+
+        salida = list(movs_sistema)
+        for m in manuales:
+            clave = (clave_fecha(m.get("fecha")), round(float(m.get("monto") or 0), 2))
+            if pendientes.get(clave, 0) > 0:
+                pendientes[clave] -= 1
+                continue
+            mov = dict(m)
+            mov.setdefault("origen", "manual")
+            salida.append(mov)
+        return salida
+
+    def _saldo_segun_banco(self, banco, mes=None, ignorados=None):
+        """Saldo del banco según el último estado de cuenta cargado (informativo).
+
+        Usa el saldo corrido que imprime el PDF (la verdad del banco) y no la
+        suma de líneas. Con 'mes' (AAAA-MM) se queda con el último saldo hasta
+        el cierre de ese mes.
+
+        Devuelve {'saldo': float|None, 'fecha': 'dd/mm/aaaa', 'periodo': 'AAAA-MM'}.
+        """
+        vacio = {"saldo": None, "fecha": "", "periodo": ""}
+        # 🚀 Se usa el estado de cuenta ya cargado en segundo plano si está:
+        #    así dibujar las tarjetas no dispara una consulta por cuenta.
+        clave_cache = (str(banco.get("banco", "")), str(banco.get("cuenta", "") or ""))
+        extras = (getattr(self, "_cache_saldos_extra", None) or {}).get(clave_cache) or {}
+        lineas = extras.get("pdf")
+        if lineas is None:
+            try:
+                lineas = self._cargar_movimientos_pdf(banco) or []
+            except Exception as error:
+                print("[Saldos] estado de cuenta para comparar:", error)
+                return vacio
+        if not lineas:
+            return vacio
+        try:
+            _ign = ignorados if isinstance(ignorados, dict) else self.cargar_ignorados(banco)
+            ign_pdf = _ign.get("estado_cuenta", set())
+        except Exception:
+            ign_pdf = set()
+
+        limite = ""
+        if mes:
+            try:
+                import calendar as _cal
+                anio, m = [int(x) for x in str(mes).split("-")[:2]]
+                limite = "%04d-%02d-%02d" % (anio, m, _cal.monthrange(anio, m)[1])
+            except Exception:
+                limite = ""
+
+        mejor, ultima = None, None
+        for linea in lineas:
+            f_iso = clave_fecha(linea.get("fecha"))
+            if not f_iso:
+                continue
+            if limite and f_iso > limite:
+                continue
+            if self._clave_ignorado("estado_cuenta", "", 0, linea.get("fecha"),
+                                    linea.get("monto"),
+                                    linea.get("descripcion", "")) in ign_pdf:
+                continue
+            if ultima is None or f_iso >= clave_fecha(ultima.get("fecha")):
+                ultima = linea
+            saldo_l = linea.get("saldo")
+            if saldo_l is None:
+                continue
+            if mejor is None or f_iso >= mejor[0]:
+                mejor = (f_iso, float(saldo_l), linea)
+        if mejor is None:
+            # Hay estado de cuenta pero el PDF no trae una columna de saldo
+            # legible: se informa la fecha, sin inventar un saldo del banco.
+            if ultima is None:
+                return vacio
+            f_ult = clave_fecha(ultima.get("fecha")) or ""
+            return {"saldo": None,
+                    "fecha": fecha_para_mostrar(f_ult),
+                    "periodo": str(ultima.get("periodo") or "") or f_ult[:7]}
+        f_iso, saldo, linea = mejor
+        return {"saldo": round(saldo, 2),
+                "fecha": fecha_para_mostrar(f_iso),
+                "periodo": str(linea.get("periodo") or "") or f_iso[:7]}
+
+    def calcular_resumen(self, banco, datos=None, mes=None):
+        """Saldo DEL SISTEMA de la cuenta y comparación con el banco.
+
+        Si se pasa 'datos' (movimientos crudos ya leídos de la base) no se
+        vuelve a consultar Supabase.
+
+        El número grande es lo registrado en el programa: saldo inicial +
+        cobros, pagos, transferencias y movimientos manuales. El estado de
+        cuenta NO reemplaza ese saldo (los pagos con tarjeta aparecen en el
+        banco días después): se lee aparte y se devuelve como comparación
+        ('saldo_banco', 'banco_fecha', 'diferencia').
 
         Si 'mes' (formato 'YYYY-MM') viene informado, los importes mostrados
         son los del MES y el saldo es el de CIERRE de ese mes
@@ -2766,9 +3088,14 @@ class ModuloBancoApp:
         if mes is None:
             mes = getattr(self, "mes_saldos", None)
         movs_sistema = self._movimientos_de_banco(banco, datos)
-        # 🏦 El saldo usa el estado de cuenta en los meses cargados y, en los
-        #    meses sin estado, los movimientos del sistema y los manuales.
-        movs_todos = self._movimientos_para_saldo(banco, movs_sistema)
+        # 🧾 El saldo grande es el DEL SISTEMA: solo lo registrado en el programa.
+        #    El estado de cuenta se compara aparte (más abajo) y nunca reemplaza
+        #    al saldo: los pagos con tarjeta aparecen en el banco días después.
+        try:
+            _ignorados = self.cargar_ignorados(banco)
+        except Exception:
+            _ignorados = {"sistema": set(), "estado_cuenta": set()}
+        movs_todos = self._movimientos_para_libro(banco, movs_sistema, ignorados=_ignorados)
         saldo_inicial = normalizar_monto(banco.get("saldo_inicial", ""))
 
         # 📌 'fecha' de la cuenta = desde cuándo rige el saldo inicial. Lo movido
@@ -2793,27 +3120,18 @@ class ModuloBancoApp:
 
         ingresos = sum(m["monto"] for m in movs if m["monto"] > 0)
         egresos = sum(-m["monto"] for m in movs if m["monto"] < 0)
-        # 🏦 Si hay estado de cuenta, manda el SALDO CORRIDO del banco: la suma
-        #    de los movimientos leídos puede quedar corta si el PDF trae alguna
-        #    línea que no se pudo interpretar (el saldo sí es exacto).
-        ancla_fecha, ancla_saldo = None, None
-        for m in acumulados:
-            if str(m.get("origen") or "") != "estado_cuenta":
-                continue
-            saldo_m = m.get("saldo")
-            if saldo_m is None:
-                continue
-            f_m = clave_fecha(m.get("fecha"))
-            if not f_m:
-                continue
-            if ancla_fecha is None or f_m >= ancla_fecha:
-                ancla_fecha, ancla_saldo = f_m, float(saldo_m)
-        if ancla_saldo is not None:
-            saldo = ancla_saldo + sum(m["monto"] for m in acumulados
-                                      if clave_fecha(m.get("fecha")) > ancla_fecha)
+        saldo = round(saldo_inicial + sum(m["monto"] for m in acumulados), 2)
+
+        # 🏦 Comparación informativa con el último estado de cuenta cargado.
+        #    No cambia el saldo: solo muestra cuánto dice el banco y la diferencia.
+        if antes_del_inicio:
+            banco_info = {"saldo": None, "fecha": "", "periodo": ""}
         else:
-            saldo = saldo_inicial + sum(m["monto"] for m in acumulados)
-        ajuste_estado = round(saldo - (saldo_inicial + sum(m["monto"] for m in acumulados)), 2)
+            banco_info = self._saldo_segun_banco(banco, mes, ignorados=_ignorados)
+        saldo_banco = banco_info.get("saldo")
+        diferencia = (round(saldo - float(saldo_banco), 2)
+                      if saldo_banco is not None else None)
+
         etiqueta_mes = getattr(self, "mes_saldos_etiqueta", "") if mes else ""
         return {
             "saldo_inicial": saldo_inicial,
@@ -2821,8 +3139,16 @@ class ModuloBancoApp:
             "egresos": egresos,
             "saldo_actual": saldo,
             "saldo_actual_txt": formatear_monto(saldo),
-            "ajuste_estado": ajuste_estado,
-            "ancla_fecha": ancla_fecha,
+            "saldo_banco": saldo_banco,
+            "saldo_banco_txt": (formatear_monto(saldo_banco)
+                                if saldo_banco is not None else ""),
+            "banco_fecha": banco_info.get("fecha", ""),
+            "banco_periodo": banco_info.get("periodo", ""),
+            "diferencia": diferencia,
+            "diferencia_txt": (formatear_monto(diferencia)
+                               if diferencia is not None else ""),
+            "ajuste_estado": 0.0,
+            "ancla_fecha": None,
             "n_movimientos": len(movs),
             "movimientos": movs,
             "mes": mes or "",
@@ -2995,7 +3321,12 @@ class ModuloBancoApp:
             if m.get("tabla") not in ("pagos_comprobantes", "pagos_clientes"):
                 salida.append(m)
                 continue
-            clave_unica = str(m.get("operacion") or "").strip() or str(m.get("archivo_ruta") or "").strip()
+            # 📎 Se agrupa por COMPROBANTE (mismo archivo) y solo si no hay archivo
+            #    se usa el N° de operación. Antes se priorizaba la operación y, cuando
+            #    varios pagos compartían el mismo número (copiado), se fusionaban en
+            #    uno solo y sus líneas del banco quedaban sin pareja.
+            clave_unica = (str(m.get("archivo_ruta") or "").strip()
+                           or str(m.get("operacion") or "").strip())
             if not clave_unica:
                 salida.append(m)
                 continue
@@ -4337,23 +4668,24 @@ class ModuloBancoApp:
         ent_dias.pack(side="left")
         ctk.CTkLabel(barra, text="(días después de la fecha contable)",
                      font=(FAMILIA, 10), text_color="#7f8c8d").pack(side="left", padx=4)
-        # ⚡ Coincidencia 100 % (importe exacto y UN solo candidato): se concilia
-        #    sola. La casilla permite apagarlo en cualquier momento.
-        chk_auto = ctk.CTkCheckBox(barra, text="Conciliar los de 100%",
+        # ⚡ Se concilian solos únicamente los del MISMO DÍA con importe exacto y
+        #    que no se repita en el período. La casilla permite apagarlo.
+        chk_auto = ctk.CTkCheckBox(barra, text="Conciliar mismo día + monto único",
                                    font=(FAMILIA, 11))
         chk_auto.select()
         chk_auto.pack(side="left", padx=(18, 4))
 
         marco = ctk.CTkFrame(ventana)
         marco.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        columnas = ("fecha_banco", "desc_banco", "monto_banco", "fecha_cont", "desc_cont",
-                    "monto_sistema", "dias", "estado", "confianza")
+        columnas = ("fecha_banco", "desc_banco", "monto_banco", "fecha_cont", "doc_cont",
+                    "desc_cont", "monto_sistema", "dias", "estado", "confianza")
         tabla = ttk.Treeview(marco, columns=columnas, show="headings", height=18)
         preparar_colores_montos(tabla)
-        titulos = {"fecha_banco": ("Fecha banco", 100), "desc_banco": ("Descripción banco", 250),
-                   "monto_banco": ("Monto banco", 100), "fecha_cont": ("Fecha contable", 100),
-                   "desc_cont": ("Descripción contable", 250), "monto_sistema": ("Monto sistema", 100),
-                   "dias": ("Días", 50), "estado": ("Estado", 180), "confianza": ("Confianza", 80)}
+        titulos = {"fecha_banco": ("Fecha banco", 100), "desc_banco": ("Descripción banco", 230),
+                   "monto_banco": ("Monto banco", 95), "fecha_cont": ("Fecha contable", 95),
+                   "doc_cont": ("Documento", 105),
+                   "desc_cont": ("Descripción contable", 220), "monto_sistema": ("Monto sistema", 95),
+                   "dias": ("Días", 45), "estado": ("Estado", 175), "confianza": ("Confianza", 75)}
         for col in columnas:
             texto, ancho = titulos[col]
             tabla.heading(col, text=texto)
@@ -4364,6 +4696,39 @@ class ModuloBancoApp:
         desplaz.pack(side="right", fill="y")
 
         estado_ventana = {"propuestas": [], "aplicadas": set()}
+
+        def _ver_documento_propuesta():
+            """📄 Abre el PDF (comprobante o factura) del asiento propuesto."""
+            sel = tabla.selection()
+            if not sel:
+                messagebox.showinfo("Documento", "Seleccione una propuesta.",
+                                    parent=ventana)
+                return
+            try:
+                p = estado_ventana["propuestas"][int(sel[0]) - 1]
+            except Exception:
+                return
+            ruta = self._documento_de_asiento({
+                "origen": p.get("origen", ""),
+                "id_movimiento": p.get("id_movimiento", 0),
+                "id": p.get("id_asiento", 0),
+                "id_gasto_compras": p.get("id_gasto_compras", 0),
+                "id_factura": p.get("id_factura", 0),
+            })
+            doc = p.get("documento_contable") or "(sin número)"
+            if not ruta:
+                messagebox.showinfo(
+                    "Documento",
+                    "Este asiento no tiene un PDF adjunto.\n\n"
+                    "Factura: %s\nBúsquela en Compras con ese número." % doc,
+                    parent=ventana)
+                return
+            try:
+                abrir_documento(ruta, "Factura / comprobante")
+            except Exception as error:
+                messagebox.showerror("Documento", str(error), parent=ventana)
+
+        tabla.bind("<Double-1>", lambda _e: _ver_documento_propuesta())
 
         def _cargar_propuestas():
             """Lanza el cálculo en un HILO y pinta cuando termina.
@@ -4382,14 +4747,22 @@ class ModuloBancoApp:
             self._dias_desfase = dias
             movimientos = [{"id": m.get("id") or i + 1, "banco": banco.get("banco", ""),
                             "cuenta": banco.get("cuenta", ""),
+                            "moneda": banco.get("moneda", ""),
                             "fecha": m.get("fecha"), "descripcion": m.get("descripcion"),
-                            "monto": m.get("monto"), "pagina": m.get("pagina")}
+                            "monto": m.get("monto"), "pagina": m.get("pagina"),
+                            "referencia": m.get("referencia") or m.get("operacion") or ""}
                            for i, m in enumerate(movs)]
             # 📅 El período se lee del combo AQUÍ (hilo principal) y se pasa al hilo.
             try:
                 _desde_h, _hasta_h = self._periodo_de_conciliacion()
             except Exception:
                 _desde_h = _hasta_h = None
+
+            # 🏦 Comisión interbancaria configurada (se lee en el hilo principal).
+            try:
+                _comision = float(cargar_comision_interbancaria())
+            except Exception:
+                _comision = 0.0
 
             estado_ventana["animando"] = True
             _pulso()
@@ -4399,7 +4772,8 @@ class ModuloBancoApp:
                     estado["asientos"] = self._asientos_para_conciliar(
                         banco, _desde_h, _hasta_h)
                     estado["propuestas"] = ci.proponer(
-                        movimientos, estado["asientos"], ventana_dias=dias)
+                        movimientos, estado["asientos"], ventana_dias=dias,
+                        comision=_comision)
                 except Exception as error:
                     estado["error"] = str(error)
 
@@ -4465,9 +4839,10 @@ class ModuloBancoApp:
                           if (str(p.get("id_asiento")), str(p.get("fecha_banco")),
                               round(float(p.get("importe_banco") or 0), 2))
                           not in estado_ventana["aplicadas"]]
-            # ⚡ COINCIDENCIA 100 % (importe exacto + un único candidato): se concilia
-            #    sola, como pide el usuario. Queda registrada con origen_decision
-            #    = 'auto' en la auditoría, así se distingue de lo aprobado a mano y
+            # ⚡ SOLO el caso seguro se concilia solo: MISMA FECHA, MISMO IMPORTE y
+            #    ese importe no se repite del otro lado dentro de los días de
+            #    desfase (o el N° de operación coincide). El resto se propone.
+            #    Queda registrado con origen_decision = 'auto' en la auditoría y
             #    se puede revertir desde 🕘 Historial. La casilla lo desactiva.
             aplicadas_auto = 0
             try:
@@ -4478,6 +4853,8 @@ class ModuloBancoApp:
                 for p in list(propuestas):
                     try:
                         if float(p.get("confianza") or 0) < 100:
+                            continue
+                        if str(p.get("estado") or "") != "CONCILIADO EXACTO":
                             continue
                         if self._aplicar_conciliacion_inteligente(banco, p, "APROBADO",
                                                                   origen="auto"):
@@ -4496,8 +4873,8 @@ class ModuloBancoApp:
             estado_ventana["propuestas"] = propuestas
             try:
                 mensaje_final[0] = (
-                    ("✅ %d conciliada(s) automáticamente (100%%) · %d para revisar"
-                     % (aplicadas_auto, len(propuestas))) if aplicadas_auto else
+                    ("✅ %d conciliada(s) automáticamente (mismo día y monto único) · "
+                     "%d para revisar" % (aplicadas_auto, len(propuestas))) if aplicadas_auto else
                     ("✅ %d propuesta(s) para revisar y aprobar" % len(propuestas)))
             except Exception:
                 pass
@@ -4529,7 +4906,8 @@ class ModuloBancoApp:
                 tabla.insert("", "end", iid=str(indice + 1), values=(
                     str(p["fecha_banco"])[:10], str(p["descripcion_banco"])[:55],
                     formatear_monto(p["importe_banco"]), str(p["fecha_contable"])[:10],
-                    str(p["descripcion_contable"])[:55],
+                    str(p.get("documento_contable") or ""),
+                    str(p["descripcion_contable"])[:50],
                     formatear_monto(p["importe_contable"]), p["dias_desfase"],
                     p["estado"] if not p.get("rivales")
                     else "%s · %d candidatos" % (p["estado"], p.get("candidatos") or 2),
@@ -4658,6 +5036,9 @@ class ModuloBancoApp:
         ctk.CTkButton(pie, text="🔎 Candidatos", width=132, fg_color="#5b2c6f",
                       hover_color="#3d1c4a",
                       command=_ver_candidatos).pack(side="left", padx=6)
+        ctk.CTkButton(pie, text="📄 Ver documento", width=150, fg_color="#34495e",
+                      hover_color="#2c3e50",
+                      command=_ver_documento_propuesta).pack(side="left", padx=6)
         ctk.CTkButton(pie, text="🔄 Recalcular", width=140, fg_color="#1f538d",
                       hover_color="#163b65", command=_cargar_propuestas).pack(side="left", padx=6)
         ctk.CTkButton(pie, text="📊 Reporte", width=130, fg_color="#b9770e",
@@ -5805,7 +6186,7 @@ class ModuloBancoApp:
         como «faltante» — por eso listaba las 138 líneas. Ahora se usa la MISMA
         lista que el aviso naranja de la pestaña.
         """
-        filas_tabla = list(getattr(self, "filas_conciliacion", None) or [])
+        filas_tabla = list(getattr(self, "_filas_conc_full", None) or getattr(self, "filas_conciliacion", None) or [])
         if not filas_tabla:
             messagebox.showinfo(
                 "Faltantes",
@@ -6039,8 +6420,8 @@ class ModuloBancoApp:
                             continue
                         c.execute("""INSERT INTO conciliacion_bancaria
                             (banco, cuenta, fecha, descripcion, monto, tipo, origen,
-                             estado, fecha_conciliacion)
-                            VALUES (%s,%s,%s,%s,%s,%s,'manual','conciliado',%s)""",
+                             tabla, estado, fecha_conciliacion)
+                            VALUES (%s,%s,%s,%s,%s,%s,'manual','estado_cuenta','conciliado',%s)""",
                                   (banco.get("banco", ""), banco.get("cuenta", ""),
                                    str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
                                    monto, "ingreso" if monto > 0 else "egreso",
@@ -6187,7 +6568,7 @@ class ModuloBancoApp:
                         c.execute("""INSERT INTO conciliacion_bancaria
                             (banco, cuenta, fecha, descripcion, monto, tipo, origen,
                              tabla, estado, fecha_conciliacion)
-                            VALUES (%s,%s,%s,%s,%s,%s,'manual','sin_factura','conciliado',%s)""",
+                            VALUES (%s,%s,%s,%s,%s,%s,'manual','estado_cuenta','conciliado',%s)""",
                                   (banco.get("banco", ""), banco.get("cuenta", ""),
                                    str(m.get("fecha") or ""), str(m.get("descripcion") or ""),
                                    monto, "ingreso" if monto > 0 else "egreso",
@@ -6605,10 +6986,29 @@ class ModuloBancoApp:
                         if self._clave_ignorado("sistema", "pagos_comprobantes", f[0], f[1],
                                                 -abs(float(f[2] or 0)), f[3]) in ign_sistema:
                             continue
-                        c.execute("""SELECT id FROM conciliacion_bancaria
-                                     WHERE origen='s:pagos_comprobantes' AND id_movimiento=%s""",
-                                  (f[0],))
-                        if c.fetchone():
+                        c.execute("""SELECT id, COALESCE(estado,''), COALESCE(fecha,''),
+                                            COALESCE(monto,0), COALESCE(descripcion,''),
+                                            COALESCE(cuenta,'')
+                                     FROM conciliacion_bancaria
+                                     WHERE origen='s:pagos_comprobantes' AND id_movimiento=%s
+                                     ORDER BY id DESC LIMIT 1""", (f[0],))
+                        _fila_bco = c.fetchone()
+                        if _fila_bco:
+                            # 🔄 El pago cambió en Compras (monto, fecha, cuenta):
+                            #    se actualiza su asiento en el banco mientras siga
+                            #    pendiente. Antes se quedaba con el monto viejo.
+                            _monto_bco = -abs(float(f[2] or 0))
+                            if (str(_fila_bco[1] or "").lower() != "conciliado"
+                                    and (str(_fila_bco[2] or "") != str(f[1] or "")
+                                         or abs(float(_fila_bco[3] or 0) - _monto_bco) >= 0.005
+                                         or str(_fila_bco[4] or "") != str(f[3] or "")
+                                         or str(_fila_bco[5] or "") != str(cuenta or ""))):
+                                c.execute("""UPDATE conciliacion_bancaria
+                                             SET fecha=%s, descripcion=%s, monto=%s,
+                                                 cuenta=%s
+                                             WHERE id=%s""",
+                                          (f[1], f[3], _monto_bco, cuenta, _fila_bco[0]))
+                                self._cache_asientos = None
                             continue
                         c.execute("""INSERT INTO conciliacion_bancaria
                             (banco, cuenta, fecha, descripcion, monto, tipo, origen,
@@ -6637,10 +7037,26 @@ class ModuloBancoApp:
                             if self._clave_ignorado("sistema", "pagos_clientes", f[0], f[1],
                                                     abs(float(f[2] or 0)), f[3]) in ign_sistema:
                                 continue
-                            c2.execute("""SELECT id FROM conciliacion_bancaria
-                                          WHERE origen='s:pagos_clientes' AND id_movimiento=%s""",
-                                       (f[0],))
-                            if c2.fetchone():
+                            c2.execute("""SELECT id, COALESCE(estado,''), COALESCE(fecha,''),
+                                                 COALESCE(monto,0), COALESCE(descripcion,''),
+                                                 COALESCE(cuenta,'')
+                                          FROM conciliacion_bancaria
+                                          WHERE origen='s:pagos_clientes' AND id_movimiento=%s
+                                          ORDER BY id DESC LIMIT 1""", (f[0],))
+                            _fila_cob = c2.fetchone()
+                            if _fila_cob:
+                                _monto_cob = abs(float(f[2] or 0))
+                                if (str(_fila_cob[1] or "").lower() != "conciliado"
+                                        and (str(_fila_cob[2] or "") != str(f[1] or "")
+                                             or abs(float(_fila_cob[3] or 0) - _monto_cob) >= 0.005
+                                             or str(_fila_cob[4] or "") != str(f[3] or "")
+                                             or str(_fila_cob[5] or "") != str(cuenta or ""))):
+                                    c2.execute("""UPDATE conciliacion_bancaria
+                                                  SET fecha=%s, descripcion=%s, monto=%s,
+                                                      cuenta=%s
+                                                  WHERE id=%s""",
+                                               (f[1], f[3], _monto_cob, cuenta, _fila_cob[0]))
+                                    self._cache_asientos = None
                                 continue
                             c2.execute("""INSERT INTO conciliacion_bancaria
                                 (banco, cuenta, fecha, descripcion, monto, tipo, origen,
@@ -6681,10 +7097,24 @@ class ModuloBancoApp:
                                                         f[1], -abs(float(f[3] or 0)),
                                                         f[2]) in ign_sistema:
                                     continue
-                                c3.execute("""SELECT id FROM conciliacion_bancaria
+                                c3.execute("""SELECT id, COALESCE(estado,''), COALESCE(fecha,''),
+                                                     COALESCE(monto,0), COALESCE(descripcion,'')
+                                              FROM conciliacion_bancaria
                                               WHERE origen='s:facturas_recibidas'
-                                                AND id_movimiento=%s""", (f[0],))
-                                if c3.fetchone():
+                                                AND id_movimiento=%s
+                                              ORDER BY id DESC LIMIT 1""", (f[0],))
+                                _fila_grifo = c3.fetchone()
+                                if _fila_grifo:
+                                    _monto_grifo = -abs(float(f[3] or 0))
+                                    if (str(_fila_grifo[1] or "").lower() != "conciliado"
+                                            and (str(_fila_grifo[2] or "") != str(f[1] or "")
+                                                 or abs(float(_fila_grifo[3] or 0) - _monto_grifo) >= 0.005
+                                                 or str(_fila_grifo[4] or "") != str(f[2] or ""))):
+                                        c3.execute("""UPDATE conciliacion_bancaria
+                                                      SET fecha=%s, descripcion=%s, monto=%s
+                                                      WHERE id=%s""",
+                                                   (f[1], f[2], _monto_grifo, _fila_grifo[0]))
+                                        self._cache_asientos = None
                                     continue
                                 c3.execute("""INSERT INTO conciliacion_bancaria
                                     (banco, cuenta, fecha, descripcion, monto, tipo, origen,
@@ -6703,22 +7133,76 @@ class ModuloBancoApp:
                 # 🚫 Se excluyen los YA conciliados (por la vía clásica o por el
                 #    motor) para que no se vuelvan a proponer y se puedan cruzar
                 #    dos veces con la misma línea del estado de cuenta.
-                c.execute("""SELECT id, fecha, descripcion, monto
-                             FROM conciliacion_bancaria
-                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
-                               AND COALESCE(estado,'') <> 'conciliado'
-                               AND id NOT IN (
-                                   SELECT id_asiento FROM conciliacion_auditoria
-                                   WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
-                                     AND estado = 'APROBADO'
-                                     AND COALESCE(activo, TRUE) = TRUE
-                                     AND id_asiento IS NOT NULL)
-                             ORDER BY fecha""", (nombre_banco, nombre_banco))
+                # 🏦 Se trae también la CUENTA, el N° de operación y el N° de
+                #    documento (factura): el motor usa la cuenta y la operación,
+                #    y la ventana muestra la factura para poder validarla en
+                #    Compras. Se leen del pago/cobro/transferencia de origen.
+                _sql_asientos = """SELECT b.id, b.fecha, b.descripcion, b.monto,
+                                          COALESCE(b.cuenta,''),
+                                          COALESCE(b.numero_operacion,''),
+                                          COALESCE(pc.numero_operacion,
+                                                   pcl.numero_operacion,
+                                                   tx.referencia, ''),
+                                          COALESCE(fr.numero_documento,
+                                                   fe.numero_documento, ''),
+                                          COALESCE(b.origen, ''),
+                                          COALESCE(b.id_movimiento, 0),
+                                          COALESCE(fr.id, 0),
+                                          COALESCE(fe.id, 0)
+                                   FROM conciliacion_bancaria b
+                                   LEFT JOIN pagos_comprobantes pc
+                                          ON b.origen = 's:pagos_comprobantes'
+                                         AND pc.id = b.id_movimiento
+                                   LEFT JOIN facturas_recibidas fr
+                                          ON fr.id = pc.id_factura
+                                   LEFT JOIN pagos_clientes pcl
+                                          ON b.origen = 's:pagos_clientes'
+                                         AND pcl.id = b.id_movimiento
+                                   LEFT JOIN facturas_emitidas fe
+                                          ON fe.id = pcl.id_factura
+                                   LEFT JOIN transferencias_bancarias tx
+                                          ON b.origen = 's:transferencias_bancarias'
+                                         AND tx.id = b.id_movimiento
+                                   WHERE UPPER(COALESCE(b.banco,'')) = UPPER(%s)
+                                     AND COALESCE(b.estado,'') <> 'conciliado'
+                                     AND b.id NOT IN (
+                                         SELECT id_asiento FROM conciliacion_auditoria
+                                         WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                           AND estado = 'APROBADO'
+                                           AND COALESCE(activo, TRUE) = TRUE
+                                           AND id_asiento IS NOT NULL)
+                                   ORDER BY b.fecha"""
+                try:
+                    c.execute(_sql_asientos, (nombre_banco, nombre_banco))
+                except Exception:
+                    # Base anterior sin la columna numero_operacion
+                    conn.rollback()
+                    c.execute("""SELECT b.id, b.fecha, b.descripcion, b.monto,
+                                        COALESCE(b.cuenta,''), '', '', '',
+                                        COALESCE(b.origen,''), COALESCE(b.id_movimiento,0),
+                                        0, 0
+                                 FROM conciliacion_bancaria b
+                                 WHERE UPPER(COALESCE(b.banco,'')) = UPPER(%s)
+                                   AND COALESCE(b.estado,'') <> 'conciliado'
+                                   AND b.id NOT IN (
+                                       SELECT id_asiento FROM conciliacion_auditoria
+                                       WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                         AND estado = 'APROBADO'
+                                         AND COALESCE(activo, TRUE) = TRUE
+                                         AND id_asiento IS NOT NULL)
+                                 ORDER BY b.fecha""", (nombre_banco, nombre_banco))
                 for f in c.fetchall():
                     asientos.append({"id": f[0], "id_asiento": f[0],
                                      "tabla": "conciliacion_bancaria",
                                      "fecha": f[1], "descripcion": f[2], "monto": f[3],
-                                     "banco": nombre_banco})
+                                     "banco": nombre_banco,
+                                     "cuenta": f[4] or "",
+                                     "referencia": f[6] or f[5] or "",
+                                     "documento": f[7] or "",
+                                     "origen": f[8] or "",
+                                     "id_movimiento": f[9] or 0,
+                                     "id_gasto_compras": f[10] or 0,
+                                     "id_factura": f[11] or 0})
         except Exception as error:
             print("[Conciliación] asientos:", error)
         finally:
@@ -6750,6 +7234,36 @@ class ModuloBancoApp:
                                  SET estado='conciliado', fecha_conciliacion=%s
                                  WHERE id=%s""",
                               (datetime.now().strftime("%d/%m/%Y"), _id_int))
+                    # 🏦 Si se aprobó con DIFERENCIA (comisión del banco), la
+                    #    línea del estado de cuenta también queda marcada como
+                    #    conciliada para el cruce clásico (tabla y Resumen).
+                    #    Sin esto, el Resumen seguía mostrando la línea como
+                    #    «faltante» aunque el pago ya estuviera conciliado.
+                    try:
+                        if float(propuesta.get("diferencia") or 0) > 0.005:
+                            _fecha_banco = fecha_para_mostrar(propuesta.get("fecha_banco", ""))
+                            _signo = 1 if str(propuesta.get("sentido") or "") == "ingreso" else -1
+                            _monto_banco = round(
+                                float(propuesta.get("importe_banco") or 0) * _signo, 2)
+                            c.execute("""SELECT COUNT(*) FROM conciliacion_bancaria
+                                         WHERE banco=%s AND origen='e'
+                                           AND COALESCE(fecha,'')=%s
+                                           AND ABS(COALESCE(monto,0)-%s) < 0.005""",
+                                      (propuesta.get("banco", ""), _fecha_banco, _monto_banco))
+                            if c.fetchone()[0] == 0:
+                                c.execute("""INSERT INTO conciliacion_bancaria
+                                    (banco, cuenta, fecha, descripcion, monto, tipo, origen,
+                                     id_movimiento, estado, fecha_conciliacion)
+                                    VALUES (%s,%s,%s,%s,%s,%s,'e',0,'conciliado',%s)""",
+                                    (propuesta.get("banco", ""),
+                                     propuesta.get("cuenta", "") or "",
+                                     _fecha_banco,
+                                     propuesta.get("descripcion_banco", "") or "",
+                                     _monto_banco,
+                                     propuesta.get("sentido", "ingreso"),
+                                     datetime.now().strftime("%d/%m/%Y")))
+                    except Exception as _e_linea:
+                        print("[Conciliación] línea del banco con comisión:", _e_linea)
                 c.execute("""INSERT INTO conciliacion_auditoria
                     (id_asiento, banco, cuenta, fecha_contable, fecha_banco, dias_desfase,
                      descripcion_contable, descripcion_banco, importe_contable, importe_banco,
@@ -8003,10 +8517,14 @@ class ModuloBancoApp:
         except Exception as error:
             print("[Conciliación] pendientes próximo mes:", error)
         self._filas_conc_full = list(filas)
-        self.filas_conciliacion = filas
+        # 📄 La tabla muestra SOLO asientos del sistema: las líneas del estado de
+        #    cuenta que no tienen asiento se ven en «Faltantes / Sobrantes».
+        self.filas_conciliacion = [f for f in filas
+                                   if f.get("origen") != "estado_cuenta"]
         self.refrescar_tree()
         # ⚠️ Aviso: movimientos del estado de cuenta que NO están en el sistema
-        faltantes = [f for f in filas if f.get("origen") == "estado_cuenta"
+        faltantes = [f for f in self._filas_conc_full
+                     if f.get("origen") == "estado_cuenta"
                      and f.get("estado") != "conciliado"]
         self._faltantes_estado_cuenta = faltantes
         # 📅 Solo se puede hablar de SOBRANTES en meses con estado de cuenta cargado:
@@ -8164,7 +8682,8 @@ class ModuloBancoApp:
                                COALESCE(categoria, ''), COALESCE(subcategoria, ''),
                                COALESCE(evento, ''), COALESCE(chofer, ''),
                                COALESCE(comision, 0), COALESCE(interbancario, FALSE),
-                               COALESCE(es_cruzada, FALSE), COALESCE(numero_operacion, '')
+                               COALESCE(es_cruzada, FALSE), COALESCE(numero_operacion, ''),
+                               COALESCE(tabla, '')
                         FROM conciliacion_bancaria
                         WHERE origen = 'manual'
                           AND UPPER(COALESCE(banco,'')) = UPPER(%s)
@@ -8183,14 +8702,16 @@ class ModuloBancoApp:
                           AND COALESCE(cuenta,'') = %s
                         ORDER BY id
                     """, (banco.get("banco", ""), banco.get("cuenta", "") or ""))
-                    filas = [tuple(f) + ("", "", "", "", 0, False, False, "") for f in c.fetchall()]
+                    filas = [tuple(f) + ("", "", "", "", 0, False, False, "", "") for f in c.fetchall()]
 
                 for (idp, fecha, desc, monto, tipo, estado, categoria, subcategoria,
-                     evento, chofer, comision, interbancario, es_cruzada, num_oper) in filas:
+                     evento, chofer, comision, interbancario, es_cruzada, num_oper,
+                     tabla_real) in filas:
                     movs.append({
                         "id": idp, "fecha": fecha or "", "descripcion": desc or "",
                         "monto": float(monto or 0), "tipo": tipo or "ingreso",
-                        "tabla": "conciliacion", "estado": estado or "pendiente",
+                        "tabla": (tabla_real or "conciliacion"),
+                        "estado": estado or "pendiente",
                         "categoria": categoria or "", "subcategoria": subcategoria or "",
                         "evento": evento or "", "chofer": chofer or "",
                         "comision": float(comision or 0), "interbancario": bool(interbancario),
@@ -8228,17 +8749,21 @@ class ModuloBancoApp:
             if _mes and _mes not in _ok:
                 estado_txt = "⏳ Falta el estado de cuenta"
             else:
-                estado_txt = "⚠️ Sin conciliar (Sistema)"
+                estado_txt = "⚠️ No conciliado"
         else:
-            estado_txt = "📝 Manual / Pendiente"
+            estado_txt = "📝 No conciliado (manual)"
         if f.get("tipo") == "comision":
             tipo_txt = "Comisión interbancaria"
         elif f.get("tipo") == "transferencia":
             tipo_txt = "Transferencia (Ingreso)" if f["monto"] >= 0 else "Transferencia (Egreso)"
         else:
             tipo_txt = "Ingreso" if f["monto"] >= 0 else "Egreso"
-        origen_txt = {"sistema": "Sistema", "estado_cuenta": "Estado de Cuenta",
-                      "manual": "Manual"}.get(f.get("origen"), f.get("origen", ""))
+        # 📄 Los que se agregaron desde el estado de cuenta se identifican así.
+        if str(f.get("tabla") or "") == "estado_cuenta":
+            origen_txt = "Agregado del estado de cuenta"
+        else:
+            origen_txt = {"sistema": "Sistema", "estado_cuenta": "Estado de Cuenta",
+                          "manual": "Manual"}.get(f.get("origen"), f.get("origen", ""))
         saldo_txt = ""
         if f.get("saldo") is not None:
             saldo_txt = formatear_monto(f["saldo"])
@@ -10501,7 +11026,7 @@ class ModuloBancoApp:
 
         def guardar():
             try:
-                monto = float(ent_monto.get().strip())
+                monto = normalizar_monto(ent_monto.get())
             except ValueError:
                 messagebox.showerror("Error", "Monto inválido.", parent=v)
                 return

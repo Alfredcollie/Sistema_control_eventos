@@ -1,0 +1,57 @@
+{
+ "creado": "2026-11-23 11:45",
+ "banco": "BCP",
+ "cuenta": "194-7374220-0-69",
+ "grupos": [
+  {
+   "fecha": "2026-09-17",
+   "monto": 0.2,
+   "conservar": {
+    "id": 6
+   },
+   "asientos": [
+    {
+     "id": 6,
+     "fecha": "17/09/2026",
+     "monto": -0.2,
+     "origen": "manual",
+     "estado": "conciliado",
+     "descripcion": "Administrativos - Comisiones y Gastos Bancarios - Impuesto ITF"
+    },
+    {
+     "id": 138,
+     "fecha": "2026-09-17",
+     "monto": -0.2,
+     "origen": "manual",
+     "estado": "conciliado",
+     "descripcion": "IMPUESTO ITF INT - 0909"
+    }
+   ]
+  },
+  {
+   "fecha": "2026-09-24",
+   "monto": 0.1,
+   "conservar": {
+    "id": 8
+   },
+   "asientos": [
+    {
+     "id": 8,
+     "fecha": "24/09/2026",
+     "monto": -0.1,
+     "origen": "manual",
+     "estado": "conciliado",
+     "descripcion": "Administrativos - Comisiones y Gastos Bancarios - Impuesto ITF"
+    },
+    {
+     "id": 139,
+     "fecha": "2026-09-24",
+     "monto": -0.1,
+     "origen": "manual",
+     "estado": "conciliado",
+     "descripcion": "IMPUESTO ITF INT - 0909"
+    }
+   ]
+  }
+ ]
+}

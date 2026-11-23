@@ -636,12 +636,36 @@ def texto_de_comprobante(ruta):
         print("Aviso - OCR del comprobante:", e)
         return ""
 
+def comision_del_comprobante(texto):
+    """Comisión interbancaria impresa en el comprobante (0.0 si no hay).
+
+    Busca una línea con "comisión/comision" y toma el PRIMER importe que
+    aparece después de esa palabra (el OCR suele escribirla como
+    "COMISION 4.80" o "Comisión: S/ 4.80").
+    """
+    try:
+        for linea in str(texto or "").splitlines():
+            bajo = linea.lower()
+            pos = bajo.find("comis")
+            if pos < 0:
+                continue
+            for crudo in re.findall(r"\d[\d.,]*", linea[pos:]):
+                valor = _numero_peru(crudo)
+                if 0 < valor < 100000:
+                    return float(valor)
+    except Exception:
+        pass
+    return 0.0
+
+
 def datos_de_comprobante(ruta):
     """Extrae monto, fecha, N° de operación y N° de facturas del comprobante."""
     texto = texto_de_comprobante(ruta)
-    datos = {"monto": "", "fecha": "", "operacion": "", "facturas": [], "texto": texto}
+    datos = {"monto": "", "fecha": "", "operacion": "", "facturas": [], "texto": texto,
+             "comision": 0.0}
     if not texto.strip():
         return datos
+    datos["comision"] = comision_del_comprobante(texto)
     plano = " ".join(texto.split())
 
     monto = re.search(r"(?:S/|S/\.|PEN|IMPORTE|MONTO|TOTAL)\D{0,14}([0-9][0-9.,oO/|' ]{1,16})",
@@ -1350,20 +1374,61 @@ def _a_numero(texto):
         return 0.0
 
 
+def _a_numero_estricto(texto):
+    """Como _a_numero, pero lanza ValueError si el texto no es un número.
+
+    Acepta el formato elegido en la Configuración General: '1.000,00' o '1,000.00'.
+    """
+    limpio = str(texto if texto is not None else "").strip()
+    if not limpio:
+        return 0.0
+    for simbolo in ("S/.", "S/", "s/.", "s/", "\u00a0", " "):
+        limpio = limpio.replace(simbolo, "")
+    if not re.fullmatch(r"-?\d[\d.,]*", limpio):
+        raise ValueError("El texto no es un número: %r" % (texto,))
+    return desformatear_numero(limpio)
+
+
 def _normalizar_numero_busqueda(txt):
-    """Normaliza un monto escrito por el usuario: 'S/ 1,234.56' -> '1234.56'."""
+    """Normaliza un monto escrito por el usuario a formato 1234.56.
+
+    Acepta las dos costumbres: '1.234,56' y '1,234.56'. También acepta el monto
+    sin decimales escrito con separador de miles ('2.741' -> '2741'), que antes
+    se quedaba como '2.741' y no encontraba nada.
+    """
     t = re.sub(r"[^\d.,]", "", str(txt or ""))
     if not t:
         return ""
     if "," in t and "." in t:
-        t = t.replace(",", "")
+        if t.rfind(",") > t.rfind("."):      # 1.234,56
+            t = t.replace(".", "").replace(",", ".")
+        else:                                  # 1,234.56
+            t = t.replace(",", "")
     elif "," in t:
         partes = t.split(",")
-        if len(partes) == 2 and len(partes[-1]) == 2:
-            t = t.replace(",", ".")
+        if len(partes) == 2 and len(partes[-1]) == 3:
+            t = t.replace(",", "")             # 2,741 = dos mil setecientos
+        elif len(partes) == 2:
+            t = t.replace(",", ".")            # 2741,5 = decimal
         else:
             t = t.replace(",", "")
+    elif "." in t:
+        partes = t.split(".")
+        if len(partes) > 1 and all(len(p) == 3 for p in partes[1:]):
+            t = "".join(partes)                # 2.741 / 1.234.567
     return t
+
+
+def _redondear_detraccion(monto):
+    """Redondeo de la detracción al sol: 125,40 -> 125 · 125,51 -> 126.
+
+    El primer decimal manda: de 0,0 a 0,4 se queda en el entero; de 0,5 a 0,9
+    se sube a la unidad siguiente.
+    """
+    try:
+        return float(int(float(monto) + 0.5))
+    except Exception:
+        return 0.0
 
 
 def construir_condicion_busqueda_compras(filtro):
@@ -2776,7 +2841,7 @@ def _nombre_del_proveedor(texto, ruc=""):
 def formatear_numero_entrada(valor):
     """'1234.5' -> '1,234.50' o '1.234,50' según la Configuración General."""
     try:
-        numero = float(str(valor).replace(",", "").replace(" ", ""))
+        numero = desformatear_numero(valor)
     except Exception:
         return str(valor or "")
     try:
@@ -4022,7 +4087,7 @@ class FacturasRecibidasTab:
 
             # 🏢 Solo se aceptan facturas a nombre de la empresa configurada
             datos_txt = extraer_datos_de_texto(texto)
-            estado_destino, mensaje_destino = validar_destinatario(datos_txt, None, resultado.get("texto", ""))
+            estado_destino, mensaje_destino = validar_destinatario(datos_txt, None, texto)
             if estado_destino == "ajeno":
                 self.bloquear_autocompletado_ruc = False
                 return messagebox.showerror("Factura de otra empresa",
@@ -4098,9 +4163,9 @@ class FacturasRecibidasTab:
             # 💰 Se carga el TOTAL con IGV (como Flota): la base y el IGV salen solos.
             monto_total = 0.0
             if tot_m:
-                monto_total = float(tot_m.group(1).replace(",", ""))
+                monto_total = desformatear_numero(tot_m.group(1))
             elif sub_m:
-                monto_base = float(sub_m.group(1).replace(",", ""))
+                monto_base = desformatear_numero(sub_m.group(1))
                 if _documento_con_igv(self.combo_tipo.get()):
                     monto_total = monto_base * (1.105 if "10.5%" in self.combo_tipo.get() else 1.18)
                 else:
@@ -4595,9 +4660,18 @@ class FacturasRecibidasTab:
         self.lbl_titulo_det = ctk.CTkLabel(self.f_form, text="Detracción (%):", font=("Arial", 11, "bold"))
         self.lbl_titulo_det.pack(anchor="w", padx=10)
         self.ent_detraccion = ctk.CTkEntry(self.f_form)
-        self.ent_detraccion.pack(fill="x", padx=10, pady=(0, 8))
+        self.ent_detraccion.pack(fill="x", padx=10, pady=(0, 4))
         self.ent_detraccion.insert(0, "0")
         self.ent_detraccion.bind("<KeyRelease>", self.actualizar_totales)
+
+        # 🔢 Redondeo del NETO a pagar (opcional): 0,49 abajo · 0,50 arriba
+        self.var_redondeo_det = tk.BooleanVar(value=False)
+        self.chk_redondeo_det = ctk.CTkCheckBox(
+            self.f_form, text="Redondear neto a pagar (al sol)",
+            variable=self.var_redondeo_det, font=("Arial", 10, "bold"),
+            checkbox_width=18, checkbox_height=18,
+            command=self.actualizar_totales)
+        self.chk_redondeo_det.pack(anchor="w", padx=10, pady=(0, 8))
 
         # 🚚 DELIVERY: monto fuera de la factura que SÍ suma al débito
         f_del = ctk.CTkFrame(self.f_form, fg_color="transparent")
@@ -4645,7 +4719,7 @@ class FacturasRecibidasTab:
         f_busqueda = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent")
         f_busqueda.pack(fill="x", pady=(0, 5))
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
-        self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por N° Doc, proveedor, evento, fecha...")
+        self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, proveedor, evento, concepto o monto...")
         self.ent_buscar_facturas.pack(side="left", fill="x", expand=True)
         
         ctk.CTkLabel(f_busqueda, text="🗓️ Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
@@ -5062,7 +5136,7 @@ class FacturasRecibidasTab:
             subtotal, impuesto, total = 0.0, 0.0, 0.0
         # Neto a pagar = total del documento menos la detracción escrita
         try:
-            detraccion = total * (float(self.ent_detraccion.get() or 0) / 100.0)
+            detraccion = total * (_a_numero(self.ent_detraccion.get()) / 100.0)
         except Exception:
             detraccion = 0.0
         try:
@@ -5468,7 +5542,7 @@ class FacturasRecibidasTab:
         try:
             if not getattr(self, "var_delivery", None) or not self.var_delivery.get():
                 return 0.0
-            return float(str(self.ent_delivery.get()).strip().replace(",", "") or 0)
+            return _a_numero(self.ent_delivery.get())
         except Exception:
             return 0.0
 
@@ -5492,15 +5566,29 @@ class FacturasRecibidasTab:
             subtotal, igv, tot = self._montos_ingresados()
             ui_pct = _a_numero(self.ent_detraccion.get())
             delivery = self._delivery_tecleado()
+            try:
+                aplicar_redondeo = bool(getattr(self, "var_redondeo_det", None)
+                                        and self.var_redondeo_det.get())
+            except Exception:
+                aplicar_redondeo = False
+            try:
+                self.chk_redondeo_det.configure(
+                    state="normal" if (ui_pct > 0 and "Recibo" not in tipo) else "disabled")
+            except Exception:
+                pass
 
             if _documento_con_igv(tipo):
                 txt_igv = "10.5%" if "10.5%" in tipo else "18%"
                 det = tot * (ui_pct / 100.0)
+                neto = tot - det + delivery
+                if aplicar_redondeo and det:
+                    neto = _redondear_detraccion(neto)
+                    det = round(tot + delivery - neto, 2)
                 self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
                 self.lbl_impuesto.configure(text=f"IGV ({txt_igv}): {formatear_moneda(igv)}")
                 self.lbl_bruto.configure(text=f"Total con IGV: {formatear_moneda(tot)}")
                 self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}")
-                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(tot - det + delivery)}")
+                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(neto)}")
             elif "Recibo" in tipo:
                 ret = subtotal * (ui_pct / 100.0)
                 self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
@@ -5510,11 +5598,15 @@ class FacturasRecibidasTab:
                 self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(subtotal - ret + delivery)}")
             else:
                 det = tot * (ui_pct / 100.0)
+                neto = tot - det + delivery
+                if aplicar_redondeo and det:
+                    neto = _redondear_detraccion(neto)
+                    det = round(tot + delivery - neto, 2)
                 self.lbl_base.configure(text=f"Monto Base (Subtotal): {formatear_moneda(subtotal)}")
                 self.lbl_impuesto.configure(text=f"IGV (0%): {formatear_moneda(0)}")
                 self.lbl_bruto.configure(text=f"Total: {formatear_moneda(tot)}")
                 self.lbl_detraccion.configure(text=f"Detracción ({ui_pct:g}%): -{formatear_moneda(det)}")
-                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(tot - det + delivery)}")
+                self.lbl_total.configure(text=f"Neto a Pagar: {formatear_moneda(neto)}")
             try:
                 if delivery:
                     self.lbl_delivery.configure(text=f"Delivery (fuera de factura): +{formatear_moneda(delivery)}")
@@ -5625,9 +5717,9 @@ class FacturasRecibidasTab:
         categoria = self.combo_categoria.get().strip() or "GENERAL / NO ASIGNADO"
         
         try: 
-            subtotal = float(self.ent_subtotal.get() or 0)
-            dias = int(self.ent_dias.get().strip() or 0)
-            ui_pct = float(self.ent_detraccion.get() or 0)
+            subtotal = _a_numero_estricto(self.ent_subtotal.get())
+            dias = int(_a_numero_estricto(self.ent_dias.get().strip() or 0))
+            ui_pct = _a_numero_estricto(self.ent_detraccion.get())
         except ValueError: 
             return messagebox.showerror("Error", "Los montos deben ser numéricos.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             
@@ -5713,6 +5805,17 @@ class FacturasRecibidasTab:
         else:
             det_pct = ui_pct
             det_monto = tot_bruto * (det_pct / 100.0)
+
+        # 🔢 Redondeo opcional: el NETO a pagar queda en soles enteros y la
+        #    detracción se ajusta para que la cuenta cierre (total − det = neto).
+        try:
+            if det_monto and getattr(self, "var_redondeo_det", None) \
+                    and self.var_redondeo_det.get():
+                _delivery_red = self._delivery_tecleado()
+                _neto_red = _redondear_detraccion(tot_bruto - det_monto + _delivery_red)
+                det_monto = round(tot_bruto + _delivery_red - _neto_red, 2)
+        except Exception as e_red:
+            print("Aviso - redondeo del neto a pagar:", e_red)
 
         ruta_final = ""
         if self.ruta_archivo_temp:
@@ -6783,7 +6886,7 @@ class FacturasRecibidasTab:
 
         def _num(e, defecto=0.0):
             try:
-                return float(str(e.get()).strip().replace(",", "") or defecto)
+                return _a_numero(e.get())
             except Exception:
                 return defecto
 
@@ -7168,7 +7271,7 @@ class FacturasRecibidasTab:
         
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT tipo_documento, numero_documento, fecha, dias_credito, subtotal, det_porcentaje, descripcion, categoria FROM facturas_recibidas WHERE id = %s", (id_doc,))
+            cursor.execute("SELECT tipo_documento, numero_documento, fecha, dias_credito, subtotal, det_porcentaje, descripcion, categoria, COALESCE(det_monto, 0) FROM facturas_recibidas WHERE id = %s", (id_doc,))
             datos = cursor.fetchone()
         except Exception as e: 
             return messagebox.showerror("Error", str(e), parent=ventana_para_mensaje(getattr(self, "main_root", None)))
@@ -7178,10 +7281,12 @@ class FacturasRecibidasTab:
         if not datos: return
         
         try:
-            tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db, desc_db, cat_db = datos
+            (tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db, desc_db, cat_db,
+             det_monto_db) = datos
         except Exception:
-            tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db = datos
+            tipo_db, nro_db, fecha_db, dias_db, sub_db, det_pct_db = datos[:6]
             desc_db, cat_db = "", ""
+            det_monto_db = 0.0
 
         v_edit = ctk.CTkToplevel(self.main_root)
         v_edit.title("Gestión de Documento Recibido")
@@ -7254,16 +7359,35 @@ class FacturasRecibidasTab:
         
         ctk.CTkLabel(f_scroll, text="Detracción/Retención (%):", font=("Arial", 11, "bold")).pack(anchor="w")
         ent_det = ctk.CTkEntry(f_scroll)
-        ent_det.pack(fill="x", pady=(0, 8))
+        ent_det.pack(fill="x", pady=(0, 4))
         ent_det.insert(0, str(det_pct_db if det_pct_db else 0.0))
+
+        # 🔢 ¿El neto guardado quedó redondeado? Se detecta porque la detracción
+        #    guardada no coincide con el porcentaje exacto (se ajustó para cerrar).
+        try:
+            _sub_edit = float(sub_db or 0)
+            if _documento_con_igv(tipo_db):
+                _tot_edit = _sub_edit * (1.105 if "10.5%" in tipo_db else 1.18)
+            else:
+                _tot_edit = _sub_edit
+            _det_raw_edit = _tot_edit * (float(det_pct_db or 0) / 100.0)
+            _ya_redondeado = (float(det_monto_db or 0) > 0
+                              and abs(float(det_monto_db) - _det_raw_edit) >= 0.005)
+        except Exception:
+            _ya_redondeado = False
+        var_red_edit = tk.BooleanVar(value=_ya_redondeado)
+        ctk.CTkCheckBox(f_scroll, text="Redondear neto a pagar (al sol)",
+                        variable=var_red_edit, font=("Arial", 10, "bold"),
+                        checkbox_width=18, checkbox_height=18).pack(
+            anchor="w", pady=(0, 8))
 
         def guardar_cambios():
             try:
                 nro = ent_nro.get().strip()
                 fec = ent_fec.get().strip()
-                dias = int(ent_dias.get().strip() or 0)
-                sub = _a_numero(ent_sub.get() or 0)
-                det_pct = float(ent_det.get().strip() or 0)
+                dias = int(_a_numero_estricto(ent_dias.get().strip() or 0))
+                sub = _a_numero_estricto(ent_sub.get() or 0)
+                det_pct = _a_numero_estricto(ent_det.get())
                 concepto_edit = ent_concepto.get().strip()
                 categoria_edit = cmb_cat_edit.get().strip() or "GENERAL / NO ASIGNADO"
             except ValueError: 
@@ -7287,6 +7411,11 @@ class FacturasRecibidasTab:
                 imp = 0.0
                 tot_bruto = sub
                 det_monto = tot_bruto * (det_pct / 100.0)
+
+            # 🔢 Redondeo opcional: neto en soles enteros (la detracción se ajusta)
+            if det_monto and var_red_edit.get():
+                _neto_edit = tot_bruto - det_monto
+                det_monto = round(tot_bruto - _redondear_detraccion(_neto_edit), 2)
                 
             conn_upd = obtener_conexion_segura(parent=v_edit)
             if not conn_upd: return
@@ -7403,7 +7532,7 @@ class CuentasPorPagarTab:
         f_busqueda.pack(fill="x", padx=15, pady=(0, 5))
         
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
-        self.ent_buscar_pagos = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, proveedor, evento, concepto...")
+        self.ent_buscar_pagos = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, proveedor, evento, concepto o monto...")
         self.ent_buscar_pagos.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(f_busqueda, text="🗓️ Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
         self.combo_mes = ctk.CTkComboBox(f_busqueda, values=construir_valores_mes(), width=150,
@@ -8109,7 +8238,7 @@ class CuentasPorPagarTab:
 
         def actualizar_calc(event=None):
             try:
-                _monto = float(ent_monto.get().strip() or 0)
+                _monto = _a_numero(ent_monto.get())
             except ValueError:
                 _monto = 0.0
             _diff = round(_monto - _total_pendiente, 2)
@@ -8348,7 +8477,7 @@ class CuentasPorPagarTab:
             if not var_inter_cruz.get():
                 return 0.0
             try:
-                return float(parsear_monto_texto(ent_com_cruz.get()) or 0)
+                return _a_numero(ent_com_cruz.get())
             except Exception:
                 return 0.0
 
@@ -8714,10 +8843,14 @@ class CuentasPorPagarTab:
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
 
             # 🚀 OPTIMIZACIÓN: una sola consulta agregada para todos los pagos de la página (elimina el N+1)
+            # ⚠️ Se suman TODOS los pagos: antes el WHERE archivo_ruta != '' hacía
+            #    que un pago sin comprobante adjunto (ej. el efectivo de caja chica)
+            #    no contara y la factura quedara como pagada en parte.
             cursor.execute("""
-                SELECT id_factura, SUM(monto_pagado), COUNT(archivo_ruta)
+                SELECT id_factura,
+                       SUM(monto_pagado),
+                       COUNT(NULLIF(TRIM(COALESCE(archivo_ruta, '')), ''))
                 FROM pagos_comprobantes
-                WHERE archivo_ruta != ''
                 GROUP BY id_factura
             """)
             pagos_lookup = {}
@@ -8947,12 +9080,19 @@ class CuentasPorPagarTab:
             except Exception:
                 _monto = 0.0
             try:
-                al_terminar(_pags[0], _num, _fecha, _monto)
+                _comision = comision_del_comprobante(_texto_ocr)
+            except Exception:
+                _comision = 0.0
+            try:
+                al_terminar(_pags[0], _num, _fecha, _monto, _comision)
             except TypeError:
                 try:
-                    al_terminar(_pags[0], _num, _fecha)
+                    al_terminar(_pags[0], _num, _fecha, _monto)
                 except TypeError:
-                    al_terminar(_pags[0])
+                    try:
+                        al_terminar(_pags[0], _num, _fecha)
+                    except TypeError:
+                        al_terminar(_pags[0])
             # 🪟 La ventana del módulo se queda AL FRENTE tras el escaneo
             _traer_ventana_al_frente()
             return _pags[0]
@@ -9046,7 +9186,7 @@ class CuentasPorPagarTab:
             try:
                 if not var_comision.get():
                     return 0.0
-                return max(0.0, float(str(ent_comision.get()).strip().replace(",", "") or 0))
+                return max(0.0, _a_numero(ent_comision.get()))
             except Exception:
                 return 0.0
 
@@ -9070,7 +9210,7 @@ class CuentasPorPagarTab:
 
         def actualizar_calc(event=None):
             try:
-                _monto = float(ent_monto.get().strip() or 0)
+                _monto = _a_numero(ent_monto.get())
             except ValueError:
                 _monto = 0.0
             _total = _total_a_pagar()
@@ -9104,12 +9244,26 @@ class CuentasPorPagarTab:
                       command=lambda: CalendarioNativo(v_pago, ent_fecha)).pack(side="left", padx=(5, 0))
         # 🏦 Cuenta bancaria de la que salió el dinero (la usa el módulo de Bancos)
         ctk.CTkLabel(f_form, text="🏦 Pagado desde (cuenta bancaria):", font=("Arial", 11, "bold")).pack(anchor="w")
-        etiquetas_cuentas = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else [])
+        etiquetas_cuentas = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else []) + ["Efectivo / Caja Chica"]
         cmb_cuenta_pago = ctk.CTkComboBox(f_form, values=etiquetas_cuentas, state="readonly")
         cmb_cuenta_pago.pack(fill="x", pady=(0, 2))
         # 🏦 Se selecciona automáticamente la PRIMERA cuenta bancaria configurada
         cmb_cuenta_pago.set(etiquetas_cuentas[1] if len(etiquetas_cuentas) > 1
                             else etiquetas_cuentas[0])
+
+        def _sin_comision_si_efectivo(_valor=None):
+            """En efectivo no hay comisión interbancaria: se apaga sola."""
+            try:
+                _cuenta_txt = str(cmb_cuenta_pago.get() or "").upper()
+                if "CAJA" in _cuenta_txt or "EFECTIVO" in _cuenta_txt:
+                    var_comision.set(False)
+                    _aplicar_comision()
+            except Exception:
+                pass
+        try:
+            cmb_cuenta_pago.configure(command=_sin_comision_si_efectivo)
+        except Exception:
+            pass
         ctk.CTkLabel(f_form, text="Sirve para que el saldo de esa cuenta cuadre en el módulo de Bancos.",
                      font=("Arial", 9, "italic"), text_color="gray", wraplength=340,
                      justify="left").pack(anchor="w", pady=(0, 10))
@@ -9235,7 +9389,8 @@ class CuentasPorPagarTab:
                     ent_monto.insert(0, formatear_numero_entrada(float(saldo_actual)))
                 except Exception as e_monto:
                     print("Aviso - monto del pago total:", e_monto)
-            def al_terminar(ruta, numero_operacion="", fecha_leida="", monto_leido=0.0):
+            def al_terminar(ruta, numero_operacion="", fecha_leida="", monto_leido=0.0,
+                            comision_leida=0.0):
                 if not ruta:
                     return
                 self._soporte_escaneado = ruta
@@ -9285,6 +9440,31 @@ class CuentasPorPagarTab:
                 except Exception as e_mo:
                     print("Aviso - monto del comprobante:", e_mo)
                 try:
+                    # 🏦 Comisión interbancaria leída del comprobante: se marca el
+                    #    check y se coloca el monto. Si el pago era por el saldo
+                    #    completo, el monto pasa a ser saldo + comisión.
+                    _com_leida = float(comision_leida or 0)
+                except Exception:
+                    _com_leida = 0.0
+                if _com_leida > 0:
+                    try:
+                        var_comision.set(True)
+                        ent_comision.delete(0, "end")
+                        ent_comision.insert(0, formatear_numero_entrada(_com_leida))
+                        _monto_actual = (_a_numero(ent_monto.get())
+                                         if ent_monto.get().strip() else 0.0)
+                        if (not ent_monto.get().strip()
+                                or abs(_monto_actual - saldo_actual) < 0.01
+                                or abs(_monto_actual - (saldo_actual + _com_leida)) < 0.01):
+                            ent_monto.delete(0, "end")
+                            ent_monto.insert(0, formatear_numero_entrada(
+                                saldo_actual + _com_leida))
+                        actualizar_calc()
+                        texto_aviso += ("   ·   Comisión detectada: "
+                                        + formatear_moneda(_com_leida))
+                    except Exception as e_com:
+                        print("Aviso - comisión del comprobante:", e_com)
+                try:
                     lbl_soporte.configure(text=texto_aviso, text_color="#1e8449")
                 except Exception:
                     pass
@@ -9296,6 +9476,8 @@ class CuentasPorPagarTab:
                 return
             self._soporte_escaneado = r
             # 📅 Se completan los datos leídos del archivo (fecha, operación, monto)
+            _d_arch = {}
+            _texto = ""
             try:
                 _d_arch = datos_de_comprobante(r) or {}
                 if _d_arch.get("fecha"):
@@ -9350,6 +9532,34 @@ class CuentasPorPagarTab:
                     actualizar_calc()
                 except Exception:
                     pass
+            try:
+                # 🏦 Comisión interbancaria leída del archivo: se marca el check
+                #    y, si el pago era por el saldo, el monto pasa a saldo + comisión.
+                _comision = 0.0
+                try:
+                    _comision = float((_d_arch or {}).get("comision") or 0)
+                except Exception:
+                    _comision = 0.0
+                if not _comision and str(_texto or "").strip():
+                    _comision = comision_del_comprobante(_texto)
+            except Exception:
+                _comision = 0.0
+            if _comision > 0:
+                try:
+                    var_comision.set(True)
+                    ent_comision.delete(0, "end")
+                    ent_comision.insert(0, formatear_numero_entrada(_comision))
+                    _monto_actual = (_a_numero(ent_monto.get())
+                                     if ent_monto.get().strip() else 0.0)
+                    if (not ent_monto.get().strip()
+                            or abs(_monto_actual - saldo_actual) < 0.01
+                            or abs(_monto_actual - (saldo_actual + _comision)) < 0.01):
+                        ent_monto.delete(0, "end")
+                        ent_monto.insert(0, formatear_numero_entrada(
+                            saldo_actual + _comision))
+                    actualizar_calc()
+                except Exception as e_com2:
+                    print("Aviso - comisión del soporte:", e_com2)
             try:
                 lbl_soporte.configure(text="📎 " + os.path.basename(r), text_color="#1e8449")
             except Exception:
@@ -9682,16 +9892,21 @@ class CuentasPorPagarTab:
             conn = obtener_conexion_segura(parent=v_edit)
             if not conn: return
             cursor = conn.cursor()
-            cursor.execute("SELECT monto_pagado, fecha_pago, COALESCE(cuenta_origen, ''), COALESCE(numero_operacion, '') FROM pagos_comprobantes WHERE id = %s", (id_pago,))
+            cursor.execute("SELECT monto_pagado, fecha_pago, COALESCE(cuenta_origen, ''), COALESCE(numero_operacion, ''), COALESCE(comision, 0) FROM pagos_comprobantes WHERE id = %s", (id_pago,))
             fila_pago = cursor.fetchone()
             monto_actual, fecha_actual = fila_pago[0], fila_pago[1]
             cuenta_actual = fila_pago[2] if len(fila_pago) > 2 else ""
             oper_actual = fila_pago[3] if len(fila_pago) > 3 else ""
+            try:
+                comision_actual = float(fila_pago[4] or 0) if len(fila_pago) > 4 else 0.0
+            except Exception:
+                comision_actual = 0.0
+            monto_base_actual = max(0.0, float(monto_actual or 0) - comision_actual)
             liberar_conexion(conn)
 
             v_mod_pago = ctk.CTkToplevel(v_edit)
             v_mod_pago.title("Modificar Pago")
-            v_mod_pago.geometry("380x470")
+            v_mod_pago.geometry("380x560")
             v_mod_pago.transient(v_edit)
             v_mod_pago.grab_set()
             _al_cerrar_modal(v_mod_pago)
@@ -9701,10 +9916,24 @@ class CuentasPorPagarTab:
             f_form = ctk.CTkFrame(v_mod_pago, fg_color="transparent")
             f_form.pack(fill="x", padx=20)
 
-            ctk.CTkLabel(f_form, text="Nuevo Monto (0 = Eliminar):", font=("Arial", 11, "bold")).pack(anchor="w")
+            ctk.CTkLabel(f_form, text="Monto del pago (sin comisión; 0 = Eliminar):",
+                         font=("Arial", 11, "bold")).pack(anchor="w")
             ent_mod_monto = ctk.CTkEntry(f_form)
             ent_mod_monto.pack(fill="x", pady=(0, 10))
-            ent_mod_monto.insert(0, str(monto_actual))
+            ent_mod_monto.insert(0, formatear_numero_entrada(monto_base_actual))
+
+            ctk.CTkLabel(f_form, text="Comisión interbancaria (S/):",
+                         font=("Arial", 11, "bold")).pack(anchor="w")
+            ent_mod_comision = ctk.CTkEntry(f_form)
+            ent_mod_comision.pack(fill="x", pady=(0, 2))
+            try:
+                ent_mod_comision.insert(0, formatear_numero_entrada(comision_actual))
+            except Exception:
+                ent_mod_comision.insert(0, "0.00")
+            ctk.CTkLabel(f_form,
+                         text="Se suma al monto del pago (el banco debita el total).",
+                         font=("Arial", 9, "italic"), text_color="gray",
+                         wraplength=330, justify="left").pack(anchor="w", pady=(0, 10))
 
             ctk.CTkLabel(f_form, text="Fecha (DD/MM/AAAA):", font=("Arial", 11, "bold")).pack(anchor="w")
             ent_mod_fecha = ctk.CTkEntry(f_form)
@@ -9723,7 +9952,7 @@ class CuentasPorPagarTab:
                 ent_edit_oper.insert(0, str(oper_actual))
             # 🏦 Cuenta bancaria de la que salió el dinero (se puede corregir aquí)
             ctk.CTkLabel(f_form, text="🏦 Pagado desde (cuenta bancaria):", font=("Arial", 11, "bold")).pack(anchor="w")
-            etiquetas_mod = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else [])
+            etiquetas_mod = ["(No especificada)"] + ([etiqueta_banco(c) for c in cargar_bancos()] if cargar_bancos else []) + ["Efectivo / Caja Chica"]
             if cuenta_actual and cuenta_actual not in etiquetas_mod: etiquetas_mod.append(cuenta_actual)
             cmb_mod_cuenta = ctk.CTkComboBox(f_form, values=etiquetas_mod, state="readonly")
             cmb_mod_cuenta.pack(fill="x", pady=(0, 10))
@@ -9796,11 +10025,14 @@ class CuentasPorPagarTab:
                 nonlocal saldo_actual_global
                 try:
                     nuevo_monto = _a_numero(ent_mod_monto.get())
+                    comision_nueva = max(0.0, _a_numero(ent_mod_comision.get() or "0"))
                 except ValueError:
                     return messagebox.showerror("Error", "Monto inválido", parent=v_mod_pago)
 
-                diferencia_de_aumento = nuevo_monto - float(monto_actual)
-                if diferencia_de_aumento > (saldo_actual_global + 0.01):
+                monto_total = round(nuevo_monto + comision_nueva, 2)
+                diferencia_base = nuevo_monto - monto_base_actual
+                diferencia_de_aumento = monto_total - float(monto_actual)
+                if diferencia_base > (saldo_actual_global + 0.01):
                     return messagebox.showerror("Error", f"Supera el saldo pendiente de {formatear_moneda(saldo_actual_global)}.", parent=v_mod_pago)
 
                 if nuevo_monto == 0:
@@ -9822,18 +10054,18 @@ class CuentasPorPagarTab:
                     nueva_cuenta = cmb_mod_cuenta.get().strip()
                     if nueva_cuenta == "(No especificada)": nueva_cuenta = ""
                     if not _aviso_cambio_mes_estado_cuenta(nueva_cuenta or cuenta_actual, fecha_actual,
-                                                           nueva_fecha, -nuevo_monto, parent=v_mod_pago):
+                                                           nueva_fecha, -monto_total, parent=v_mod_pago):
                         return
                     conn = obtener_conexion_segura(parent=v_mod_pago)
                     if not conn: return
                     cursor = conn.cursor()
-                    cursor.execute("UPDATE pagos_comprobantes SET monto_pagado = %s, fecha_pago = %s, cuenta_origen = %s, numero_operacion = %s, archivo_ruta = COALESCE(NULLIF(%s, ''), archivo_ruta) WHERE id = %s", (nuevo_monto, nueva_fecha, nueva_cuenta, ent_edit_oper.get().strip(), ruta_comp["ruta"], id_pago))
+                    cursor.execute("UPDATE pagos_comprobantes SET monto_pagado = %s, fecha_pago = %s, cuenta_origen = %s, numero_operacion = %s, archivo_ruta = COALESCE(NULLIF(%s, ''), archivo_ruta), comision = %s WHERE id = %s", (monto_total, nueva_fecha, nueva_cuenta, ent_edit_oper.get().strip(), ruta_comp["ruta"], comision_nueva, id_pago))
                     conn.commit()
                     liberar_conexion(conn)
                     cache_sistema.invalidar()
-                    registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Pagar", f"Modificó el pago ID {id_pago} a {formatear_moneda(nuevo_monto)}")
+                    registrar_auditoria(self.app_padre.usuario_activo, "Cuentas por Pagar", f"Modificó el pago ID {id_pago} a {formatear_moneda(monto_total)} (comisión {formatear_moneda(comision_nueva)})")
 
-                saldo_actual_global -= diferencia_de_aumento
+                saldo_actual_global = max(0.0, saldo_actual_global - diferencia_de_aumento)
                 v_mod_pago.destroy()
                 refrescar_subtabla()
                 self.cargar_datos_pagar(reset_pagina=True)

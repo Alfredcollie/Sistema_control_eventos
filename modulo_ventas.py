@@ -594,6 +594,35 @@ MESES_ESPANOL = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
                  "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 
+def _valores_meses_ventas(meses_atras=36):
+    """Opciones del desplegable: 'Todos los meses' + los últimos N meses."""
+    hoy = datetime.now()
+    valores = ["Todos los meses"]
+    anio, mes = hoy.year, hoy.month
+    for _ in range(max(1, int(meses_atras))):
+        valores.append("%s %d" % (MESES_ESPANOL[mes - 1], anio))
+        mes -= 1
+        if mes <= 0:
+            mes, anio = 12, anio - 1
+    return valores
+
+
+def _patron_mes_ventas(etiqueta):
+    """'Noviembre 2026' -> '%/11/2026'. '' si es 'Todos los meses'."""
+    texto = str(etiqueta or "").strip()
+    if not texto or "todos" in texto.lower():
+        return ""
+    partes = texto.split()
+    if len(partes) < 2:
+        return ""
+    try:
+        numero = MESES_ESPANOL.index(str(partes[0]).capitalize()) + 1
+        anio = int(partes[-1])
+    except Exception:
+        return ""
+    return "%%/%02d/%04d" % (numero, anio)
+
+
 # =========================================================
 # 🗓️ AVISO de «mes sin datos»
 # ⚡ Nunca consulta la base mientras se pinta la tabla: usa una caché que se
@@ -2063,6 +2092,12 @@ class FacturasEmitidasTab:
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
         self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por N° Doc, cliente, evento, fecha..."); self.ent_buscar_facturas.pack(side="left", fill="x", expand=True)
         self.ent_buscar_facturas.bind("<KeyRelease>", self._on_buscar_facturas_keyrelease); self.ent_buscar_facturas.bind("<Return>", lambda e: self.cargar_datos_tabla(reset_pagina=True))
+        ctk.CTkLabel(f_busqueda, text="Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 4))
+        self.combo_mes_facturas = ctk.CTkComboBox(f_busqueda, values=_valores_meses_ventas(),
+                                                  width=140, state="readonly",
+                                                  command=self._cambiar_mes_facturas)
+        self.combo_mes_facturas.pack(side="left")
+        self.combo_mes_facturas.set("Todos los meses")
         f_tabla = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent"); f_tabla.pack(fill="both", expand=True)
         columnas = ("num", "id", "fecha", "nro_doc", "dias", "tipo", "cliente", "concepto", "evento", "subtotal", "impuesto", "total", "detraccion", "neto", "estado_sunat", "archivo")
         self.tabla = ttk.Treeview(f_tabla, columns=columnas, show="headings", selectmode="extended")
@@ -2180,7 +2215,7 @@ class FacturasEmitidasTab:
             if _desc_oc:
                 texto += "   ·   " + _desc_oc[:60]
             try:
-                total_factura = float(self.ent_subtotal.get() or 0)
+                total_factura = _texto_a_numero(self.ent_subtotal.get())
                 if "Factura" in self.combo_tipo.get():
                     total_factura = total_factura * 1.18
             except Exception:
@@ -2198,7 +2233,7 @@ class FacturasEmitidasTab:
         try:
             if self.combo_oc.get() != "--- Sin Orden de Compra ---":
                 return
-            subtotal = float(self.ent_subtotal.get() or 0)
+            subtotal = _texto_a_numero(self.ent_subtotal.get())
             if subtotal <= 0:
                 return
             total = subtotal * 1.18 if "Factura" in self.combo_tipo.get() else subtotal
@@ -2761,6 +2796,33 @@ class FacturasEmitidasTab:
             "Allí pulse «Actualizar» y use «🧾 Registrar cobro».")
         return False
 
+    def _cambiar_mes_facturas(self, valor=None):
+        try:
+            self.mes_facturas = valor or self.combo_mes_facturas.get()
+        except Exception:
+            self.mes_facturas = "Todos los meses"
+        self.mes_filtro = self.mes_facturas
+        self.pagina_actual = 1
+        self.cargar_datos_tabla(reset_pagina=True)
+
+    def _cambiar_mes_cobros(self, valor=None):
+        try:
+            self.mes_cobros = valor or self.combo_mes_cobros.get()
+        except Exception:
+            self.mes_cobros = "Todos los meses"
+        self.mes_filtro = self.mes_cobros
+        self.pagina_actual = 1
+        self._refrescar_listas_cobro()
+
+    def _cambiar_mes_nc(self, valor=None):
+        try:
+            self.mes_nc = valor or self.combo_mes_nc.get()
+        except Exception:
+            self.mes_nc = "Todos los meses"
+        self.mes_filtro = self.mes_nc
+        self.pagina_actual = 1
+        self.cargar_datos_nc(reset_pagina=True)
+
     def cargar_datos_tabla(self, reset_pagina=False):
         if reset_pagina: self.pagina_actual = 1
         if hasattr(self, 'lbl_pagina'): self.lbl_pagina.configure(text=f"Pág {self.pagina_actual}")
@@ -2768,22 +2830,41 @@ class FacturasEmitidasTab:
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
         self._token_carga_tabla = getattr(self, '_token_carga_tabla', 0) + 1
         token_actual = self._token_carga_tabla
-        clave_cache = f"fac_em_{filtro}_pag_{self.pagina_actual}"
+        mes_patron = _patron_mes_ventas(getattr(self, "mes_facturas", "Todos los meses"))
+        clave_cache = f"fac_em_{filtro}_{mes_patron}_pag_{self.pagina_actual}"
         datos = cache_sistema.obtener(clave_cache)
         if datos is not None: self._pintar_tabla_facturas(datos, token_actual)
         else:
             self.tabla.insert("", tk.END, values=("", "", "Cargando datos...", "", "", "", ""))
-            threading.Thread(target=self._worker_cargar_datos_tabla, args=(filtro, token_actual, offset, clave_cache), daemon=True).start()
+            threading.Thread(target=self._worker_cargar_datos_tabla, args=(filtro, token_actual, offset, clave_cache, mes_patron), daemon=True).start()
 
-    def _worker_cargar_datos_tabla(self, filtro, token_actual, offset, clave_cache):
+    def _worker_cargar_datos_tabla(self, filtro, token_actual, offset, clave_cache,
+                                   mes_patron=""):
         filas_resultado, conn = [], obtener_conexion_segura(mostrar_aviso=False)
         if not conn: self.main_root.after(0, lambda: self._pintar_tabla_facturas([], token_actual)); return
         try:
             cursor = conn.cursor()
-            if filtro == "": cursor.execute("SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
-            else:
+            _sql = ("SELECT id, fecha, numero_documento, dias_credito, tipo_documento, "
+                    "cliente, evento_asociado, descripcion, subtotal, impuesto, total, "
+                    "COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, "
+                    "COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) "
+                    "FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado "
+                    "FROM facturas_emitidas")
+            _cond, _params = [], []
+            if filtro:
                 val = f"%{filtro}%"
-                cursor.execute("""SELECT id, fecha, numero_documento, dias_credito, tipo_documento, cliente, evento_asociado, descripcion, subtotal, impuesto, total, COALESCE(det_monto, 0), archivo_ruta, enlace_pdf_sunat, estado_sunat, COALESCE((SELECT SUM(p.monto_pagado + COALESCE(p.impuestos_deducibles, 0)) FROM pagos_clientes p WHERE p.id_factura = facturas_emitidas.id), 0) AS cobrado FROM facturas_emitidas WHERE numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC LIMIT %s OFFSET %s""", (val, val, val, self.registros_por_pagina, offset))
+                _cond.append("(numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s)")
+                _params.extend([val, val, val])
+            if mes_patron:
+                _cond.append("fecha LIKE %s")
+                _params.append(mes_patron)
+            if _cond:
+                _sql += " WHERE " + " AND ".join(_cond)
+            _sql += (" ORDER BY NULLIF(SPLIT_PART(fecha, '/', 3), '')::int DESC NULLS LAST, "
+                     "NULLIF(SPLIT_PART(fecha, '/', 2), '')::int DESC NULLS LAST, "
+                     "NULLIF(SPLIT_PART(fecha, '/', 1), '')::int DESC NULLS LAST, id DESC "
+                     "LIMIT %s OFFSET %s")
+            cursor.execute(_sql, tuple(_params) + (self.registros_por_pagina, offset))
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1
             for r in cursor.fetchall():
                 tiene_arch = "✅ Ver" if r[12] else "❌ No"
@@ -3750,6 +3831,12 @@ class CuentasPorCobrarTab:
         self.ent_buscar_cobros.pack(side="left", fill="x", expand=True)
         self.ent_buscar_cobros.bind("<KeyRelease>", self._on_buscar_cobros_keyrelease)
         self.ent_buscar_cobros.bind("<Return>", lambda e: self._refrescar_listas_cobro())
+        ctk.CTkLabel(f_busqueda, text="Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 4))
+        self.combo_mes_cobros = ctk.CTkComboBox(f_busqueda, values=_valores_meses_ventas(),
+                                                width=140, state="readonly",
+                                                command=self._cambiar_mes_cobros)
+        self.combo_mes_cobros.pack(side="left")
+        self.combo_mes_cobros.set("Todos los meses")
 
         f_tabla = ctk.CTkFrame(self.tab_frame, fg_color="transparent")
         f_tabla.pack(fill="both", expand=True, padx=15, pady=0)
@@ -4172,14 +4259,17 @@ class CuentasPorCobrarTab:
 
         v = ctk.CTkToplevel(getattr(self, "main_root", None))
         v.title("🧾 Cobrar Varias Facturas (1 comprobante)")
-        v.geometry("620x580")
+        # 🪟 Igual que el cobro individual: alto según pantalla y con scroll.
+        _alto_cobro = min(880, max(480, v.winfo_screenheight() - 90))
+        _x_cobro = max(0, (v.winfo_screenwidth() - 620) // 2)
+        v.geometry("620x%d+%d+0" % (_alto_cobro, _x_cobro))
         v.transient(getattr(self, "main_root", None))
         try:
             v.grab_set()
             _al_cerrar_modal(v)
         except Exception:
             pass
-        f = ctk.CTkFrame(v, fg_color="transparent")
+        f = ctk.CTkScrollableFrame(v, fg_color="transparent")
         f.pack(fill="both", expand=True, padx=16, pady=12)
 
         ctk.CTkLabel(f, text="📋 %d facturas seleccionadas (se cobrarán con UN solo comprobante)"
@@ -4204,29 +4294,207 @@ class CuentasPorCobrarTab:
         ent_oper = ctk.CTkEntry(f)
         ent_oper.pack(fill="x")
 
-        ctk.CTkLabel(f, text="💰 Monto recibido del cliente (neto, sin el impuesto):",
+        ctk.CTkLabel(f, text="💰 Monto recibido (neto, sin deducciones):",
                      font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
         ent_monto = ctk.CTkEntry(f)
         ent_monto.pack(fill="x")
         _total_pendiente = sum(max(0.0, p["saldo"]) for p in pendientes)
+        ent_monto.insert(0, formatear_numero_entrada(_total_pendiente))
         lbl_calc = ctk.CTkLabel(f, text="", font=("Arial", 11, "bold"), text_color="#555555")
+
+        # 🧮 Base de los % de retención/factoring: total CON IGV de las facturas
+        total_base_facturas = 0.0
+        try:
+            _ids_sel = [int(p["id"]) for p in pendientes if p.get("id")]
+            if _ids_sel:
+                _conn_base = conectar_db()
+                if _conn_base:
+                    try:
+                        with _conn_base.cursor() as _cb:
+                            _ph = ",".join(["%s"] * len(_ids_sel))
+                            _cb.execute("SELECT COALESCE(SUM(total),0) FROM facturas_emitidas "
+                                        "WHERE id IN (%s)" % _ph, tuple(_ids_sel))
+                            _fila_b = _cb.fetchone()
+                            total_base_facturas = float((_fila_b or [0])[0] or 0)
+                    finally:
+                        liberar_conexion(_conn_base)
+        except Exception as _e_base:
+            print("[Cobrar varias] base con IGV:", _e_base)
+        if total_base_facturas <= 0:
+            total_base_facturas = _total_pendiente
+
+        # 🧾 Otros impuestos deducibles + comprobante
+        ctk.CTkLabel(f, text="🧾 Otros impuestos deducibles (S/):",
+                     font=("Arial", 11, "bold")).pack(anchor="w", pady=(8, 0))
+        ent_impuestos = ctk.CTkEntry(f)
+        ent_impuestos.pack(fill="x")
+        ent_impuestos.insert(0, "0.00")
+        estado_imp = {"ruta": ""}
+        lbl_imp = ctk.CTkLabel(f, text="", font=("Arial", 10), text_color="#999999", anchor="w")
+
+        def _pintar_impuesto():
+            nombre = os.path.basename(estado_imp["ruta"]) if estado_imp["ruta"] else ""
+            lbl_imp.configure(text=("📎 " + nombre) if nombre
+                              else "Sin comprobante del impuesto (opcional)",
+                              text_color="#1e8449" if nombre else "#999999")
+
+        def _cargar_impuesto():
+            try:
+                ruta = seleccionar_archivo_dialogo(titulo="Comprobante del impuesto")
+            except Exception:
+                ruta = ""
+            if ruta:
+                estado_imp["ruta"] = ruta
+                _pintar_impuesto()
+
+        def _quitar_impuesto():
+            estado_imp["ruta"] = ""
+            _pintar_impuesto()
+
+        f_imp = ctk.CTkFrame(f, fg_color="transparent")
+        f_imp.pack(fill="x")
+        ctk.CTkButton(f_imp, text="📎 Cargar comprobante del impuesto", height=30,
+                      font=("Arial", 11, "bold"),
+                      command=_cargar_impuesto).pack(side="left")
+        ctk.CTkButton(f_imp, text="✖ Quitar", width=80, height=30, font=("Arial", 11, "bold"),
+                      command=_quitar_impuesto).pack(side="left", padx=6)
+        lbl_imp.pack(anchor="w", pady=(2, 0))
+        _pintar_impuesto()
+
+        # 🔖 Retención del cliente / factoring del banco (% sobre el total con IGV)
+        estado_rf = {"activo": False, "ret_monto": 0.0, "fact_monto": 0.0}
+        var_rf = tk.BooleanVar(master=v, value=False)
+        chk_rf = ctk.CTkCheckBox(
+            f, text="🔖 Aplicar % de retención del cliente y % de factoring del banco",
+            variable=var_rf, font=("Arial", 11, "bold"), command=lambda: _toggle_rf())
+        chk_rf.pack(anchor="w", pady=(10, 0))
+        f_rf = ctk.CTkFrame(f, fg_color="transparent")
+        f_rf_ret = ctk.CTkFrame(f_rf, fg_color="transparent")
+        f_rf_ret.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkLabel(f_rf_ret, text="% Retención cliente:",
+                     font=("Arial", 10, "bold")).pack(anchor="w")
+        ent_ret_pct = ctk.CTkEntry(f_rf_ret, placeholder_text="0.00")
+        ent_ret_pct.pack(fill="x")
+        f_rf_fact = ctk.CTkFrame(f_rf, fg_color="transparent")
+        f_rf_fact.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        ctk.CTkLabel(f_rf_fact, text="% Factoring banco:",
+                     font=("Arial", 10, "bold")).pack(anchor="w")
+        ent_fact_pct = ctk.CTkEntry(f_rf_fact, placeholder_text="0.00")
+        ent_fact_pct.pack(fill="x")
+        lbl_rf = ctk.CTkLabel(f, text="", font=("Arial", 10, "bold"),
+                              text_color="#1f538d", anchor="w", justify="left",
+                              wraplength=560)
+
+        def _calcular_rf():
+            if not estado_rf["activo"]:
+                estado_rf["ret_monto"] = estado_rf["fact_monto"] = 0.0
+                return 0.0, 0.0
+            try:
+                ret_pct = max(0.0, min(100.0, _texto_a_numero(ent_ret_pct.get() or 0)))
+            except ValueError:
+                ret_pct = 0.0
+            try:
+                fact_pct = max(0.0, min(100.0, _texto_a_numero(ent_fact_pct.get() or 0)))
+            except ValueError:
+                fact_pct = 0.0
+            ret_monto = round(total_base_facturas * ret_pct / 100.0, 2)
+            fact_monto = round(total_base_facturas * fact_pct / 100.0, 2)
+            estado_rf["ret_monto"], estado_rf["fact_monto"] = ret_monto, fact_monto
+            try:
+                otros = max(0.0, _texto_a_numero(ent_impuestos.get() or 0))
+            except ValueError:
+                otros = 0.0
+            neto = max(0.0, round(_total_pendiente - otros - ret_monto - fact_monto, 2))
+            lbl_rf.configure(
+                text=(("Base (total con IGV): %s" + chr(10) +
+                       "Retención cliente: %s   ·   Factoring banco: %s" + chr(10) +
+                       "Neto a recibir: %s")
+                      % (formatear_moneda(total_base_facturas), formatear_moneda(ret_monto),
+                         formatear_moneda(fact_monto), formatear_moneda(neto))))
+            return ret_monto, fact_monto
+
+        def _poner_neto_rf():
+            try:
+                otros = max(0.0, _texto_a_numero(ent_impuestos.get() or 0))
+            except ValueError:
+                otros = 0.0
+            neto = max(0.0, round(_total_pendiente - otros - estado_rf["ret_monto"]
+                                  - estado_rf["fact_monto"], 2))
+            ent_monto.delete(0, tk.END)
+            ent_monto.insert(0, formatear_numero_entrada(neto))
+
+        def _refrescar_rf(event=None):
+            if not estado_rf["activo"]:
+                return
+            _calcular_rf()
+            _poner_neto_rf()
+            actualizar_calc()
+
+        def _al_cambiar_otros(event=None):
+            if estado_rf["activo"]:
+                _refrescar_rf()
+            else:
+                actualizar_calc()
+
+        def _toggle_rf():
+            estado_rf["activo"] = bool(var_rf.get())
+            if estado_rf["activo"]:
+                f_rf.pack(fill="x", pady=(4, 0), after=chk_rf)
+                lbl_rf.pack(anchor="w", pady=(2, 0), after=f_rf)
+                _refrescar_rf()
+                try:
+                    ent_ret_pct.focus_set()
+                except Exception:
+                    pass
+            else:
+                f_rf.pack_forget()
+                lbl_rf.pack_forget()
+                estado_rf["ret_monto"] = estado_rf["fact_monto"] = 0.0
+                lbl_rf.configure(text="")
+                try:
+                    otros = max(0.0, _texto_a_numero(ent_impuestos.get() or 0))
+                except ValueError:
+                    otros = 0.0
+                ent_monto.delete(0, tk.END)
+                ent_monto.insert(0, formatear_numero_entrada(
+                    max(0.0, round(_total_pendiente - otros, 2))))
+                actualizar_calc()
+
+        ent_ret_pct.bind("<KeyRelease>", _refrescar_rf)
+        ent_fact_pct.bind("<KeyRelease>", _refrescar_rf)
+        ent_impuestos.bind("<KeyRelease>", _al_cambiar_otros)
+        ent_impuestos.bind("<FocusOut>", _al_cambiar_otros)
 
         def actualizar_calc(event=None):
             try:
                 _monto = _texto_a_numero(ent_monto.get() or 0)
             except ValueError:
                 _monto = 0.0
-            _diff = round(_monto - _total_pendiente, 2)
+            try:
+                _otros = max(0.0, _texto_a_numero(ent_impuestos.get() or 0))
+            except ValueError:
+                _otros = 0.0
+            _deducciones = _otros
+            if estado_rf["activo"]:
+                _deducciones += estado_rf["ret_monto"] + estado_rf["fact_monto"]
+            _aplicado = round(_monto + _deducciones, 2)
+            _diff = round(_aplicado - _total_pendiente, 2)
             if _diff < -0.005:
-                lbl_calc.configure(text="Total a cobrar: %s   ·   Falta: %s"
-                                   % (formatear_moneda(_total_pendiente), formatear_moneda(abs(_diff))),
+                lbl_calc.configure(text="Aplicado a las facturas: %s   ·   Saldo: %s   ·   Falta: %s"
+                                   % (formatear_moneda(_aplicado),
+                                      formatear_moneda(_total_pendiente),
+                                      formatear_moneda(abs(_diff))),
                                    text_color="#c0392b")
             elif _diff > 0.005:
-                lbl_calc.configure(text="Total a cobrar: %s   ·   Sobra: %s"
-                                   % (formatear_moneda(_total_pendiente), formatear_moneda(_diff)),
+                lbl_calc.configure(text="Aplicado a las facturas: %s   ·   Saldo: %s   ·   Sobra: %s"
+                                   % (formatear_moneda(_aplicado),
+                                      formatear_moneda(_total_pendiente),
+                                      formatear_moneda(_diff)),
                                    text_color="#b9770e")
             else:
-                lbl_calc.configure(text="Total a cobrar: %s   ·   Exacto" % formatear_moneda(_total_pendiente),
+                lbl_calc.configure(text="Aplicado a las facturas: %s   ·   Saldo: %s   ·   Exacto"
+                                   % (formatear_moneda(_aplicado),
+                                      formatear_moneda(_total_pendiente)),
                                    text_color="#1e8449")
 
         ent_monto.bind("<KeyRelease>", actualizar_calc)
@@ -4401,36 +4669,107 @@ class CuentasPorCobrarTab:
             cuenta = cmb_cuenta.get().strip()
             oper = ent_oper.get().strip()
             if not cuenta:
-                return messagebox.showwarning("Cobrar varias facturas", "Elija la cuenta destino / método.", parent=v)
+                return messagebox.showwarning("Cobrar varias facturas",
+                                              "Elija la cuenta destino / método.", parent=v)
+            try:
+                monto_val = _texto_a_numero(ent_monto.get() or 0)
+                impuestos_val = max(0.0, _texto_a_numero(ent_impuestos.get() or 0))
+            except ValueError:
+                return messagebox.showerror("Cobrar varias facturas",
+                                            "El monto y los impuestos deben ser numéricos.",
+                                            parent=v)
+            ret_pct = fact_pct = ret_monto = fact_monto = 0.0
+            if estado_rf["activo"]:
+                try:
+                    ret_pct = _texto_a_numero(ent_ret_pct.get() or 0)
+                    fact_pct = _texto_a_numero(ent_fact_pct.get() or 0)
+                except ValueError:
+                    return messagebox.showerror("Cobrar varias facturas",
+                                                "Los % deben ser numéricos.", parent=v)
+                if not (0.0 <= ret_pct <= 100.0) or not (0.0 <= fact_pct <= 100.0):
+                    return messagebox.showerror("Cobrar varias facturas",
+                                                "Los % deben estar entre 0 y 100.", parent=v)
+                ret_monto = round(total_base_facturas * ret_pct / 100.0, 2)
+                fact_monto = round(total_base_facturas * fact_pct / 100.0, 2)
+            deducciones_val = round(impuestos_val + ret_monto + fact_monto, 2)
+            aplicado_total = round(monto_val + deducciones_val, 2)
+            if aplicado_total <= 0:
+                return messagebox.showerror("Cobrar varias facturas",
+                                            "El total del cobro debe ser mayor a 0.", parent=v)
+            if aplicado_total > (_total_pendiente + 0.01):
+                return messagebox.showerror(
+                    "Cobrar varias facturas",
+                    "El total (monto + deducciones) supera el saldo pendiente de %s."
+                    % formatear_moneda(_total_pendiente), parent=v)
             ruta_bd = ""
             if estado_comp["ruta"]:
                 try:
                     ruta_bd = ruta_para_guardar(estado_comp["ruta"]) or estado_comp["ruta"]
                 except Exception:
                     ruta_bd = estado_comp["ruta"]
+            ruta_imp_bd = ""
+            if estado_imp["ruta"]:
+                try:
+                    ruta_imp_bd = ruta_para_guardar(estado_imp["ruta"]) or estado_imp["ruta"]
+                except Exception:
+                    ruta_imp_bd = estado_imp["ruta"]
+
+            saldos = [max(0.0, float(p["saldo"])) for p in pendientes]
+            suma_saldos = sum(saldos) or 1.0
             cobrados, errores = 0, []
-            for p in pendientes:
+            acum_aplicado, acum_ded = 0.0, 0.0
+            for idx, p in enumerate(pendientes):
                 if p["saldo"] <= 0:
                     continue
+                if idx == len(pendientes) - 1:
+                    aplicado_i = round(aplicado_total - acum_aplicado, 2)
+                    ded_i = round(deducciones_val - acum_ded, 2)
+                else:
+                    aplicado_i = round(aplicado_total * saldos[idx] / suma_saldos, 2)
+                    ded_i = round(deducciones_val * saldos[idx] / suma_saldos, 2)
+                    acum_aplicado += aplicado_i
+                    acum_ded += ded_i
+                if ded_i > aplicado_i:
+                    ded_i = aplicado_i
+                monto_i = round(aplicado_i - ded_i, 2)
+                ret_i = round(ret_monto * saldos[idx] / suma_saldos, 2) if ret_monto else 0.0
+                fact_i = round(fact_monto * saldos[idx] / suma_saldos, 2) if fact_monto else 0.0
                 try:
                     conn = conectar_db()
                     if not conn:
                         continue
                     with conn.cursor() as cur:
                         try:
+                            _asegurar_columnas_impuestos(conn)
                             cur.execute("""
                                 INSERT INTO pagos_clientes
-                                (id_factura, monto_pagado, archivo_ruta, cliente_nombre, fecha_pago, cuenta_destino,
-                                 numero_operacion)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                                (p["id"], p["saldo"], ruta_bd, p["cliente"], fecha_val, cuenta, oper))
+                                (id_factura, monto_pagado, archivo_ruta, cliente_nombre, fecha_pago,
+                                 cuenta_destino, numero_operacion, impuestos_deducibles,
+                                 archivo_impuesto, retencion_pct, retencion_monto,
+                                 factoring_pct, factoring_monto)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                (p["id"], monto_i, ruta_bd, p["cliente"], fecha_val, cuenta, oper,
+                                 ded_i, ruta_imp_bd, ret_pct, ret_i, fact_pct, fact_i))
                         except Exception:
                             conn.rollback()
-                            cur.execute("""
-                                INSERT INTO pagos_clientes
-                                (id_factura, monto_pagado, archivo_ruta, cliente_nombre, fecha_pago, cuenta_destino)
-                                VALUES (%s, %s, %s, %s, %s, %s)""",
-                                (p["id"], p["saldo"], ruta_bd, p["cliente"], fecha_val, cuenta))
+                            try:
+                                cur.execute("""
+                                    INSERT INTO pagos_clientes
+                                    (id_factura, monto_pagado, archivo_ruta, cliente_nombre,
+                                     fecha_pago, cuenta_destino, numero_operacion,
+                                     impuestos_deducibles, archivo_impuesto)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                    (p["id"], monto_i, ruta_bd, p["cliente"], fecha_val,
+                                     cuenta, oper, ded_i, ruta_imp_bd))
+                            except Exception:
+                                conn.rollback()
+                                cur.execute("""
+                                    INSERT INTO pagos_clientes
+                                    (id_factura, monto_pagado, archivo_ruta, cliente_nombre,
+                                     fecha_pago, cuenta_destino)
+                                    VALUES (%s,%s,%s,%s,%s,%s)""",
+                                    (p["id"], monto_i, ruta_bd, p["cliente"], fecha_val,
+                                     cuenta))
                     conn.commit()
                     liberar_conexion(conn)
                     cobrados += 1
@@ -4441,9 +4780,12 @@ class CuentasPorCobrarTab:
             except Exception:
                 pass
             try:
+                _det_aud = "Cobró %d facturas con un solo comprobante" % cobrados
+                if ret_monto or fact_monto:
+                    _det_aud += " (Ret. %s / Fact. %s)" % (
+                        formatear_moneda(ret_monto), formatear_moneda(fact_monto))
                 registrar_auditoria(getattr(getattr(self, "app_padre", None), "usuario_activo", ""),
-                                    "Cuentas por Cobrar",
-                                    "Cobró %d facturas con un solo comprobante" % cobrados)
+                                    "Cuentas por Cobrar", _det_aud)
             except Exception:
                 pass
             try:
@@ -4456,6 +4798,9 @@ class CuentasPorCobrarTab:
             except Exception:
                 pass
             msg = "Se cobraron %d factura(s) con el comprobante." % cobrados
+            if ret_monto or fact_monto:
+                msg += (chr(10) + "Retención cliente: %s   ·   Factoring banco: %s"
+                        % (formatear_moneda(ret_monto), formatear_moneda(fact_monto)))
             if errores:
                 msg += "\n\nAlgunas no se cobraron:\n" + "\n".join(errores[:5])
             messagebox.showinfo("Éxito", msg,
@@ -4477,15 +4822,17 @@ class CuentasPorCobrarTab:
         offset = (self.pagina_actual - 1) * self.registros_por_pagina
         self._token_carga_cobros = getattr(self, '_token_carga_cobros', 0) + 1
         token_actual = self._token_carga_cobros
-        clave_cache = f"cobros_{filtro}_pag_{self.pagina_actual}"
+        mes_patron = _patron_mes_ventas(getattr(self, "mes_cobros", "Todos los meses"))
+        clave_cache = f"cobros_{filtro}_{mes_patron}_pag_{self.pagina_actual}"
         datos = cache_sistema.obtener(clave_cache)
         if datos is not None: self._pintar_tabla_cobros(datos["filas"], datos["total"], token_actual,
                                                         datos.get("estados"), datos.get("vencimientos"))
         else:
             self.tabla.insert("", tk.END, values=("", "", "Cargando datos...", "", "", "", ""))
-            threading.Thread(target=self._worker_cargar_datos_cobrar, args=(filtro, token_actual, offset, clave_cache), daemon=True).start()
+            threading.Thread(target=self._worker_cargar_datos_cobrar, args=(filtro, token_actual, offset, clave_cache, mes_patron), daemon=True).start()
 
-    def _worker_cargar_datos_cobrar(self, filtro, token_actual, offset, clave_cache):
+    def _worker_cargar_datos_cobrar(self, filtro, token_actual, offset, clave_cache,
+                                    mes_patron=""):
         filas_resultado, total_pendiente = [], 0.0
         estados = []            # 🎨 color de cada fila (mismo orden que filas_resultado)
         vencimientos = []       # 🖱️ fecha de vencimiento de cada fila ('YYYY-MM-DD' o '')
@@ -4493,10 +4840,22 @@ class CuentasPorCobrarTab:
         if not conn: self.main_root.after(0, lambda: self._pintar_tabla_cobros([], 0.0, token_actual, [])); return
         try:
             cursor = conn.cursor()
-            if filtro == "": cursor.execute("SELECT id, fecha, numero_documento, cliente, evento_asociado, subtotal, impuesto, COALESCE(det_monto, 0), total, tipo_documento, descripcion, enlace_pdf_sunat, archivo_ruta, estado_sunat, COALESCE(dias_credito, 0) FROM facturas_emitidas ORDER BY id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
-            else:
+            _sql = ("SELECT id, fecha, numero_documento, cliente, evento_asociado, subtotal, "
+                    "impuesto, COALESCE(det_monto, 0), total, tipo_documento, descripcion, "
+                    "enlace_pdf_sunat, archivo_ruta, estado_sunat, COALESCE(dias_credito, 0) "
+                    "FROM facturas_emitidas")
+            _cond, _params = [], []
+            if filtro:
                 val = f"%{filtro}%"
-                cursor.execute("""SELECT id, fecha, numero_documento, cliente, evento_asociado, subtotal, impuesto, COALESCE(det_monto, 0), total, tipo_documento, descripcion, enlace_pdf_sunat, archivo_ruta, estado_sunat, COALESCE(dias_credito, 0) FROM facturas_emitidas WHERE numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s ORDER BY id DESC LIMIT %s OFFSET %s""", (val, val, val, val, self.registros_por_pagina, offset))
+                _cond.append("(numero_documento ILIKE %s OR cliente ILIKE %s OR evento_asociado ILIKE %s OR descripcion ILIKE %s)")
+                _params.extend([val, val, val, val])
+            if mes_patron:
+                _cond.append("fecha LIKE %s")
+                _params.append(mes_patron)
+            if _cond:
+                _sql += " WHERE " + " AND ".join(_cond)
+            _sql += " ORDER BY id DESC LIMIT %s OFFSET %s"
+            cursor.execute(_sql, tuple(_params) + (self.registros_por_pagina, offset))
             registros = cursor.fetchall()
             pagos_por_factura = {}
             if registros:
@@ -5669,6 +6028,12 @@ class NotasCreditoTab:
         self.ent_buscar_nc.pack(side="left", fill="x", expand=True, padx=5)
         self.ent_buscar_nc.bind("<KeyRelease>", self._on_buscar_nc_keyrelease)
         self.ent_buscar_nc.bind("<Return>", lambda e: self.cargar_datos_nc(reset_pagina=True))
+        ctk.CTkLabel(f_top, text="Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 4))
+        self.combo_mes_nc = ctk.CTkComboBox(f_top, values=_valores_meses_ventas(),
+                                            width=140, state="readonly",
+                                            command=self._cambiar_mes_nc)
+        self.combo_mes_nc.pack(side="left", padx=(0, 10))
+        self.combo_mes_nc.set("Todos los meses")
 
         btn_refresh = ctk.CTkButton(f_top, text="🔄 Actualizar Tabla", font=("Arial", 12, "bold"), fg_color="#7f8c8d", hover_color="#606b6b", command=lambda: self.cargar_datos_nc(reset_pagina=True))
         btn_refresh.pack(side="right", padx=15, pady=5)
@@ -5760,8 +6125,9 @@ class NotasCreditoTab:
 
         self._token_carga_nc = getattr(self, '_token_carga_nc', 0) + 1
         token_actual = self._token_carga_nc
-        
-        clave_cache = f"notas_credito_{filtro}_pag_{self.pagina_actual}"
+
+        mes_patron = _patron_mes_ventas(getattr(self, "mes_nc", "Todos los meses"))
+        clave_cache = f"notas_credito_{filtro}_{mes_patron}_pag_{self.pagina_actual}"
         datos = cache_sistema.obtener(clave_cache)
         
         if datos is not None:
@@ -5771,11 +6137,12 @@ class NotasCreditoTab:
             
             threading.Thread(
                 target=self._worker_cargar_datos_nc,
-                args=(filtro, token_actual, offset, clave_cache),
+                args=(filtro, token_actual, offset, clave_cache, mes_patron),
                 daemon=True
             ).start()
 
-    def _worker_cargar_datos_nc(self, filtro, token_actual, offset, clave_cache):
+    def _worker_cargar_datos_nc(self, filtro, token_actual, offset, clave_cache,
+                                mes_patron=""):
         filas_resultado = []
         conn = obtener_conexion_segura(mostrar_aviso=False)
         if not conn:
@@ -5783,18 +6150,19 @@ class NotasCreditoTab:
             return
         try:
             cursor = conn.cursor()
-            
-            if filtro == "":
-                cursor.execute("SELECT id, fecha, numero_documento, cliente, total, COALESCE(det_monto, 0), estado_sunat, enlace_pdf_nc, tipo_documento FROM facturas_emitidas WHERE estado_sunat LIKE '%Anulada%' ORDER BY id DESC LIMIT %s OFFSET %s", (self.registros_por_pagina, offset))
-            else:
+            _sql = ("SELECT id, fecha, numero_documento, cliente, total, COALESCE(det_monto, 0), "
+                    "estado_sunat, enlace_pdf_nc, tipo_documento FROM facturas_emitidas "
+                    "WHERE estado_sunat LIKE '%Anulada%'")
+            _params = []
+            if filtro:
                 val = f"%{filtro}%"
-                cursor.execute("""
-                    SELECT id, fecha, numero_documento, cliente, total, COALESCE(det_monto, 0), estado_sunat, enlace_pdf_nc, tipo_documento 
-                    FROM facturas_emitidas 
-                    WHERE estado_sunat LIKE '%Anulada%' AND (numero_documento ILIKE %s OR cliente ILIKE %s)
-                    ORDER BY id DESC LIMIT %s OFFSET %s
-                """, (val, val, self.registros_por_pagina, offset))
-                
+                _sql += " AND (numero_documento ILIKE %s OR cliente ILIKE %s)"
+                _params.extend([val, val])
+            if mes_patron:
+                _sql += " AND fecha LIKE %s"
+                _params.append(mes_patron)
+            _sql += " ORDER BY id DESC LIMIT %s OFFSET %s"
+            cursor.execute(_sql, tuple(_params) + (self.registros_por_pagina, offset))
             registros = cursor.fetchall()
 
             contador = (self.pagina_actual - 1) * self.registros_por_pagina + 1

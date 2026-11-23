@@ -4,12 +4,14 @@
 Este archivo es SOLO la lógica: no tiene ventanas ni menú propio.
 Lo usa el módulo de Banco (pestaña «Conciliación Bancaria»).
 
-Reglas (según el prompt maestro):
-  * Nada se concilia solo: el motor PROPONE y la pantalla de revisión aprueba.
+Reglas (prompt maestro + acuerdos con el usuario, 2026-11):
+  * Nada se concilia solo salvo el caso SEGURO: misma FECHA, mismo IMPORTE y
+    ese importe NO se repite en ningún lado dentro de los días de desfase.
   * Nunca se reutiliza un movimiento bancario ni un asiento contable.
-  * Nunca se cruzan bancos distintos, monedas distintas ni ingreso con egreso.
-  * Ante ambigüedad (dos candidatos equivalentes) no se decide: se marca AMBIGUO.
+  * Nunca se cruzan bancos, cuentas, monedas distintas ni ingreso con egreso.
+  * Ante ambigüedad (dos candidatos equivalentes) no se decide: AMBIGUO.
   * Las diferencias de importe son SOLO informativas (no concilian).
+  * El N° de operación, si coincide en los dos lados, desambigua.
 """
 import datetime
 import re
@@ -87,29 +89,100 @@ def _sentido(monto, texto=""):
         else "egreso"
 
 
-def _confianza(importe_ok, dias, similitud, referencia_ok, unico):
-    """Puntaje 0-100 con metodología fija (no arbitraria)."""
-    puntos = 0
-    if importe_ok:
-        puntos += 50
-    if dias == 0:
-        puntos += 25
-    elif dias <= 2:
-        puntos += 20
-    elif dias <= 4:
-        puntos += 12
-    elif dias <= 5:
-        puntos += 8
-    puntos += int(round(min(1.0, max(0.0, similitud)) * 20))
-    if referencia_ok:
-        puntos += 5
-    if not unico:
-        puntos = min(puntos, 60)          # con varios candidatos no es confiable
-    elif importe_ok and dias <= 5:
-        # 🎯 coincidencia ÚNICA por monto. Si además no comparten ninguna palabra
-        #    de la descripción, se marca para revisar (75) en vez de 100.
-        return 100                        # único por monto: se concilia (la descripción no importa)
-    return min(99, puntos)
+# =========================================================
+# Comparación tolerante de banco / cuenta / moneda / referencia
+# =========================================================
+def _texto_compacto(valor):
+    """Mayúsculas sin tildes ni separadores: 'BCP S.A.' -> 'BCPSA'."""
+    limpio = unicodedata.normalize("NFKD", str(valor or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^A-Z0-9]", "", limpio.upper())
+
+
+def _solo_digitos(valor):
+    return re.sub(r"\D", "", str(valor or ""))
+
+
+def _bancos_compatibles(a, b):
+    """Mismo banco aunque el nombre venga abreviado ('BCP' / 'BCP S.A.')."""
+    na, nb = _texto_compacto(a), _texto_compacto(b)
+    if not na or not nb:
+        return na == nb
+    if na == nb:
+        return True
+    return ((len(na) >= 3 and na in nb) or (len(nb) >= 3 and nb in na))
+
+
+def _cuentas_compatibles(a, b):
+    """Misma cuenta aunque una venga con prefijo o guiones.
+
+    '194-7374220-0-69' y 'BCP 194-7374220-0-69' son la misma cuenta.
+    Si algún lado no informa la cuenta, no se descarta el cruce.
+    """
+    na, nb = _texto_compacto(a), _texto_compacto(b)
+    if not na or not nb:
+        return True
+    if na == nb:
+        return True
+    da, db = _solo_digitos(na), _solo_digitos(nb)
+    if len(da) >= 6 and len(db) >= 6:
+        return da in db or db in da
+    return na in nb or nb in na
+
+
+_MONEDAS = {
+    "PEN": "SOLES", "SOLES": "SOLES", "SOL": "SOLES", "S/": "SOLES", "S/.": "SOLES",
+    "USD": "DOLARES", "DOLARES": "DOLARES", "US$": "DOLARES", "$": "DOLARES",
+    "EUR": "EUROS", "EUROS": "EUROS", "€": "EUROS",
+}
+
+
+def _monedas_compatibles(a, b):
+    """No se cruzan monedas distintas; si falta el dato, no se descarta."""
+    na, nb = str(a or "").strip().upper(), str(b or "").strip().upper()
+    if not na or not nb:
+        return True
+    return _MONEDAS.get(na, na) == _MONEDAS.get(nb, nb)
+
+
+def _ref_norm(valor):
+    """N° de operación/referencia comparable (mínimo 4 caracteres útiles)."""
+    txt = _texto_compacto(valor)
+    return txt if len(txt) >= 4 else ""
+
+
+def _refs_compatibles(a, b):
+    """N° de operación: igual, o uno es el sufijo del otro (el banco recorta)."""
+    na, nb = _texto_compacto(a), _texto_compacto(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if len(na) >= 4 and nb.endswith(na):
+        return True
+    if len(nb) >= 4 and na.endswith(nb):
+        return True
+    return False
+
+
+def _acepta_comision(diferencia, ref_ok, comision, tope_comision):
+    """¿La diferencia de importe se explica por la comisión del banco?
+
+    - Si hay comisión configurada, la diferencia tiene que ser exactamente esa.
+    - Si no hay comisión configurada pero el N° de operación coincide, se
+      acepta una diferencia pequeña (la comisión que cobra el banco en la
+      misma línea) y SIEMPRE se propone para aprobar, nunca automática.
+    """
+    try:
+        diferencia = float(diferencia)
+        comision = float(comision or 0)
+        tope = float(tope_comision or 0)
+    except Exception:
+        return False
+    if comision > 0 and abs(diferencia - comision) <= 0.02:
+        return True
+    if ref_ok and diferencia <= max(0.0, tope) + 0.02:
+        return True
+    return False
 
 
 def _clasificar(nivel, dias):
@@ -120,91 +193,238 @@ def _clasificar(nivel, dias):
     return "CONCILIADO CON DESFASE"
 
 
+def _indexar_por_importe(lista):
+    """{(importe, sentido): [fechas]} para medir si un importe se repite."""
+    indice = {}
+    for item in lista:
+        fecha = item.get("fecha")
+        if fecha is None or item.get("importe", 0) <= 0:
+            continue
+        indice.setdefault((item["importe"], item["sentido"]), []).append(fecha)
+    return indice
+
+
+def _cerca(fechas, fecha, ventana_dias, excluir=None):
+    """Cuántas fechas de la lista caen dentro de la ventana (sin contar 'excluir')."""
+    total = 0
+    for otra in fechas:
+        if excluir is not None and otra == excluir:
+            excluir = None      # solo se descarta una vez (el propio candidato)
+            continue
+        if abs((otra - fecha).days) <= ventana_dias:
+            total += 1
+    return total
+
+
 def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
-             tolerancia=TOLERANCIA_IMPORTE):
+             tolerancia=TOLERANCIA_IMPORTE, comision=0.0, tope_comision=10.0):
     """Devuelve las propuestas de conciliación (sin escribir nada).
 
-    movimientos_banco: [{"id", "fecha", "descripcion", "monto", "banco", "pagina"}]
-    asientos:          [{"id", "fecha", "descripcion", "monto", "banco"}]
+    movimientos_banco: [{"id", "fecha", "descripcion", "monto", "banco", "cuenta",
+                         "moneda", "referencia", "pagina"}]
+    asientos:          [{"id", "fecha", "descripcion", "monto", "banco", "cuenta",
+                         "moneda", "referencia"}]
+
+    La confianza 100 se reserva para el caso seguro:
+    misma fecha + mismo importe + ese importe no se repite en ningún lado
+    dentro de la ventana de días (o el N° de operación coincide).
+
+    Si la diferencia es la comisión del banco (configurada, o pequeña con el
+    N° de operación impreso en la descripción), se propone como
+    «CONCILIADO CON COMISIÓN» para aprobar a mano: nunca se aplica sola.
     """
+    try:
+        ventana_dias = max(0, int(ventana_dias))
+    except Exception:
+        ventana_dias = DIAS_DESFASE_POR_DEFECTO
+
+    movs, asis = [], []
+    for i, m in enumerate(movimientos_banco):
+        movs.append({
+            "i": i, "fecha": normalizar_fecha(m.get("fecha")),
+            "importe": normalizar_monto(m.get("monto")),
+            "sentido": _sentido(m.get("monto"), m.get("descripcion")),
+            "banco": m.get("banco"), "cuenta": m.get("cuenta"),
+            "moneda": m.get("moneda"),
+            "ref": _ref_norm(m.get("referencia") or m.get("operacion")),
+            "desc_digitos": _solo_digitos(m.get("descripcion")),
+            "m": m,
+        })
+    for j, a in enumerate(asientos):
+        asis.append({
+            "i": j, "fecha": normalizar_fecha(a.get("fecha")),
+            "importe": normalizar_monto(a.get("monto")),
+            "sentido": _sentido(a.get("monto"), a.get("descripcion")),
+            "banco": a.get("banco"), "cuenta": a.get("cuenta"),
+            "moneda": a.get("moneda"),
+            "ref": _ref_norm(a.get("referencia") or a.get("operacion")),
+            "m": a,
+        })
+
+    movs_por_importe = _indexar_por_importe(movs)
+    asis_por_importe = _indexar_por_importe(asis)
+
     candidatos = []
-    for i_banco, mov in enumerate(movimientos_banco):
-        fecha_banco = normalizar_fecha(mov.get("fecha"))
-        importe_banco = normalizar_monto(mov.get("monto"))
-        sentido_banco = _sentido(mov.get("monto"), mov.get("descripcion"))
-        for i_as, asiento in enumerate(asientos):
-            if str(asiento.get("banco") or "").upper() != str(mov.get("banco") or "").upper():
-                continue                            # 🚫 bancos distintos
-            importe_contable = normalizar_monto(asiento.get("monto"))
-            if abs(importe_contable - importe_banco) > tolerancia:
-                continue                            # 🚫 importe distinto (informativo)
-            if _sentido(asiento.get("monto"), asiento.get("descripcion")) != sentido_banco:
-                continue                            # 🚫 ingreso con egreso
-            fecha_contable = normalizar_fecha(asiento.get("fecha"))
-            if not fecha_banco or not fecha_contable:
+    for mv in movs:
+        if mv["fecha"] is None or mv["importe"] <= 0:
+            continue
+        for as_ in asis:
+            if as_["fecha"] is None or as_["importe"] <= 0:
                 continue
-            dias = abs((fecha_banco - fecha_contable).days)
+            if not _bancos_compatibles(mv["banco"], as_["banco"]):
+                continue                            # 🚫 bancos distintos
+            if not _cuentas_compatibles(mv["cuenta"], as_["cuenta"]):
+                continue                            # 🚫 cuentas distintas
+            if not _monedas_compatibles(mv["moneda"], as_["moneda"]):
+                continue                            # 🚫 monedas distintas
+            if mv["sentido"] != as_["sentido"]:
+                continue                            # 🚫 ingreso con egreso
+            dias = abs((mv["fecha"] - as_["fecha"]).days)
             if dias > ventana_dias:
                 continue                            # 🚫 fuera de la ventana
-            candidatos.append({"i_banco": i_banco, "i_as": i_as, "dias": dias,
-                               "similitud": similitud_nombres(mov.get("descripcion"),
-                                                              asiento.get("descripcion"))})
-    # se evalúa la asignación global: primero los cruces de mayor certeza
+            # 🔎 N° de operación: igual en los dos lados, o impreso dentro de la
+            #    descripción del banco (el PDF imprime los últimos dígitos).
+            ref_ok = _refs_compatibles(mv["ref"], as_["ref"])
+            if not ref_ok and as_["ref"] and mv["desc_digitos"]:
+                sufijo = as_["ref"][-6:]
+                ref_ok = (as_["ref"] in mv["desc_digitos"]
+                          or (len(sufijo) >= 5 and sufijo in mv["desc_digitos"]))
+            diferencia = round(abs(mv["importe"] - as_["importe"]), 2)
+            con_comision = False
+            if diferencia > tolerancia:
+                # 🚫 Importe distinto: solo pasa si es la comisión del banco.
+                if not _acepta_comision(diferencia, ref_ok, comision, tope_comision):
+                    continue
+                con_comision = True
+            clave = (mv["importe"], mv["sentido"])
+            # ¿El mismo importe se repite del otro lado dentro de la ventana?
+            rivales_sis = _cerca(asis_por_importe.get(clave, []), mv["fecha"],
+                                 ventana_dias, excluir=as_["fecha"])
+            rivales_banco = _cerca(movs_por_importe.get(clave, []), as_["fecha"],
+                                   ventana_dias, excluir=mv["fecha"])
+            candidatos.append({
+                "mv": mv, "as": as_, "dias": dias, "ref_ok": ref_ok,
+                "con_comision": con_comision, "diferencia": diferencia,
+                "sim": similitud_nombres(mv["m"].get("descripcion"),
+                                         as_["m"].get("descripcion")),
+                "rivales_sis": rivales_sis, "rivales_banco": rivales_banco,
+            })
+
+    # 🔢 Puntaje: el importe ya coincide (50); suma la fecha, la descripción y
+    #    la referencia. Con cualquier rival el puntaje se topa en 60 (AMBIGUO).
     for c in candidatos:
-        c["puntaje"] = _confianza(True, c["dias"], c["similitud"], False, True)
-    candidatos.sort(key=lambda c: (-c["puntaje"], c["dias"], -c["similitud"]))
+        puntos = 50
+        if c["dias"] == 0:
+            puntos += 25
+        elif c["dias"] <= 2:
+            puntos += 20
+        elif c["dias"] <= 4:
+            puntos += 12
+        else:
+            puntos += 8
+        puntos += int(round(min(1.0, max(0.0, c["sim"])) * 20))
+        if c["ref_ok"]:
+            puntos += 10
+        if c["rivales_sis"] or c["rivales_banco"]:
+            puntos = min(puntos, 60)
+        c["seguro"] = bool(
+            not c["con_comision"]
+            and ((c["dias"] == 0 and not c["rivales_sis"] and not c["rivales_banco"])
+                 or (c["ref_ok"] and c["dias"] == 0))
+        )
+        if c["con_comision"]:
+            # Con diferencia de importe NUNCA es automático: se propone.
+            c["puntaje"] = 90 if c["ref_ok"] else 85
+        else:
+            c["puntaje"] = 100 if c["seguro"] else min(99, puntos)
+
+    # Se asignan primero las coincidencias seguras y después las de mayor puntaje.
+    candidatos.sort(key=lambda c: (0 if c["seguro"] else 1, -c["puntaje"],
+                                   c["dias"], -c["sim"], c["as"]["i"]))
+
+    por_mov = {}
+    for c in candidatos:
+        por_mov.setdefault(c["mv"]["i"], []).append(c)
 
     usados_banco, usados_as, propuestas = set(), set(), []
     for c in candidatos:
-        if c["i_banco"] in usados_banco or c["i_as"] in usados_as:
+        mv, as_ = c["mv"], c["as"]
+        if mv["i"] in usados_banco or as_["i"] in usados_as:
             continue
-        # ¿hay otro candidato igual de bueno para el mismo movimiento? -> AMBIGUO
-        rivales = [x for x in candidatos
-                   if x is not c and x["i_banco"] == c["i_banco"] and x["i_as"] not in usados_as
-                   and abs(x["puntaje"] - c["puntaje"]) <= 5
-                   and x["dias"] == c["dias"]]
-        unico = not rivales
-        mov, asiento = movimientos_banco[c["i_banco"]], asientos[c["i_as"]]
-        confianza = _confianza(True, c["dias"], c["similitud"], False, unico)
-        # 💰 si el importe no es EXACTO (diferencia de céntimos) va a revisión
-        diferencia = round(abs(normalizar_monto(asiento.get("monto"))
-                               - normalizar_monto(mov.get("monto"))), 2)
-        if diferencia > 0.005:
-            confianza = min(confianza, 70)
+        rivales = max(c["rivales_sis"], c["rivales_banco"])
+        if c["con_comision"]:
+            estado = "CONCILIADO CON DIFERENCIA"
+            confianza = c["puntaje"]
+            if rivales:
+                confianza = min(confianza, 75)
+        elif c["seguro"]:
+            estado = _clasificar(1, c["dias"])
+            confianza = 100
+        elif rivales:
+            estado = "AMBIGUO"
+            confianza = min(c["puntaje"], 60)
+        else:
+            estado = _clasificar(2 if c["dias"] else 1, c["dias"])
+            confianza = c["puntaje"]
+
+        observacion = ""
+        if rivales:
+            observacion = ("El importe se repite %d vez/veces en el período: "
+                           "revise cuál corresponde." % rivales)
+        if c["con_comision"]:
+            extra = ("Diferencia de %s entre el banco y el sistema: puede ser la "
+                     "comisión del banco o un redondeo. Revise el comprobante antes "
+                     "de aprobar." % ("%.2f" % c["diferencia"]))
+            observacion = (observacion + " " + extra).strip()
         propuestas.append({
-            "i_banco": c["i_banco"], "i_asiento": c["i_as"],
-            "id_movimiento_banco": mov.get("id"), "id_asiento": asiento.get("id"),
-            "banco": mov.get("banco"), "cuenta": mov.get("cuenta", ""),
-            "fecha_contable": asiento.get("fecha"), "fecha_banco": mov.get("fecha"),
+            "i_banco": mv["i"], "i_asiento": as_["i"],
+            "id_movimiento_banco": mv["m"].get("id"),
+            "id_asiento": as_["m"].get("id"),
+            "banco": mv["m"].get("banco"), "cuenta": mv["m"].get("cuenta", ""),
+            "fecha_contable": as_["m"].get("fecha"), "fecha_banco": mv["m"].get("fecha"),
             "dias_desfase": c["dias"],
-            "descripcion_contable": asiento.get("descripcion"),
-            "descripcion_banco": mov.get("descripcion"),
-            "importe_contable": normalizar_monto(asiento.get("monto")),
-            "importe_banco": normalizar_monto(mov.get("monto")),
-            "diferencia": diferencia, "sentido": _sentido(mov.get("monto"), mov.get("descripcion")),
-            "referencia": mov.get("referencia", ""), "pagina_pdf": mov.get("pagina"),
-            "nivel": 2 if c["dias"] else 1,
-            "estado": "AMBIGUO" if not unico else _clasificar(1, c["dias"]),
+            "descripcion_contable": as_["m"].get("descripcion"),
+            "documento_contable": as_["m"].get("documento", ""),
+            "descripcion_banco": mv["m"].get("descripcion"),
+            "importe_contable": as_["importe"], "importe_banco": mv["importe"],
+            "diferencia": c["diferencia"],
+            "sentido": mv["sentido"],
+            "referencia": mv["m"].get("referencia", "") or mv["m"].get("operacion", ""),
+            "origen": as_["m"].get("origen", ""),
+            "id_movimiento": as_["m"].get("id_movimiento", 0),
+            "id_gasto_compras": as_["m"].get("id_gasto_compras", 0),
+            "id_factura": as_["m"].get("id_factura", 0),
+            "pagina_pdf": mv["m"].get("pagina"),
+            "nivel": (3 if c["ref_ok"] else
+                      (2 if c["con_comision"] else (1 if c["dias"] == 0 else 2))),
+            "estado": estado,
             "confianza": confianza,
-            # 🔎 Cuántos candidatos equivalentes hay para esta línea del banco:
-            #    con 1 se concilia solo; con 2+ hay que elegir a mano.
-            "rivales": len(rivales),
-            "candidatos": len(rivales) + 1,
-            # Detalle de TODOS los candidatos, para que la pantalla los muestre.
+            "rivales": rivales,
+            "candidatos": rivales + 1,
             "candidatos_detalle": [
-                {"id_asiento": asientos[x["i_as"]].get("id"),
-                 "descripcion": asientos[x["i_as"]].get("descripcion"),
-                 "fecha": asientos[x["i_as"]].get("fecha"),
-                 "tabla": asientos[x["i_as"]].get("tabla", ""),
-                 "dias": x["dias"]}
-                for x in ([c] + rivales)
+                {"id_asiento": otro["as"]["m"].get("id"),
+                 "descripcion": otro["as"]["m"].get("descripcion"),
+                 "fecha": otro["as"]["m"].get("fecha"),
+                 "tabla": otro["as"]["m"].get("tabla", ""),
+                 "dias": otro["dias"]}
+                for otro in por_mov.get(mv["i"], [c])
             ],
-            "reglas": "importe exacto; mismo banco; sentido igual; desfase %d día(s); "
-                      "similitud %.2f" % (c["dias"], c["similitud"]),
-            "observacion": "Varios candidatos equivalentes" if not unico else "",
-            "accion_sugerida": "Revisar y aprobar" if unico else "Elegir el movimiento correcto",
+            "reglas": ("importe %s; mismo banco, cuenta y moneda; sentido igual; "
+                       "desfase %d día(s); misma fecha: %s; importe único: %s%s"
+                       % ("+ comisión" if c["con_comision"] else "exacto",
+                          c["dias"], "sí" if c["dias"] == 0 else "no",
+                          "sí" if not rivales else "no",
+                          "; N° de operación coincide" if c["ref_ok"] else "")),
+            "observacion": observacion,
+            "accion_sugerida": ("Revisar la comisión y aprobar" if c["con_comision"]
+                                else ("Revisar y aprobar" if not rivales
+                                      else "Elegir el movimiento correcto")),
         })
-        usados_banco.add(c["i_banco"]); usados_as.add(c["i_as"])
+        usados_banco.add(mv["i"])
+        usados_as.add(as_["i"])
+
+    propuestas.sort(key=lambda p: (normalizar_fecha(p["fecha_banco"]) or datetime.date.min,
+                                   p["importe_banco"]))
     return propuestas
 
 
@@ -250,7 +470,9 @@ def reporte(propuestas, movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_P
         usados_banco.add(p["i_banco"])
         usados_as.add(p["i_asiento"])
         estado = p["estado"]
-        if estado == "AMBIGUO" or p["confianza"] < 60:
+        if p.get("diferencia", 0) > 0.005:
+            grupos["G"].append(p)
+        elif estado == "AMBIGUO" or p["confianza"] < 60:
             grupos["I"].append(p)
         elif "AGRUPADO" in estado:
             grupos["C"].append(p)

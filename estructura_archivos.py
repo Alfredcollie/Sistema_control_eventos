@@ -157,6 +157,8 @@ def carpeta(tipo, fecha=None, ruc=None, nombre=None, placa=None, dni=None,
 
     if tipo in ("compra_factura", "factura_recibida"):
         return "Compras/%s/%s/Facturas" % (mes, ruc_o_nombre(ruc, nombre))
+    if tipo in ("compra_nota_credito", "nota_credito_recibida"):
+        return "Compras/%s/%s/Notas de Credito" % (mes, ruc_o_nombre(ruc, nombre))
     if tipo in ("compra_comprobante", "pago_comprobante", "comprobante_egreso",
                 "soporte_pago_tercero"):
         return "Compras/%s/%s/Comprobantes de pago" % (mes, ruc_o_nombre(ruc, nombre))
@@ -241,6 +243,8 @@ def ruta_documento(tipo, nombre_archivo, ruta_base="", **datos):
 _CONSULTAS = {
     "facturas_recibidas": ("SELECT fecha, ruc, proveedor FROM facturas_recibidas WHERE id = %s",
                            ("fecha", "ruc", "nombre")),
+    "notas_credito_recibidas": ("SELECT fecha, ruc, proveedor FROM notas_credito_recibidas WHERE id = %s",
+                                ("fecha", "ruc", "nombre")),
     "facturas_emitidas": ("SELECT fecha, cliente FROM facturas_emitidas WHERE id = %s",
                           ("fecha", "nombre")),
     "pagos_comprobantes": ("SELECT fecha_pago, proveedor_nombre FROM pagos_comprobantes WHERE id = %s",

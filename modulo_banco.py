@@ -3183,7 +3183,7 @@ class ModuloBancoApp:
                                COALESCE(p.numero_operacion, '')
                         FROM pagos_clientes p
                         LEFT JOIN facturas_emitidas f ON p.id_factura = f.id
-                        WHERE TRUE  -- se incluyen tambien los huerfanos (factura borrada)
+                        WHERE TRUE  -- los cobros huérfanos se muestran para revisarlos
                     """)
                     datos["cobros"] = c.fetchall()
                 except Exception as exc:
@@ -3201,7 +3201,15 @@ class ModuloBancoApp:
                                COALESCE(p.numero_operacion, '')
                         FROM pagos_comprobantes p
                         LEFT JOIN facturas_recibidas f ON p.id_factura = f.id
-                        WHERE TRUE  -- se incluyen tambien los huerfanos (factura borrada)
+                        WHERE (
+                            f.id IS NOT NULL
+                            OR NOT EXISTS (
+                                SELECT 1 FROM facturas_recibidas _fd
+                                WHERE TRIM(UPPER(_fd.numero_documento)) =
+                                      TRIM(UPPER(COALESCE(p.codigo_cotizacion, '')))
+                                  AND ABS(COALESCE(p.monto_pagado,0)
+                                          - COALESCE(_fd.total,0)) < 0.01)
+                        )  -- se excluyen solo los pagos DUPLICADOS de una factura existente
                     """)
                     datos["pagos"] = c.fetchall()
                 except Exception as exc:
@@ -6966,6 +6974,17 @@ class ModuloBancoApp:
                                         COALESCE(p.numero_operacion,'')
                                  FROM pagos_comprobantes p
                                  WHERE COALESCE(p.monto_pagado,0) > 0
+                                   AND (
+                                       EXISTS (
+                                           SELECT 1 FROM facturas_recibidas _fx
+                                           WHERE _fx.id = p.id_factura)
+                                       OR NOT EXISTS (
+                                           SELECT 1 FROM facturas_recibidas _fd
+                                           WHERE TRIM(UPPER(_fd.numero_documento)) =
+                                                 TRIM(UPPER(COALESCE(p.codigo_cotizacion, '')))
+                                             AND ABS(COALESCE(p.monto_pagado,0)
+                                                     - COALESCE(_fd.total,0)) < 0.01)
+                                   )
                                    AND NOT EXISTS (
                                        SELECT 1 FROM facturas_recibidas f
                                        WHERE f.id = p.id_factura
@@ -7129,6 +7148,33 @@ class ModuloBancoApp:
                     conn.commit()
                 except Exception:
                     pass
+                # 🧹 Asientos PENDIENTES de pagos DUPLICADOS/huérfanos: el pago
+                #    apunta a una factura borrada, pero su N° de documento coincide
+                #    con una factura existente y por el mismo importe. Es un pago
+                #    fantasma (factura duplicada que se eliminó) y no debe quedar
+                #    en la conciliación ni restar en el banco.
+                try:
+                    c.execute("""
+                        DELETE FROM conciliacion_bancaria cb
+                        WHERE cb.origen = 's:pagos_comprobantes'
+                          AND COALESCE(cb.estado, '') <> 'conciliado'
+                          AND NOT EXISTS (
+                                SELECT 1 FROM pagos_comprobantes p
+                                JOIN facturas_recibidas f ON f.id = p.id_factura
+                                WHERE p.id = cb.id_movimiento)
+                          AND EXISTS (
+                                SELECT 1 FROM pagos_comprobantes p2
+                                JOIN facturas_recibidas f2
+                                  ON TRIM(UPPER(f2.numero_documento)) =
+                                     TRIM(UPPER(COALESCE(p2.codigo_cotizacion, '')))
+                                WHERE p2.id = cb.id_movimiento
+                                  AND ABS(COALESCE(p2.monto_pagado,0)
+                                          - COALESCE(f2.total,0)) < 0.01)
+                    """)
+                    conn.commit()
+                except Exception as _e_limp:
+                    conn.rollback()
+                    print("[Conciliación] limpieza de duplicados huérfanos:", _e_limp)
                 # 4) asientos del banco (ya incluyen lo sincronizado)
                 # 🚫 Se excluyen los YA conciliados (por la vía clásica o por el
                 #    motor) para que no se vuelvan a proponer y se puedan cruzar

@@ -102,7 +102,8 @@ def tiene_whatsapp_desktop() -> bool:
         try:
             res = subprocess.run(
                 ["mdfind", "kMDItemCFBundleIdentifier == 'net.whatsapp.WhatsApp' || kMDItemCFBundleIdentifier == 'com.whatsapp.desktop'"],
-                capture_output=True, text=True
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace"
             )
             if res.stdout.strip(): return True
         except Exception:

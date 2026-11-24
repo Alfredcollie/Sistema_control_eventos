@@ -73,7 +73,8 @@ def _applescript_elegir_carpeta(titulo):
 def _osascript(cmd):
     """Ejecuta el AppleScript. Devuelve (osascript_disponible, ruta_elegida)."""
     try:
-        res = subprocess.run(["osascript", "-e", cmd], capture_output=True, text=True)
+        res = subprocess.run(["osascript", "-e", cmd], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return (False, "")          # Sin osascript: se usará el diálogo de Tkinter
     except Exception:

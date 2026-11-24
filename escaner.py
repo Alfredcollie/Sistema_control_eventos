@@ -310,7 +310,8 @@ def _ejecutar_ps(script, argumentos, timeout=240):
         orden += [str(a) for a in argumentos]
         banderas = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         proceso = subprocess.Popen(orden, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, creationflags=banderas)
+                                   text=True, encoding="utf-8", errors="replace",
+                                   creationflags=banderas)
         try:
             proceso.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -446,7 +447,8 @@ def _hosts_multifuncional():
         salida = subprocess.run(
             [_powershell(), "-NoProfile", "-NonInteractive", "-Command",
              "Get-Printer | Select-Object -ExpandProperty Name"],
-            capture_output=True, text=True, timeout=25)
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=25)
         for linea in (salida.stdout or "").splitlines():
             host = linea.split("(")[0].strip()
             if host and " " not in host and host.upper().startswith(("HP", "CANON", "EPSON")):

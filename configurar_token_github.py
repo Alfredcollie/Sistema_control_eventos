@@ -69,7 +69,8 @@ def _remoto(carpeta):
     try:
         import subprocess
         salida = subprocess.run(["git", "-C", carpeta, "remote", "get-url", "origin"],
-                                capture_output=True, text=True).stdout.strip()
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace").stdout.strip()
     except Exception:
         salida = ""
     if not salida:

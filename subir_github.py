@@ -56,7 +56,8 @@ PROGRAMA = "EVENTOS"
 def ejecutar(args, silencioso=False):
     """Ejecuta un comando de git dentro del repositorio."""
     orden = ["git", "-C", REPO] + args
-    resultado = subprocess.run(orden, capture_output=True, text=True)
+    resultado = subprocess.run(orden, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
     if not silencioso:
         salida = (resultado.stdout or "").strip()
         if salida:
@@ -247,7 +248,8 @@ def compilar_y_publicar(rama, forzar=False):
     if lanzar and gh and True:
         try:
             orden = [gh, "workflow", "run", NOMBRE_WORKFLOW, "--ref", rama]
-            resultado = subprocess.run(orden, capture_output=True, text=True, cwd=REPO)
+            resultado = subprocess.run(orden, capture_output=True, text=True, cwd=REPO,
+                                       encoding="utf-8", errors="replace")
             if resultado.returncode == 0:
                 print("   ✅ Flujo lanzado con GitHub CLI (gh).")
                 lanzado = True

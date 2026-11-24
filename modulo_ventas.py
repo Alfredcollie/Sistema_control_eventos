@@ -2035,7 +2035,14 @@ class FacturasEmitidasTab:
         ctk.CTkLabel(self.f_form, text="Evento Asociado:", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.combo_evento = ctk.CTkComboBox(self.f_form, state="readonly", command=self.al_seleccionar_evento); self.combo_evento.pack(fill="x", padx=10, pady=(0, 8))
         ctk.CTkLabel(self.f_form, text="Orden de Compra:", font=("Arial", 11, "bold"), text_color="#166534").pack(anchor="w", padx=10)
-        self.combo_oc = ctk.CTkComboBox(self.f_form, state="readonly"); self.combo_oc.pack(fill="x", padx=10, pady=(0, 8))
+        self.combo_oc = ctk.CTkComboBox(self.f_form, state="readonly",
+                                        command=lambda _v: self._actualizar_info_oc())
+        self.combo_oc.pack(fill="x", padx=10, pady=(0, 2))
+        # 📋 Detalle de la OC elegida (se completa en _actualizar_info_oc)
+        self.lbl_oc_info = ctk.CTkLabel(self.f_form, text="", font=("Arial", 9),
+                                        text_color="#555555", justify="left",
+                                        wraplength=290)
+        self.lbl_oc_info.pack(anchor="w", padx=10, pady=(0, 6))
         ctk.CTkLabel(self.f_form, text="Monto Base (Sin IGV / Subtotal):", font=("Arial", 11, "bold")).pack(anchor="w", padx=10)
         self.ent_subtotal = ctk.CTkEntry(self.f_form); self.ent_subtotal.pack(fill="x", padx=10, pady=(0, 8)); self.ent_subtotal.bind("<KeyRelease>", self._base_escrita_form)
         # 🧾 Importe total impreso en la factura (puede diferir 1 céntimo por el redondeo del emisor)
@@ -2804,24 +2811,6 @@ class FacturasEmitidasTab:
         self.mes_filtro = self.mes_facturas
         self.pagina_actual = 1
         self.cargar_datos_tabla(reset_pagina=True)
-
-    def _cambiar_mes_cobros(self, valor=None):
-        try:
-            self.mes_cobros = valor or self.combo_mes_cobros.get()
-        except Exception:
-            self.mes_cobros = "Todos los meses"
-        self.mes_filtro = self.mes_cobros
-        self.pagina_actual = 1
-        self._refrescar_listas_cobro()
-
-    def _cambiar_mes_nc(self, valor=None):
-        try:
-            self.mes_nc = valor or self.combo_mes_nc.get()
-        except Exception:
-            self.mes_nc = "Todos los meses"
-        self.mes_filtro = self.mes_nc
-        self.pagina_actual = 1
-        self.cargar_datos_nc(reset_pagina=True)
 
     def cargar_datos_tabla(self, reset_pagina=False):
         if reset_pagina: self.pagina_actual = 1
@@ -3712,6 +3701,16 @@ class CuentasPorCobrarTab:
     _primera_ruta_venta = FacturasEmitidasTab._primera_ruta_venta
     _abrir_comprobantes_venta = FacturasEmitidasTab._abrir_comprobantes_venta
     _menu_contextual_factura = FacturasEmitidasTab._menu_contextual_factura
+
+    def _cambiar_mes_cobros(self, valor=None):
+        """Filtra la lista de cobros por el mes elegido y la vuelve a cargar."""
+        try:
+            self.mes_cobros = valor or self.combo_mes_cobros.get()
+        except Exception:
+            self.mes_cobros = "Todos los meses"
+        self.mes_filtro = self.mes_cobros
+        self.pagina_actual = 1
+        self._refrescar_listas_cobro()
 
     # =========================================================
     # 🔃 ORDENAR LA TABLA POR CUALQUIER COLUMNA (clic en el título)
@@ -5898,6 +5897,16 @@ class NotasCreditoTab:
         self.registros_por_pagina = 100000   # 🔎 carga todo
         
         self.crear_interfaz()
+
+    def _cambiar_mes_nc(self, valor=None):
+        """Filtra las notas de crédito por el mes elegido y las vuelve a cargar."""
+        try:
+            self.mes_nc = valor or self.combo_mes_nc.get()
+        except Exception:
+            self.mes_nc = "Todos los meses"
+        self.mes_filtro = self.mes_nc
+        self.pagina_actual = 1
+        self.cargar_datos_nc(reset_pagina=True)
 
     def importar_nc_sire(self):
         cfg = cargar_configuracion_regional()

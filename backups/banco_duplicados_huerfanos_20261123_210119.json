@@ -1,0 +1,62 @@
+[
+  {
+    "id": 95,
+    "banco": "BCP",
+    "cuenta": "BCP - 194-7374220-0-69",
+    "fecha": "12/10/2026",
+    "descripcion": "CABELLO CORRALES JONATHAN",
+    "monto": "-1770.0",
+    "tipo": "egreso",
+    "origen": "s:pagos_comprobantes",
+    "id_movimiento": 54,
+    "estado": ""
+  },
+  {
+    "id": 97,
+    "banco": "BCP",
+    "cuenta": "",
+    "fecha": "12/10/2026",
+    "descripcion": "CABELLO CORRALES JONATHAN",
+    "monto": "-1770.0",
+    "tipo": "egreso",
+    "origen": "s:pagos_comprobantes",
+    "id_movimiento": 55,
+    "estado": ""
+  },
+  {
+    "id": 98,
+    "banco": "BCP",
+    "cuenta": "",
+    "fecha": "12/10/2026",
+    "descripcion": "CABELLO CORRALES JONATHAN",
+    "monto": "-1770.0",
+    "tipo": "egreso",
+    "origen": "s:pagos_comprobantes",
+    "id_movimiento": 56,
+    "estado": ""
+  },
+  {
+    "id": 99,
+    "banco": "BCP",
+    "cuenta": "",
+    "fecha": "12/10/2026",
+    "descripcion": "CABELLO CORRALES JONATHAN",
+    "monto": "-1770.0",
+    "tipo": "egreso",
+    "origen": "s:pagos_comprobantes",
+    "id_movimiento": 57,
+    "estado": ""
+  },
+  {
+    "id": 100,
+    "banco": "BCP",
+    "cuenta": "",
+    "fecha": "12/10/2026",
+    "descripcion": "CABELLO CORRALES JONATHAN",
+    "monto": "-1770.0",
+    "tipo": "egreso",
+    "origen": "s:pagos_comprobantes",
+    "id_movimiento": 58,
+    "estado": ""
+  }
+]

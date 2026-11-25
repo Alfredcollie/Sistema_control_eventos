@@ -757,6 +757,19 @@ def texto_de_comprobante(ruta):
     """Texto del PDF de un comprobante. Si es un escaneo sin texto, se usa OCR."""
     if not ruta or not os.path.exists(str(ruta)):
         return ""
+    # 📱 Si es una foto/JPG/PNG, se manda directo al OCR con la mejora de
+    #    imágenes; NO se convierte a PDF (PyMuPDF la reescala y el OCR pierde
+    #    los importes pequeños).
+    _ext = os.path.splitext(str(ruta))[1].lower()
+    if _ext in (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"):
+        try:
+            import escaner as mod_escaner
+            resultado = mod_escaner.ocr_paginas([str(ruta)])
+            return mod_escaner.texto_de_resultados(resultado)[:6000]
+        except Exception as e:
+            print("Aviso - OCR de la imagen del comprobante:", e)
+            return ""
+
     # 1) Texto propio del PDF (recibos digitales del banco)
     try:
         from pypdf import PdfReader
@@ -784,10 +797,26 @@ def texto_de_comprobante(ruta):
         carpeta_tmp = tempfile.mkdtemp(prefix="ocr_comp_")
         for i in range(min(2, doc.page_count)):
             pagina = doc[i]
-            pix = pagina.get_pixmap(dpi=200)
-            salida = os.path.join(carpeta_tmp, "pagina_%d.png" % i)
-            pix.save(salida)
-            imagenes.append(salida)
+            _guardada = False
+            try:
+                _imgs = pagina.get_images(full=True)
+                if len(_imgs) == 1:
+                    _info = doc.extract_image(_imgs[0][0])
+                    _bytes = _info.get("image") if _info else None
+                    _ext = str((_info or {}).get("ext") or "png").lower()
+                    if _bytes:
+                        _salida_img = os.path.join(carpeta_tmp, "pagina_%d_nativa.%s" % (i, _ext))
+                        with open(_salida_img, "wb") as _f:
+                            _f.write(_bytes)
+                        imagenes.append(_salida_img)
+                        _guardada = True
+            except Exception as e_img:
+                print("Aviso - imagen nativa del PDF:", e_img)
+            if not _guardada:
+                pix = pagina.get_pixmap(dpi=300)
+                salida = os.path.join(carpeta_tmp, "pagina_%d.png" % i)
+                pix.save(salida)
+                imagenes.append(salida)
         doc.close()
     except Exception as e:
         print("Aviso - convirtiendo el PDF para OCR:", e)
@@ -1560,6 +1589,14 @@ def _a_numero_estricto(texto):
     return desformatear_numero(limpio)
 
 
+def _sin_acentos_busqueda(texto):
+    """Texto en minúsculas y sin acentos para comparar búsquedas."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(texto or ""))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return t.lower()
+
+
 def _normalizar_numero_busqueda(txt):
     """Normaliza un monto escrito por el usuario a formato 1234.56.
 
@@ -1649,19 +1686,53 @@ def recargo_restaurante(base=0.0, total=0.0, recargo=0.0):
 
 
 def construir_condicion_busqueda_compras(filtro):
-    """Busca en TODAS las columnas de la fila, incluido el MONTO (y el neto)."""
+    """Busca por CUALQUIER dato visible de la factura.
+
+    Cubre N° interno, fecha, hora, N° documento, orden de servicio, proveedor,
+    RUC, vehículo, chofer, kilometraje, galones, categoría, concepto, tipo,
+    días de crédito, base, IGV, total, detracción, delivery, comisión, archivo,
+    pagos, neto, monto pagado y estado (pendiente / pagada en parte / pagada).
+    """
     if not filtro or not str(filtro).strip():
         return "", []
     txt = str(filtro).strip()
     val = f"%{txt}%"
+    val_plano = "%" + _sin_acentos_busqueda(txt) + "%"
+    val_compacto = "%" + re.sub(r"[\s\-./]", "", txt) + "%"
 
-    columnas = ("numero_documento", "proveedor", "evento_asociado", "descripcion",
-                "tipo_documento", "categoria", "ruc", "fecha", "dias_credito",
-                "subtotal", "impuesto", "total", "det_monto")
-
+    columnas = (
+        "id", "tipo_documento", "fecha", "numero_documento",
+        "proveedor", "ruc", "descripcion", "evento_asociado", "chofer_asociado",
+        "orden_servicio", "categoria", "kilometraje",
+        "cantidad_combustible", "dias_credito", "subtotal", "impuesto", "total",
+        "det_porcentaje", "det_monto", "delivery", "recargo", "archivo_ruta",
+        "pagado_por_tercero", "soporte_pago_tercero", "comision_interbancaria",
+        "es_interbancario", "es_compra_cruzada",
+    )
     partes = [f"CAST({c} AS TEXT) ILIKE %s" for c in columnas]
     params = [val] * len(columnas)
 
+    # Texto sin acentos: "razon" encuentra "Razón", "inversiones" etc.
+    for c in ("numero_documento", "proveedor", "ruc", "descripcion",
+              "evento_asociado", "chofer_asociado", "orden_servicio", "categoria",
+              "tipo_documento", "archivo_ruta", "pagado_por_tercero",
+              "soporte_pago_tercero"):
+        partes.append("translate(lower(CAST(%s AS TEXT)), 'áéíóúñü', 'aeiounu') LIKE %%s" % c)
+        params.append(val_plano)
+
+    # Documento/RUC sin guiones ni espacios: F003-00095752 = F00300095752
+    partes.append("REPLACE(REPLACE(CAST(numero_documento AS TEXT), '-', ''), ' ', '') ILIKE %s")
+    params.append(val_compacto)
+    partes.append("REPLACE(REPLACE(CAST(ruc AS TEXT), '-', ''), ' ', '') ILIKE %s")
+    params.append(val_compacto)
+
+    # Fechas con / o - indistintamente
+    partes.append("REPLACE(REPLACE(CAST(fecha AS TEXT), '/', '-'), ' ', '') ILIKE %s")
+    params.append(val_compacto)
+    partes.append("REPLACE(REPLACE(CAST(fecha AS TEXT), '/', ''), ' ', '') ILIKE %s")
+    params.append(val_compacto)
+
+    # Forma de pago / montos pagados asociados al comprobante
     partes.append(
         "EXISTS (SELECT 1 FROM pagos_comprobantes pc "
         "WHERE pc.id_factura = facturas_recibidas.id "
@@ -1669,10 +1740,24 @@ def construir_condicion_busqueda_compras(filtro):
     )
     params.extend([val, val])
 
+    # Estado: pendiente, pagada en parte o pagada totalmente
+    _pagado_sql = ("COALESCE((SELECT SUM(p.monto_pagado) FROM pagos_comprobantes p "
+                   "WHERE p.id_factura = facturas_recibidas.id), 0) "
+                   "+ COALESCE((SELECT SUM(a.monto) FROM notas_credito_aplicaciones a "
+                   "WHERE a.id_factura = facturas_recibidas.id), 0)")
+    partes.append(
+        "(CASE WHEN %s <= 0.009 THEN 'pendiente sin pagar' "
+        "WHEN %s >= COALESCE(total,0) - 0.01 THEN 'pagada totalmente' "
+        "ELSE 'pagada en parte parcial' END) ILIKE %%s" % (_pagado_sql, _pagado_sql)
+    )
+    params.append(val)
+
+    # Búsqueda por monto (S/ 1,234.56 / 510.70 / 510,7)
     num = _normalizar_numero_busqueda(txt)
     if num:
         n = "%" + num + "%"
-        for col in ("subtotal", "impuesto", "total", "det_monto"):
+        for col in ("subtotal", "impuesto", "total", "det_monto", "det_porcentaje",
+                    "delivery", "recargo", "comision_interbancaria"):
             partes.append("TO_CHAR(COALESCE(%s,0), 'FM999999999999990.00') LIKE %%s" % col)
             params.append(n)
         partes.append("TO_CHAR(COALESCE(total,0) - COALESCE(det_monto,0), 'FM999999999999990.00') LIKE %s")
@@ -1878,6 +1963,12 @@ def extraer_datos_de_texto(texto):
             datos["numero"] = normalizar_numero_comprobante(
                 f"{m.group(1)}{int(m.group(2)):03d}-{m.group(3)}")
 
+    if not datos.get("numero"):
+        try:
+            datos["numero"] = numero_comprobante_desde_texto(original)
+        except Exception:
+            pass
+
     # --- RUC del EMISOR (proveedor) ---
     #     En una factura hay DOS RUC: el del emisor (membrete, arriba) y el del
     #     cliente (debajo de "CLIENTE"/"SEÑOR(ES)"). El proveedor es el primero
@@ -1925,6 +2016,32 @@ def extraer_datos_de_texto(texto):
             except Exception:
                 fecha = None
     datos["fecha"] = fecha or ""
+    # 📅 Si el OCR leyó varias fechas, preferir la de emisión y no la de pago
+    #    (muchos recibos muestran "F. PAGO" / "VENCIMIENTO" más abajo).
+    try:
+        _plano_fechas = re.sub(r"(?<=\d/)\s*['’]\s*(?=\d{4})", "", plano)
+        _plano_fechas = re.sub(r"(?<=\d/)(?:II|I1|1I)(?=/\d{4})", "11",
+                               _plano_fechas, flags=re.IGNORECASE)
+        _fechas = []
+        for _mf in re.finditer(r"\b(\d{1,2})\s*[/\-.|]\s*(\d{1,2})\s*[/\-.|]\s*(\d{4})\b",
+                               _plano_fechas):
+            _d, _m, _a = _mf.group(1), _mf.group(2), _mf.group(3)
+            try:
+                if not (1 <= int(_d) <= 31 and 1 <= int(_m) <= 12):
+                    continue
+            except Exception:
+                continue
+            _f = "%02d/%02d/%s" % (int(_d), int(_m), _a)
+            _ctx = _plano_fechas[max(0, _mf.start() - 45):_mf.start()].upper()
+            _pago = bool(re.search(
+                r"VENC|VT[XUOA]|VTO|VTU|P.{0,3}GO|CRED|F\.\s*P|Y[JI][:.]?\s*C?ATA|PROO", _ctx))
+            _fechas.append((_mf.start(), _f, _pago))
+        if _fechas:
+            _no_pago = [c for c in _fechas if not c[2]]
+            if _no_pago:
+                datos["fecha"] = _no_pago[0][1]
+    except Exception as e:
+        print("Aviso - eligiendo fecha del comprobante:", e)
 
     # --- Montos ---
     def monto_con(patron):
@@ -1963,6 +2080,48 @@ def extraer_datos_de_texto(texto):
             pass
     if not total:
         total = round(subtotal + igv, 2)
+    # 🧮 Respaldo para fotos/recibos donde el OCR no leyó los rótulos:
+    #    se buscan tres importes que cumplan base + IGV = total.
+    if (not total or (not subtotal and not igv)
+            or (subtotal > 0 and igv > 0 and abs(subtotal + igv - total) > 0.05)):
+        _texto_num = re.sub(r"(?<=\d)\s*([.,])\s*(?=\d)", r"\1", str(texto or ""))
+        _texto_num = _texto_num.replace("O", "0").replace("o", "0")
+        _valores = []
+        for _m in re.finditer(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2}", _texto_num):
+            try:
+                _v = _a_numero(_m.group(0))
+            except Exception:
+                continue
+            if 5.0 <= _v <= 1000000:
+                _valores.append(round(_v, 2))
+        _unicos = sorted(set(_valores))
+        _mejor = None
+        for _total in _unicos:
+            if _total < 20:
+                continue
+            for _base in _unicos:
+                if _base < 5 or _base >= _total:
+                    continue
+                for _igv in _unicos:
+                    if _igv <= 0 or _igv >= _total:
+                        continue
+                    if abs(_base + _igv - _total) > max(0.10, _total * 0.002):
+                        continue
+                    _ratio = _igv / _base
+                    if not (0.08 <= _ratio <= 0.25):
+                        continue
+                    _score = abs(_ratio - 0.18) + abs(_base + _igv - _total) * 2
+                    if _mejor is None or _score < _mejor[0]:
+                        _mejor = (_score, _base, _igv, _total)
+        if _mejor:
+            _score, _base, _igv, _total = _mejor
+            subtotal = _base
+            igv = _igv
+            total = _total
+    # Si hay un trío mayor y consistente, se prefiere (PDF/fotos con ruido).
+    _triple = _triple_montos_comprobante(texto)
+    if _triple and _triple[2] > total + 0.05 and _triple[0] > subtotal + 0.05:
+        subtotal, igv, total = _triple
     datos["subtotal"] = round(subtotal, 2)
     datos["igv"] = round(igv, 2)
     datos["total"] = round(total, 2)
@@ -2014,12 +2173,36 @@ def extraer_datos_de_texto(texto):
             limpio = re.sub(r"^[\W\d_]+", "", cand).strip()
             if len(limpio) < 5:
                 continue
+            if re.match(r"^(AV|JR|CAL|URB|MZ|LT|PJ|PROL|CARR|PSJ|OVAL|PASAJE)\b",
+                        limpio.upper()):
+                continue
+            if re.search(r"\b\d{2,}\b", limpio):
+                continue
             if re.search(r"R\.?U\.?C|FACTURA|BOLETA|ELECTR|HONORARIOS|FECHA|TOTAL|SUB\s*TOTAL|SEÑOR|SENOR|CLIENTE|DNI|CANTIDAD|DESCRIPCI", limpio, re.IGNORECASE):
                 continue
             if not re.search(r"[A-Za-zÁÉÍÓÚÑ]{4}", limpio):
                 continue
             nombre = limpio[:80]
             break
+    if nombre:
+        try:
+            if (_PARECE_DIRECCION.search(nombre)
+                    or re.match(r"^(AV|JR|CAL|URB|MZ|LT|PJ|PROL|CARR|PSJ|OVAL|PASAJE)\b",
+                                nombre.upper())):
+                nombre = ""
+        except Exception:
+            pass
+    if nombre:
+        try:
+            if (_PARECE_DIRECCION.search(nombre)
+                    or re.match(r"^(AV|JR|CAL|URB|MZ|LT|PJ|PROL|CARR|PSJ|OVAL|PASAJE)\b",
+                                nombre.upper())):
+                nombre = ""
+            _letras = sum(1 for _c in str(nombre) if _c.isalpha())
+            if _letras < max(1, len(str(nombre))) * 0.70:
+                nombre = ""
+        except Exception:
+            pass
     datos["proveedor"] = nombre
     return datos
 
@@ -2040,6 +2223,16 @@ _CACHE_MESES = {}
 _CACHE_TTL = 180          # segundos de validez
 _CACHE_EN_CURSO = set()
 
+
+def extraer_montos_comprobante(texto):
+    """Montos de un comprobante; usa la lectura general de Eventos."""
+    datos = extraer_datos_de_texto(texto)
+    base = float(datos.get("subtotal") or 0)
+    igv = float(datos.get("igv") or 0)
+    total = float(datos.get("total") or 0)
+    return {"base": round(base, 2), "igv": round(igv, 2),
+            "recargo": 0.0, "total": round(total, 2),
+            "leidos": 1 if total else 0}
 
 def _consulta_mes_con_registros(tabla, columna="fecha"):
     """Consulta la base (SOLO desde un hilo aparte)."""
@@ -2524,6 +2717,40 @@ def monto_en_palabras(texto):
         return 0.0
     return round(total + centimos / 100.0, 2)
 
+def _triple_montos_comprobante(texto):
+    """Busca un trío base + IGV = total entre los importes del texto."""
+    _texto_num = re.sub(r"(?<=\d)\s*([.,])\s*(?=\d)", r"\1", str(texto or ""))
+    _texto_num = _texto_num.replace("O", "0").replace("o", "0")
+    _valores = []
+    for _m in re.finditer(r"\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d+[.,]\d{2}", _texto_num):
+        try:
+            _v = _a_numero(_m.group(0))
+        except Exception:
+            continue
+        if 5.0 <= _v <= 1000000:
+            _valores.append(round(_v, 2))
+    _unicos = sorted(set(_valores))
+    _mejor = None
+    for _total in _unicos:
+        if _total < 20:
+            continue
+        for _base in _unicos:
+            if _base < 5 or _base >= _total:
+                continue
+            for _igv in _unicos:
+                if _igv <= 0 or _igv >= _total:
+                    continue
+                if abs(_base + _igv - _total) > max(0.10, _total * 0.002):
+                    continue
+                _ratio = _igv / _base
+                if not (0.08 <= _ratio <= 0.25):
+                    continue
+                _score = abs(_ratio - 0.18) + abs(_base + _igv - _total) * 2
+                if _mejor is None or _score < _mejor[0]:
+                    _mejor = (_score, _base, _igv, _total)
+    return (_mejor[1], _mejor[2], _mejor[3]) if _mejor else None
+
+
 def deducir_montos_por_suma(texto, tipo=""):
     """Deduce (base, IGV, total) buscando 'base + IGV = total' entre los importes.
 
@@ -2970,7 +3197,20 @@ def numero_comprobante_desde_texto(texto):
     if m:
         return normalizar_numero_comprobante(f"{m.group(1)}-{m.group(2)}")
     m = re.search(r"([EFB][0-9A-Z]{3}\s*-\s*\d+)", texto)
-    return normalizar_numero_comprobante(m.group(1).replace(" ", "")) if m else ""
+    if m:
+        return normalizar_numero_comprobante(m.group(1).replace(" ", ""))
+    # 🔎 El OCR a veces omite la letra de la serie: "003-00095752" -> "F003-00095752".
+    m = re.search(r"\b(\d{3})\s*[-\u2013\u2014]\s*(\d{7,8})\b", texto)
+    if m:
+        _mayus = texto.upper()
+        if "HONORARIO" in _mayus or "RECIBO POR HONORARIO" in _mayus:
+            _letra = "E"
+        elif "BOLETA" in _mayus and "FACTURA" not in _mayus:
+            _letra = "B"
+        else:
+            _letra = "F"
+        return normalizar_numero_comprobante("%s%s-%s" % (_letra, m.group(1), m.group(2)))
+    return ""
 
 
 
@@ -4284,18 +4524,29 @@ class FacturasRecibidasTab:
             messagebox.showerror("Librería faltante", "No se encontró 'pdfplumber'. Ejecuta: pip install pdfplumber", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             return
             
-        ruta = filedialog.askopenfilename(title="Seleccionar Factura PDF de SUNAT", filetypes=[("Archivos PDF", "*.pdf")])
+        ruta = filedialog.askopenfilename(
+            title="Seleccionar factura (PDF o foto)",
+            filetypes=[("Documentos", "*.pdf *.png *.jpg *.jpeg"),
+                       ("Archivos PDF", "*.pdf"),
+                       ("Imágenes", "*.png *.jpg *.jpeg")])
         if not ruta: return
         
         try:
             self.bloquear_autocompletado_ruc = True
             self._limpiar_montos_carga()
             
-            partes_texto = []
-            with pdfplumber.open(ruta) as pdf:
-                for page in pdf.pages:
-                    partes_texto.append(page.extract_text() + "\n")
-            texto = "".join(partes_texto)
+            _ext = os.path.splitext(str(ruta))[1].lower()
+            texto = ""
+            if _ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"):
+                texto = leer_ocr_windows(ruta) or ""
+            else:
+                partes_texto = []
+                with pdfplumber.open(ruta) as pdf:
+                    for page in pdf.pages:
+                        partes_texto.append((page.extract_text() or "") + "\n")
+                texto = "".join(partes_texto)
+                if not texto.strip():
+                    texto = leer_ocr_windows(ruta) or ""
                     
             if not texto.strip(): 
                 self.bloquear_autocompletado_ruc = False
@@ -4384,7 +4635,8 @@ class FacturasRecibidasTab:
                 self.ent_nro_doc.insert(0, numero_leido)
             
             # Lector tolerante: descarta vencimientos (2030) y entiende fechas en letras
-            fecha_tolerante = extraer_fecha_comprobante(texto)
+            _datos_ocr = extraer_datos_de_texto(texto)
+            fecha_tolerante = _datos_ocr.get("fecha") or extraer_fecha_comprobante(texto)
             fecha_match = None
             if fecha_tolerante:
                 fecha_match = re.match(r"(\d{2})[/\-.](\d{2})[/\-.](\d{4})", fecha_tolerante)
@@ -4433,6 +4685,10 @@ class FacturasRecibidasTab:
                 monto_total = desformatear_numero(tot_m.group(1))
             if sub_m:
                 base_leida = desformatear_numero(sub_m.group(1))
+            _montos_ocr = extraer_montos_comprobante(texto)
+            if _montos_ocr.get("total", 0) > 0:
+                monto_total = _montos_ocr["total"]
+                base_leida = _montos_ocr.get("base", 0) or base_leida
 
             recargo_calculado = 0.0
             try:
@@ -4509,6 +4765,16 @@ class FacturasRecibidasTab:
             
             self.actualizar_totales()
             self.al_seleccionar_proveedor()
+            try:
+                _prov_actual = self.combo_proveedor.get().strip()
+                if _prov_actual and (
+                        _prov_actual == "CTkComboBox"
+                        or re.match(r"^(AV|JR|CAL|URB|MZ|LT|PJ|PROL|CARR|PSJ|OVAL|PASAJE)\b",
+                                   _prov_actual.upper())
+                        or not re.search(r"[A-Za-z]{4}", _prov_actual)):
+                    self.combo_proveedor.set("")
+            except Exception:
+                pass
 
             # 🏢 Si el proveedor del PDF no está registrado, se agrega a 📦 Proveedores
             estado_prov = crear_proveedor_si_no_existe(datos_txt.get("proveedor") or self.combo_proveedor.get(),
@@ -5132,7 +5398,7 @@ class FacturasRecibidasTab:
         f_busqueda = ctk.CTkFrame(self.f_wrapper_derecha, fg_color="transparent")
         f_busqueda.pack(fill="x", pady=(0, 5))
         ctk.CTkLabel(f_busqueda, text="🔍 Buscar:", font=("Arial", 11, "bold")).pack(side="left", padx=(0, 5))
-        self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Filtrar por documento, proveedor, evento, concepto o monto...")
+        self.ent_buscar_facturas = ctk.CTkEntry(f_busqueda, placeholder_text="Buscar en todas las páginas del mes: N°, fecha, hora, RUC, proveedor, placa, monto, estado...")
         self.ent_buscar_facturas.pack(side="left", fill="x", expand=True)
         
         ctk.CTkLabel(f_busqueda, text="🗓️ Mes:", font=("Arial", 11, "bold")).pack(side="left", padx=(10, 5))
@@ -7643,14 +7909,24 @@ class FacturasRecibidasTab:
 
         f_scan = ctk.CTkFrame(f, fg_color="#eaf2f8", corner_radius=8)
         f_scan.pack(fill="x", pady=(0, 4))
-        ctk.CTkButton(f_scan, text="🖨️ Escanear factura (OCR)", height=34,
-                      font=("Arial", 12, "bold"), fg_color="#0e7490", hover_color="#155e75",
+        f_botones_scan = ctk.CTkFrame(f_scan, fg_color="transparent")
+        f_botones_scan.pack(fill="x", padx=8, pady=(8, 0))
+        ctk.CTkButton(f_botones_scan, text="🖨️ Escanear", height=32,
+                      font=("Arial", 11, "bold"), fg_color="#0e7490", hover_color="#155e75",
                       command=lambda: escanear_factura_editor()).pack(
-            side="left", padx=(8, 6), pady=8)
+            side="left", padx=(0, 4))
+        ctk.CTkButton(f_botones_scan, text="📄 Cargar PDF/foto", height=32,
+                      font=("Arial", 11, "bold"), fg_color="#1f538d", hover_color="#163b65",
+                      command=lambda: cargar_pdf_editor()).pack(
+            side="left", padx=4)
+        ctk.CTkButton(f_botones_scan, text="📱 Teléfono", height=32,
+                      font=("Arial", 11, "bold"), fg_color="#7d3c98", hover_color="#5b2c6f",
+                      command=lambda: escanear_telefono_editor()).pack(
+            side="left", padx=4)
         lbl_adjunto = ctk.CTkLabel(f_scan, text=_texto_adjunto(), font=("Arial", 10),
                                    text_color="#1f538d", anchor="w", justify="left",
-                                   wraplength=300)
-        lbl_adjunto.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
+                                   wraplength=560)
+        lbl_adjunto.pack(fill="x", padx=8, pady=(4, 8))
 
         def _valores(combo_attr):
             try:
@@ -7896,6 +8172,33 @@ class FacturasRecibidasTab:
             except Exception:
                 return defecto
 
+        _calculando = {"activo": False}
+
+        def _poner_calc(entrada, valor):
+            try:
+                texto = formatear_numero_entrada(valor)
+                if str(entrada.get()).strip() == texto:
+                    return
+                entrada.delete(0, tk.END)
+                entrada.insert(0, texto)
+            except Exception:
+                pass
+
+        def _tasa_editor():
+            tipo = str(c_tipo.get() or "")
+            if not _documento_con_igv(tipo):
+                return 0.0
+            return 0.105 if "10.5" in tipo else 0.18
+
+        def _detraccion_de(total):
+            try:
+                pct = _num(e_detp)
+            except Exception:
+                pct = 0.0
+            if pct <= 0:
+                return 0.0
+            return round(float(total) * pct / 100.0, 2)
+
         def _calc(*_a):
             try:
                 neto = _num(e_tot) - _num(e_detm) + (_num(e_del) if var_del.get() else 0.0)
@@ -7903,10 +8206,95 @@ class FacturasRecibidasTab:
                                         % formatear_moneda(neto))
             except Exception:
                 pass
-        for _e in (e_tot, e_detm, e_del):
-            _e.bind("<KeyRelease>", _calc)
+
+        def _desde_base(*_a):
+            if _calculando["activo"]:
+                return
+            _calculando["activo"] = True
+            try:
+                base = _num(e_sub)
+                rec = _num(e_rec)
+                if _documento_con_igv(c_tipo.get()):
+                    igv = round(base * _tasa_editor(), 2)
+                else:
+                    igv = 0.0
+                total = round(base + igv + rec, 2)
+                _poner_calc(e_imp, igv)
+                _poner_calc(e_tot, total)
+                _poner_calc(e_detm, _detraccion_de(total))
+            finally:
+                _calculando["activo"] = False
+            _calc()
+
+        def _desde_igv(*_a):
+            if _calculando["activo"]:
+                return
+            _calculando["activo"] = True
+            try:
+                total = round(_num(e_sub) + _num(e_imp) + _num(e_rec), 2)
+                _poner_calc(e_tot, total)
+                _poner_calc(e_detm, _detraccion_de(total))
+            finally:
+                _calculando["activo"] = False
+            _calc()
+
+        def _desde_total(*_a):
+            if _calculando["activo"]:
+                return
+            _calculando["activo"] = True
+            try:
+                total = _num(e_tot)
+                rec = _num(e_rec)
+                gravado = max(total - rec, 0.0)
+                if _documento_con_igv(c_tipo.get()):
+                    tasa = _tasa_editor()
+                    base = round(gravado / (1.0 + tasa), 2) if gravado > 0 else 0.0
+                    igv = round(gravado - base, 2)
+                else:
+                    base = gravado
+                    igv = 0.0
+                _poner_calc(e_sub, base)
+                _poner_calc(e_imp, igv)
+                _poner_calc(e_detm, _detraccion_de(total))
+            finally:
+                _calculando["activo"] = False
+            _calc()
+
+        def _desde_recargo(*_a):
+            if _calculando["activo"]:
+                return
+            _calculando["activo"] = True
+            try:
+                total = round(_num(e_sub) + _num(e_imp) + _num(e_rec), 2)
+                _poner_calc(e_tot, total)
+                _poner_calc(e_detm, _detraccion_de(total))
+            finally:
+                _calculando["activo"] = False
+            _calc()
+
+        def _desde_detraccion(*_a):
+            if _calculando["activo"]:
+                return
+            _calculando["activo"] = True
+            try:
+                _poner_calc(e_detm, _detraccion_de(_num(e_tot)))
+            finally:
+                _calculando["activo"] = False
+            _calc()
+
+        e_sub.bind("<KeyRelease>", _desde_base)
+        e_imp.bind("<KeyRelease>", _desde_igv)
+        e_tot.bind("<KeyRelease>", _desde_total)
+        e_rec.bind("<KeyRelease>", _desde_recargo)
+        e_detp.bind("<KeyRelease>", _desde_detraccion)
+        e_detm.bind("<KeyRelease>", _calc)
+        e_del.bind("<KeyRelease>", _calc)
         try:
             var_del.trace_add("write", lambda *a: _calc())
+        except Exception:
+            pass
+        try:
+            c_tipo.configure(command=lambda _v: _desde_base())
         except Exception:
             pass
         _calc()
@@ -7983,7 +8371,7 @@ class FacturasRecibidasTab:
                     total = subtotal_leido
             if total > 0:
                 if (subtotal_leido > 0 and igv_leido > 0
-                        and abs(subtotal_leido + igv_leido - total) <= 0.02):
+                        and abs(subtotal_leido + igv_leido - total) <= 0.10):
                     base, igv = subtotal_leido, igv_leido
                 elif _documento_con_igv(tipo_doc):
                     tasa = 0.105 if "10.5%" in tipo_doc else 0.18
@@ -7996,6 +8384,170 @@ class FacturasRecibidasTab:
                 _poner_campo(e_tot, formatear_numero_entrada(total))
             _al_elegir_proveedor()
             _calc()
+
+        def _aplicar_ocr_editor(datos_ocr, origen="OCR"):
+            """Muestra un resumen y carga los datos si el usuario acepta."""
+            if not datos_ocr:
+                return messagebox.showinfo(
+                    origen,
+                    "No se pudieron leer datos del documento.\n\n"
+                    "El archivo quedó adjunto; complete el formulario a mano.",
+                    parent=v)
+            resumen = []
+            for clave, etiqueta in (("tipo_documento", "Tipo"), ("numero", "N° documento"),
+                                    ("fecha", "Fecha"), ("proveedor", "Proveedor"),
+                                    ("ruc", "R.U.C.")):
+                valor = str(datos_ocr.get(clave) or "").strip()
+                if valor:
+                    resumen.append("%s: %s" % (etiqueta, valor))
+            try:
+                total = float(datos_ocr.get("total") or 0)
+            except Exception:
+                total = 0.0
+            if total > 0:
+                resumen.append("Total: %s" % formatear_moneda(total))
+            if not resumen:
+                return messagebox.showinfo(
+                    origen,
+                    "El OCR no pudo leer los datos. El archivo quedó adjunto; "
+                    "complete el formulario a mano.",
+                    parent=v)
+            if messagebox.askyesno(
+                    origen,
+                    "Datos detectados por el OCR:\n\n%s\n\n"
+                    "¿Desea cargarlos en el formulario?\n"
+                    "(Puede corregirlos antes de guardar.)" % "\n".join(resumen),
+                    parent=v):
+                _aplicar_datos_ocr(datos_ocr)
+                messagebox.showinfo("Datos cargados",
+                                    "Revise los datos y pulse «💾 Guardar».", parent=v)
+
+        def cargar_pdf_editor():
+            """📄 Carga un PDF (o foto) y vuelca sus datos en el editor."""
+            ruta = filedialog.askopenfilename(
+                title="Seleccionar factura (PDF o foto)",
+                filetypes=[("PDF e imágenes", "*.pdf *.png *.jpg *.jpeg"),
+                           ("Archivos PDF", "*.pdf"),
+                           ("Imágenes", "*.png *.jpg *.jpeg")])
+            if not ruta:
+                return
+            if archivo_actual and resolver_ruta_archivo(archivo_actual):
+                if not messagebox.askyesno(
+                        "Reemplazar archivo",
+                        "Esta factura ya tiene un archivo adjunto:\n%s\n\n"
+                        "¿Desea reemplazarlo?" % os.path.basename(archivo_actual),
+                        parent=v):
+                    return
+            try:
+                ruta_guardar = ruta_para_guardar(ruta) or ruta
+            except Exception:
+                ruta_guardar = ruta
+            ruta_escaneada[0] = ruta_guardar
+            try:
+                lbl_adjunto.configure(text=_texto_adjunto())
+            except Exception:
+                pass
+            _aviso = self._aviso_procesando("⏳ Leyendo el archivo... (OCR)")
+            try:
+                datos_ocr, _ = _leer_datos_ocr(ruta)
+            finally:
+                self._cerrar_aviso(_aviso)
+                try:
+                    v.grab_set()
+                except Exception:
+                    pass
+            _aplicar_ocr_editor(datos_ocr, "Archivo cargado")
+
+        def escanear_telefono_editor():
+            """📱 Recibe una foto del teléfono y la carga en el editor."""
+            try:
+                import escaner_movil
+            except Exception as e_movil:
+                return messagebox.showerror(
+                    "Escáner por teléfono",
+                    "No se pudo cargar el módulo:\n\n%s" % e_movil, parent=v)
+            try:
+                config = cargar_configuracion_regional()
+            except Exception:
+                config = {}
+
+            def terminar(pdf, datos_ocr, aviso):
+                try:
+                    self._cerrar_aviso(aviso)
+                except Exception:
+                    pass
+                try:
+                    v.grab_set()
+                except Exception:
+                    pass
+                if pdf:
+                    try:
+                        ruta_guardar = ruta_para_guardar(pdf) or pdf
+                    except Exception:
+                        ruta_guardar = pdf
+                    ruta_escaneada[0] = ruta_guardar
+                    try:
+                        lbl_adjunto.configure(text=_texto_adjunto())
+                    except Exception:
+                        pass
+                _aplicar_ocr_editor(datos_ocr, "Foto del teléfono")
+
+            def error_telefono(error, aviso):
+                try:
+                    self._cerrar_aviso(aviso)
+                except Exception:
+                    pass
+                try:
+                    v.grab_set()
+                except Exception:
+                    pass
+                messagebox.showerror(
+                    "Teléfono", "No se pudo procesar la foto:\n%s" % error, parent=v)
+
+            def al_recibir(rutas, tipo):
+                def lanzar():
+                    try:
+                        v.grab_release()
+                    except Exception:
+                        pass
+                    aviso = self._aviso_procesando("⏳ Procesando la foto del teléfono...")
+
+                    def tarea():
+                        try:
+                            import escaner as _esc
+                            resultado = _esc.procesar_factura(config, imagenes=rutas)
+                            pdf = (resultado or {}).get("pdf") or ""
+                            texto = (resultado or {}).get("texto") or ""
+                            if not str(texto or "").strip() and pdf:
+                                try:
+                                    texto = leer_ocr_windows(pdf) or ""
+                                except Exception:
+                                    texto = ""
+                            datos_ocr = extraer_datos_de_texto(texto) if str(texto or "").strip() else {}
+                            try:
+                                v.after(0, lambda: terminar(pdf, datos_ocr, aviso))
+                            except Exception:
+                                terminar(pdf, datos_ocr, aviso)
+                        except Exception as e_tarea:
+                            try:
+                                v.after(0, lambda: error_telefono(e_tarea, aviso))
+                            except Exception:
+                                error_telefono(e_tarea, aviso)
+                    threading.Thread(target=tarea, daemon=True).start()
+
+                try:
+                    v.after(0, lanzar)
+                except Exception:
+                    lanzar()
+
+            try:
+                escaner_movil.escanear_desde_telefono(
+                    v, config, al_recibir=al_recibir,
+                    titulo_extra="Compras · editar factura")
+            except Exception as e_scan:
+                messagebox.showerror(
+                    "Escáner por teléfono", "No se pudo abrir el servidor:\n\n%s" % e_scan,
+                    parent=v)
 
         def escanear_factura_editor():
             """🖨️ Escanea la factura y deja el PDF listo para adjuntarlo al guardar."""

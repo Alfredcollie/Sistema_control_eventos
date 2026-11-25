@@ -1429,6 +1429,114 @@ def _optimizar_imagen(ruta, max_lado=2600, calidad=72):
         return ruta
 
 
+def _preparar_imagen_ocr(ruta):
+    """Mejora fotos y escaneos antes del OCR (contraste, enfoque y tamaño).
+
+    El OCR de Windows lee mal las fotos de celular: muy pequeñas, grises o
+    inclinadas. Se prueba primero una copia en gris, con contraste estirado,
+    enfoque y hasta 2x de tamaño. Si algo falla, se conserva la original.
+    """
+    try:
+        from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+        with Image.open(ruta) as original:
+            original.load()
+            imagen = ImageOps.exif_transpose(original).convert("RGB")
+        # 📱 Las fotos de celular suelen traer mucho fondo alrededor del
+        # comprobante. En imágenes altas y pequeñas se recorta un margen
+        # prudente; en escaneos grandes (A4) no se toca el contenido.
+        ancho, alto = imagen.size
+        if alto > ancho * 1.4 and max(ancho, alto) < 2200:
+            mx = max(2, int(ancho * 0.07))
+            my = max(2, int(alto * 0.04))
+            imagen = imagen.crop((mx, my, max(mx + 1, ancho - mx), max(my + 1, alto - my)))
+        gris = ImageOps.grayscale(imagen)
+        gris = ImageOps.autocontrast(gris, cutoff=1)
+        max_lado = max(gris.size)
+        if max_lado < 1600:
+            escala = 2.0
+        elif max_lado < 2400:
+            escala = 1.5
+        else:
+            escala = 1.0
+        if escala > 1.0:
+            gris = gris.resize((max(1, int(gris.width * escala)),
+                                max(1, int(gris.height * escala))), Image.LANCZOS)
+        gris = gris.filter(ImageFilter.UnsharpMask(radius=2, percent=180, threshold=2))
+        gris = ImageEnhance.Contrast(gris).enhance(1.4)
+        carpeta = tempfile.mkdtemp(prefix="ocr_prep_")
+        destino = os.path.join(carpeta, "prep_%s.png" % datetime.now().strftime("%H%M%S%f"))
+        gris.save(destino, "PNG")
+        return destino
+    except Exception as e:
+        print("Aviso - preparando imagen para OCR:", e)
+        return ruta
+
+
+def _guardar_variante_ocr(imagen, caja, contraste, nombre):
+    """Guarda una versión mejorada de una foto para intentar OCR con ella."""
+    try:
+        from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+        recorte = imagen.crop(caja)
+        gris = ImageOps.grayscale(recorte)
+        gris = ImageOps.autocontrast(gris, cutoff=1)
+        if max(gris.size) < 2400:
+            gris = gris.resize((gris.width * 2, gris.height * 2), Image.LANCZOS)
+        gris = gris.filter(ImageFilter.UnsharpMask(radius=2, percent=180, threshold=2))
+        gris = ImageEnhance.Contrast(gris).enhance(float(contraste))
+        carpeta = tempfile.mkdtemp(prefix="ocr_var_")
+        destino = os.path.join(carpeta, nombre + ".png")
+        gris.save(destino, "PNG")
+        return destino
+    except Exception as e:
+        print("Aviso - variante OCR:", e)
+        return ""
+
+
+def _variantes_foto_ocr(ruta):
+    """Dos o tres versiones de una foto de celular (recorte y contraste)."""
+    salida = []
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(ruta) as original:
+            original.load()
+            imagen = ImageOps.exif_transpose(original).convert("RGB")
+        ancho, alto = imagen.size
+        cajas = [
+            ((int(ancho * 0.07), int(alto * 0.04), int(ancho * 0.93), int(alto * 0.96)), 1.4, "foto_a"),
+            ((int(ancho * 0.09), int(alto * 0.04), int(ancho * 0.91), int(alto * 0.97)), 1.5, "foto_b"),
+            ((0, 0, ancho, alto), 1.3, "foto_c"),
+            # Banda del encabezado: suele contener FACTURA y el N° del documento.
+            # Esta proporción fue la que mejor leyó "F003-00095752" en la foto.
+            ((int(ancho * 0.07), int(alto * 0.219),
+              int(ancho * 0.9375), int(alto * 0.3203125)), 1.0, "foto_num"),
+        ]
+        for caja, contraste, nombre in cajas:
+            ruta_v = _guardar_variante_ocr(imagen, caja, contraste, nombre)
+            if ruta_v:
+                salida.append(ruta_v)
+    except Exception as e:
+        print("Aviso - variantes de foto para OCR:", e)
+    return salida
+
+
+def _preparar_imagenes_ocr(rutas):
+    salida = []
+    for ruta in (rutas or []):
+        try:
+            from PIL import Image
+            with Image.open(ruta) as img:
+                ancho, alto = img.size
+            es_foto = (alto > ancho * 1.4 and max(ancho, alto) < 2200)
+        except Exception:
+            es_foto = False
+        if es_foto:
+            variantes = _variantes_foto_ocr(ruta)
+            salida.extend(variantes or [_preparar_imagen_ocr(ruta)])
+        else:
+            salida.append(_preparar_imagen_ocr(ruta))
+    return salida
+
+
 def _borrar_si_existe(ruta):
     try:
         if os.path.exists(ruta):
@@ -1554,6 +1662,8 @@ def ocr_paginas(rutas, idioma="Automático"):
 
     # 📄 Los PDF (los comprobantes guardados) se convierten a imagenes antes de leer
     rutas, _temporales_pdf = _pdf_a_imagenes(rutas)
+    rutas_originales = list(rutas)
+    rutas = _preparar_imagenes_ocr(rutas)
 
     def _leer(lista):
         """Intenta leer las imagenes con el motor del sistema."""
@@ -1591,6 +1701,14 @@ def ocr_paginas(rutas, idioma="Automático"):
                 "error": res.get("error") or "El OCR no reconocio texto en la imagen."}
 
     resultado = _leer(rutas)
+    # Si la mejora no funcionó, se conserva la lectura de la imagen original.
+    try:
+        if len(texto_de_resultados(resultado).strip()) < 40:
+            _orig = _leer(rutas_originales)
+            if len(texto_de_resultados(_orig).strip()) > len(texto_de_resultados(resultado).strip()):
+                resultado = _orig
+    except Exception:
+        pass
 
     # 🔄 Si no se reconoció texto, se reintenta girando la imagen:
     #    muchos comprobantes se fotografían/escanean de costado o de cabeza.

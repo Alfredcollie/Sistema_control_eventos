@@ -718,6 +718,12 @@ class CatalogoEquiposTab:
     def _pintar_tabla(self, token, rows):
         if token != getattr(self, "_carga_cat_token", 0):
             return
+        # 🛡️ La ventana pudo cerrarse mientras la consulta estaba en curso
+        try:
+            if not self.tabla.winfo_exists():
+                return
+        except Exception:
+            return
         self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
@@ -1325,6 +1331,12 @@ class ReservasTab:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_tabla(self, rows):
+        # 🛡️ La ventana pudo cerrarse mientras la consulta estaba en curso
+        try:
+            if not self.tabla.winfo_exists():
+                return
+        except Exception:
+            return
         self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)
@@ -1769,6 +1781,12 @@ class RecepcionEquiposTab:
             threading.Thread(target=tarea, daemon=True).start()
 
     def _pintar_tabla(self, rows):
+        # 🛡️ La ventana pudo cerrarse mientras la consulta estaba en curso
+        try:
+            if not self.tabla.winfo_exists():
+                return
+        except Exception:
+            return
         self.tabla.delete(*self.tabla.get_children())
         for r in rows:
             self.tabla.insert("", tk.END, values=r)

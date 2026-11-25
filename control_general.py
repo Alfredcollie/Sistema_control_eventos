@@ -27,6 +27,13 @@ import threading
 import webbrowser
 from datetime import datetime, timedelta
 
+# 🌍 Todos los «abrir PDF» preguntan: Computadora / Teléfono / Multifuncional
+try:
+    from cargar_documento import instalar_selector_global
+    instalar_selector_global()
+except Exception as _e_selector:
+    print("Aviso - selector de documentos:", _e_selector)
+
 VERSION_ACTUAL = "v1.5.8"
 
 
@@ -259,12 +266,19 @@ def traer_al_frente(ventana, retrasos=(60, 260, 700, 1150)):
         except Exception:
             pass
 
+    creada = time.time()
+
     def _traer():
         try:
             if not ventana.winfo_exists():
                 return
-            # 🛡️ Si el usuario ya la minimizó, no se vuelve a mostrar
+            # 🛡️ Si el usuario ya la minimizó, no se vuelve a mostrar…
+            #    salvo que se haya minimizado sola al abrir (primeros 2 s).
             if str(ventana.state()) == "iconic":
+                if time.time() - creada <= 2.0:
+                    ventana.deiconify()
+                    ventana.lift()
+                    ventana.focus_force()
                 return
             ventana.deiconify()
             ventana.lift()
@@ -1565,6 +1579,67 @@ class ControlGeneralEventos:
             return bool(self.permisos_activos.get("cotizaciones", False))
         return False
 
+    def _primer_entry(self, widget):
+        """Primer campo de texto del acceso seguro (para no perder el foco)."""
+        try:
+            if isinstance(widget, (ctk.CTkEntry, tk.Entry)):
+                return widget
+            for hijo in widget.winfo_children():
+                encontrado = self._primer_entry(hijo)
+                if encontrado is not None:
+                    return encontrado
+        except Exception:
+            pass
+        return None
+
+    def _traer_login_al_frente(self):
+        """🔐 Mantiene el acceso seguro por encima de cualquier ventana abierta."""
+        ventana = getattr(self, "v_login", None)
+        try:
+            if ventana is None or not ventana.winfo_exists():
+                return
+            enfocado = None
+            try:
+                actual = ventana.focus_get()
+                if actual is not None and str(actual).startswith(str(ventana)):
+                    enfocado = actual
+            except Exception:
+                enfocado = None
+            if str(ventana.state()) == "iconic":
+                ventana.deiconify()
+            ventana.attributes("-topmost", True)
+            ventana.lift()
+            try:
+                ventana.focus_force()
+            except Exception:
+                pass
+            try:
+                if enfocado is None or str(enfocado) == str(ventana):
+                    enfocado = self._primer_entry(ventana)
+                if enfocado is not None and enfocado.winfo_exists():
+                    enfocado.focus_set()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _aviso_login(self, tipo, titulo, texto):
+        """Muestra el aviso encima del acceso seguro y vuelve a subir el login."""
+        ventana = getattr(self, "v_login", None)
+        try:
+            if ventana is not None and ventana.winfo_exists():
+                ventana.attributes("-topmost", False)
+        except Exception:
+            pass
+        try:
+            opciones = {"parent": ventana} if ventana is not None else {}
+            if str(tipo).lower() == "error":
+                messagebox.showerror(titulo, texto, **opciones)
+            else:
+                messagebox.showinfo(titulo, texto, **opciones)
+        finally:
+            self._traer_login_al_frente()
+
     def abrir_ventana_login(self):
         self.v_login = ctk.CTkToplevel(self.root)
         self.v_login.title("Acceso Seguro")
@@ -1575,13 +1650,16 @@ class ControlGeneralEventos:
         self.v_login.grab_set()
         self.v_login.protocol("WM_DELETE_WINDOW", self.root.quit)
         self.v_login.attributes("-topmost", True)
-        self.v_login.update()
-        self.v_login.attributes("-topmost", False)
-        self.v_login.focus_force()
         self.v_login.update_idletasks()
         x = (self.v_login.winfo_screenwidth() // 2) - (ancho_ventana // 2)
         y = (self.v_login.winfo_screenheight() // 2) - (alto_ventana // 2)
         self.v_login.geometry(f"{ancho_ventana}x{alto_ventana}+{x}+{y}")
+        self._traer_login_al_frente()
+        for _retraso in (120, 350, 800, 1500):
+            try:
+                self.v_login.after(_retraso, self._traer_login_al_frente)
+            except Exception:
+                pass
         frame_log = ctk.CTkFrame(self.v_login, corner_radius=15, fg_color="#f8f9fa", border_width=1, border_color="#e0e0e0")
         frame_log.pack(fill="both", expand=True, padx=20, pady=20)
         self.lbl_logo = ctk.CTkLabel(frame_log, text="")
@@ -1634,12 +1712,12 @@ class ControlGeneralEventos:
             
             conn = conectar_db(silencioso=True)
             if not conn:
-                messagebox.showinfo(
+                self._aviso_login(
+                    "info",
                     "📡 MODO LECTURA OFFLINE ACTIVADO",
                     "Sin conexión a Internet.\n\nIniciando en MODO LECTURA:\n"
                     "• Podrás revisar clientes, cotizaciones y eventos.\n"
-                    "• No se permitirán modificaciones hasta reconectarte."
-                )
+                    "• No se permitirán modificaciones hasta reconectarte.")
                 self.usuario_activo = user if user else "Invitado"
                 self.rol_activo = "Invitado Offline"
                 self.permisos_activos = {"clientes": True, "cotizaciones": True, "cronograma": True}
@@ -1653,17 +1731,17 @@ class ControlGeneralEventos:
                 cursor.execute("SELECT rol, permisos, clave_hash, activo FROM usuarios WHERE usuario = %s", (user,))
                 resultado = cursor.fetchone()
                 if not resultado:
-                    messagebox.showerror("Acceso Denegado", "Usuario o contraseña incorrectos.")
+                    self._aviso_login("error", "Acceso Denegado", "Usuario o contraseña incorrectos.")
                     registrar_auditoria(user, "Seguridad", "Intento de inicio de sesión fallido (usuario no existe)")
                     ent_pass.delete(0, tk.END); ent_user.focus()
                     return
                 rol_db, permisos_str, clave_hash, activo = resultado
                 if not activo:
-                    messagebox.showerror("Acceso Denegado", "Este usuario está desactivado.\nContacta al administrador.")
+                    self._aviso_login("error", "Acceso Denegado", "Este usuario está desactivado.\nContacta al administrador.")
                     registrar_auditoria(user, "Seguridad", "Intento de inicio de sesión con usuario desactivado")
                     return
                 if not clave_hash or not verify_password(clave, clave_hash):
-                    messagebox.showerror("Acceso Denegado", "Usuario o contraseña incorrectos.")
+                    self._aviso_login("error", "Acceso Denegado", "Usuario o contraseña incorrectos.")
                     registrar_auditoria(user, "Seguridad", "Intento de inicio de sesión fallido")
                     ent_pass.delete(0, tk.END); ent_user.focus()
                     return
@@ -1675,7 +1753,7 @@ class ControlGeneralEventos:
                 self.v_login.destroy()
                 self.construir_dashboard_spa()
             except Exception as e:
-                messagebox.showerror("Error Crítico", f"Ocurrió un problema en el sistema:\n{e}")
+                self._aviso_login("error", "Error Crítico", f"Ocurrió un problema en el sistema:\n{e}")
             finally:
                 liberar_conexion(conn)
 
@@ -2081,6 +2159,40 @@ class ControlGeneralEventos:
         # 🪟 Al usar esta ventana, su pestaña de abajo queda resaltada
         ventana.bind("<FocusIn>", lambda _e, c=clave: self._marcar_modulo_activo(c), add="+")
 
+        # 🪟 Si el módulo se minimiza (botón propio o barra de Windows), la
+        #    pantalla principal queda al frente.
+        def _al_minimizar_modulo(evento=None, v=ventana):
+            try:
+                if str(v.state()) == "iconic":
+                    self.root.after(150, self._traer_principal_al_frente)
+            except Exception:
+                pass
+        try:
+            ventana.bind("<Unmap>", _al_minimizar_modulo, add="+")
+        except Exception:
+            pass
+
+        # 🩺 Diagnóstico: si la ventana se minimiza sola, se anota con la pila
+        def _registrar_iconic(evento=None, v=ventana, c=clave):
+            try:
+                if not self._ventana_viva(v) or str(v.state()) != "iconic":
+                    return
+                # Si la minimización la hizo el botón del módulo, no es un fallo
+                if time.time() - getattr(self, "_ultima_minimizacion", 0.0) < 1.0:
+                    return
+                import traceback
+                pila = "".join(traceback.format_stack()[-12:])
+                self._registrar_minimizacion(
+                    "DETECTADO %s | evento=%s | widget=%s | grab=%s | focus=%s\n%s"
+                    % (c, evento, getattr(evento, "widget", None),
+                       v.grab_current(), v.focus_get(), pila))
+            except Exception:
+                pass
+        try:
+            ventana.bind("<Unmap>", _registrar_iconic, add="+")
+        except Exception:
+            pass
+
         try:
             # La función creadora devuelve la instancia del módulo: se guarda para
             # poder ACTUALIZAR sus datos cuando se vuelva a abrir el módulo.
@@ -2137,6 +2249,18 @@ class ControlGeneralEventos:
             return bool(ventana.winfo_exists())
         except Exception:
             return False
+
+    def _traer_principal_al_frente(self):
+        """🪟 Deja la ventana principal visible al minimizar un módulo."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            if str(self.root.state()) == "iconic":
+                self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
 
     def traer_al_frente_ventana_modulo(self, clave):
         """🪟 Restaura (si estaba minimizada), trae al frente y enfoca la ventana."""
@@ -2324,6 +2448,11 @@ class ControlGeneralEventos:
             ventana.after(1, _minimizar)
         except Exception:
             _minimizar()
+        # 🪟 Al minimizar un módulo, la ventana principal queda siempre visible
+        try:
+            self.root.after(150, self._traer_principal_al_frente)
+        except Exception:
+            pass
         try:
             self._actualizar_pestanas_modulos()
         except Exception:

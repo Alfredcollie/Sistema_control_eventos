@@ -295,7 +295,7 @@ class VentanaEditor(ctk.CTkToplevel):
                               ("<Right>", lambda e: self._mover_con_flechas(1, 0)),
                               ("<Up>", lambda e: self._mover_con_flechas(0, -1)),
                   ("<Down>", lambda e: self._mover_con_flechas(0, 1))]:
-            self.bind(tecla, accion)
+            self.bind(tecla, self._atajo(tecla, accion))
 
         # ---------------- derecha: propiedades ----------------
         der = ctk.CTkFrame(cuerpo, width=268, corner_radius=0)
@@ -315,7 +315,8 @@ class VentanaEditor(ctk.CTkToplevel):
         self.props = {}
         for clave, etiqueta in (("nombre", "Nombre"), ("ancho", "Ancho (m)"),
                                 ("alto", "Profundidad (m)"), ("x", "Posición X (m)"),
-                                ("y", "Posición Y (m)"), ("rotacion", "Rotación (°)")):
+                                ("y", "Posición Y (m)"), ("rotacion", "Rotación (°)"),
+                                ("rotacion_texto", "Rotación texto (°)")):
             fila = ctk.CTkFrame(contenedor_props, fg_color="transparent")
             fila.pack(fill="x", padx=6, pady=1)
             ctk.CTkLabel(fila, text=etiqueta, width=110, anchor="w",
@@ -433,6 +434,38 @@ class VentanaEditor(ctk.CTkToplevel):
         self.lbl_coords = ctk.CTkLabel(estado, text="X: 0.00 m   Y: 0.00 m",
                                        font=(FAMILIA, 10), text_color="#555555")
         self.lbl_coords.pack(side="right", padx=10)
+
+    # ================================================================ ATAJOS
+    # ⌨️ Teclas que NO deben actuar mientras el usuario escribe en un campo:
+    #    antes, borrar el texto de «Ancho»/«Profundidad» borraba el objeto.
+    ATAJOS_SOLO_LIENZO = ("<Delete>", "<BackSpace>", "<Escape>",
+                          "<Left>", "<Right>", "<Up>", "<Down>")
+
+    def _atajo(self, tecla, accion):
+        """Envuelve un atajo para que no se dispare al escribir en un campo."""
+        def _envoltura(evento=None):
+            if tecla in self.ATAJOS_SOLO_LIENZO and self._foco_en_texto(evento):
+                return None
+            return accion(evento)
+        return _envoltura
+
+    def _foco_en_texto(self, evento=None):
+        """True si la tecla viene de un Entry/Text (el usuario está escribiendo)."""
+        try:
+            widget = getattr(evento, "widget", None) or self.focus_get()
+            for _ in range(6):
+                if widget is None:
+                    break
+                try:
+                    if widget.winfo_class() in ("Entry", "TEntry", "Text",
+                                                "TCombobox", "Spinbox"):
+                        return True
+                except Exception:
+                    pass
+                widget = getattr(widget, "master", None)
+        except Exception:
+            pass
+        return False
 
     # ================================================================ VENTANA
     def minimizar(self):
@@ -773,18 +806,48 @@ class VentanaEditor(ctk.CTkToplevel):
             coords = list(self.lienzo.coords(i))
             if tipo == "rectangle":
                 x0, y0, x1, y1 = coords
+                # 🎨 Color, relleno y borde se leen ANTES de borrar el rectángulo:
+                #    después de delete() itemcget devuelve "" y el objeto quedaba
+                #    sin color al rotarlo (aunque fuera 1 solo grado).
+                color = self._color_de(i)
+                relleno = self._estilo_de(i, "fill")
+                etiquetas = self.lienzo.gettags(i)
+                try:
+                    grosor = float(self._estilo_de(i, "width", 1.5) or 1.5)
+                except Exception:
+                    grosor = 1.5
+                guion = self._estilo_de(i, "dash")
                 puntos = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                 puntos = [geometria.rotar_punto(x, y, cx, cy, grados) for x, y in puntos]
                 plano = []
                 for x, y in puntos:
                     plano.extend([x, y])
+                extra = {}
+                if guion:
+                    try:
+                        extra["dash"] = tuple(int(float(v)) for v in str(guion).split())
+                    except Exception:
+                        extra = {}
                 self.lienzo.delete(i)
-                nuevo = self.lienzo.create_polygon(*plano, outline=self._color_de(i),
-                                                   fill=self.lienzo.itemcget(i, "fill") or "",
-                                                   width=1.5)
+                try:
+                    nuevo = self.lienzo.create_polygon(*plano, outline=color,
+                                                       fill=relleno, width=grosor,
+                                                       tags=etiquetas, **extra)
+                except Exception:
+                    nuevo = self.lienzo.create_polygon(*plano, outline=color,
+                                                       fill=relleno, width=grosor,
+                                                       tags=etiquetas)
                 ids[ids.index(i)] = nuevo
             elif tipo == "oval":
                 x0, y0, x1, y1 = coords
+                # 🎨 También se conserva el relleno del óvalo al girarlo.
+                color = self._color_de(i)
+                relleno = self._estilo_de(i, "fill")
+                etiquetas = self.lienzo.gettags(i)
+                try:
+                    grosor = float(self._estilo_de(i, "width", 1.5) or 1.5)
+                except Exception:
+                    grosor = 1.5
                 cx_o, cy_o = (x0 + x1) / 2.0, (y0 + y1) / 2.0
                 rx, ry = (x1 - x0) / 2.0, (y1 - y0) / 2.0
                 puntos = []
@@ -793,9 +856,49 @@ class VentanaEditor(ctk.CTkToplevel):
                     px, py = cx_o + rx * math.cos(ang), cy_o + ry * math.sin(ang)
                     px, py = geometria.rotar_punto(px, py, cx, cy, grados)
                     puntos.extend([px, py])
-                color = self.lienzo.itemcget(i, "outline")
                 self.lienzo.delete(i)
-                nuevo = self.lienzo.create_polygon(*puntos, outline=color, width=1.5)
+                nuevo = self.lienzo.create_polygon(*puntos, outline=color,
+                                                   fill=relleno, width=grosor,
+                                                   tags=etiquetas)
+                ids[ids.index(i)] = nuevo
+            elif tipo == "arc":
+                # 🌀 Los arcos (muro curvo, puerta, arco, backing…) no se pueden
+                #    girar como arco de Tk: se convierten en una polilínea girada.
+                x0, y0, x1, y1 = coords
+                color = self._color_de(i)
+                etiquetas = self.lienzo.gettags(i)
+                try:
+                    grosor = float(self._estilo_de(i, "width", 1.5) or 1.5)
+                except Exception:
+                    grosor = 1.5
+                guion = self._estilo_de(i, "dash")
+                try:
+                    inicio = float(self._estilo_de(i, "start", 0) or 0)
+                except Exception:
+                    inicio = 0.0
+                try:
+                    extension = float(self._estilo_de(i, "extent", 90) or 90)
+                except Exception:
+                    extension = 90.0
+                cx_o, cy_o = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+                rx, ry = (x1 - x0) / 2.0, (y1 - y0) / 2.0
+                pasos = max(12, int(abs(extension) / 4.0))
+                puntos = []
+                for k in range(pasos + 1):
+                    ang = math.radians(inicio + extension * k / pasos)
+                    px = cx_o + rx * math.cos(ang)
+                    py = cy_o - ry * math.sin(ang)
+                    px, py = geometria.rotar_punto(px, py, cx, cy, grados)
+                    puntos.extend([px, py])
+                extra = {}
+                if guion:
+                    try:
+                        extra["dash"] = tuple(int(float(v)) for v in str(guion).split())
+                    except Exception:
+                        extra = {}
+                self.lienzo.delete(i)
+                nuevo = self.lienzo.create_line(*puntos, fill=color, width=grosor,
+                                                tags=etiquetas, **extra)
                 ids[ids.index(i)] = nuevo
             elif tipo in ("line", "polygon"):
                 nuevo = []
@@ -813,6 +916,16 @@ class VentanaEditor(ctk.CTkToplevel):
         except Exception:
             return "#1f538d"
 
+    def _estilo_de(self, item, opcion, defecto=""):
+        """Lee un estilo del ítem ANTES de borrarlo (tras delete() devuelve '')."""
+        try:
+            valor = self.lienzo.itemcget(item, opcion)
+            if valor not in ("", None):
+                return valor
+        except Exception:
+            pass
+        return defecto
+
     def _dibujar_seleccion(self):
         for i in self._ids_seleccion:
             self.lienzo.delete(i)
@@ -823,9 +936,12 @@ class VentanaEditor(ctk.CTkToplevel):
             puntos = []
             for px, py in esquinas:
                 puntos.extend([px, py])
+            color_marco = "#7f8c8d" if elemento.bloqueado else COLOR_SEL
             self._ids_seleccion.append(self.lienzo.create_polygon(
-                *puntos, outline=COLOR_SEL, width=1.5, dash=(4, 2), fill="",
+                *puntos, outline=color_marco, width=1.5, dash=(4, 2), fill="",
                 tags="seleccion"))
+            if elemento.bloqueado:
+                continue        # 🔒 sin tiradores: el objeto está bloqueado
             # tiradores en las esquinas giradas
             for hx, hy in esquinas:
                 self._ids_seleccion.append(self.lienzo.create_rectangle(
@@ -846,6 +962,10 @@ class VentanaEditor(ctk.CTkToplevel):
 
     def _elementos_seleccionados(self):
         return [e for e in self.plano.elementos if e.id in self._seleccion]
+
+    def _editables(self):
+        """Selección que se puede mover/redimensionar (sin objetos bloqueados)."""
+        return [e for e in self._elementos_seleccionados() if not e.bloqueado]
 
     # ================================================================ INTERACCIÓN
     def _click(self, evento):
@@ -868,6 +988,11 @@ class VentanaEditor(ctk.CTkToplevel):
             self._seleccion = [elemento.id]
             self._dibujar_seleccion()
             self._mostrar_propiedades()
+            try:
+                self.lbl_aviso.configure(
+                    text="🔒 Objeto bloqueado: quita «Bloqueado» en Propiedades para moverlo.")
+            except Exception:
+                pass
             return
         # 👥 si el objeto está en un grupo, se selecciona el grupo completo
         integrantes = [e.id for e in self._expandir_grupo(elemento)]
@@ -890,8 +1015,10 @@ class VentanaEditor(ctk.CTkToplevel):
             capa = self.plano.capa(elemento.capa)
             if capa and (not capa.visible or capa.bloqueada):
                 continue
-            if not elemento.visible or elemento.bloqueado:
+            if not elemento.visible:
                 continue
+            # 🔒 Los bloqueados SÍ se pueden seleccionar (para poder desbloquearlos
+            #    desde Propiedades); el arrastre queda bloqueado más abajo.
             x0, y0, x1, y1 = self._caja_px(elemento)
             if geometria.punto_en_rect(x, y, ((x0 + x1) / 2.0, (y0 + y1) / 2.0,
                                               x1 - x0, y1 - y0, elemento.rotacion)):
@@ -926,7 +1053,7 @@ class VentanaEditor(ctk.CTkToplevel):
             elemento.y = ey + self._px_a_metros(y - y0)
             # 👥 si es un grupo, los demás integrantes acompañan (offsets guardados)
             for otro in self._expandir_grupo(elemento):
-                if otro.id == elemento.id:
+                if otro.id == elemento.id or otro.bloqueado:
                     continue
                 otro.x = round(elemento.x + float(otro.extra.get("dx_grupo") or 0.0), 4)
                 otro.y = round(elemento.y + float(otro.extra.get("dy_grupo") or 0.0), 4)
@@ -1035,7 +1162,7 @@ class VentanaEditor(ctk.CTkToplevel):
 
     # ================================================================ ALINEAR
     def alinear(self, modo):
-        elegidos = self._elementos_seleccionados()
+        elegidos = self._editables()
         if len(elegidos) < 2:
             return messagebox.showinfo("Alinear", "Seleccioná dos o más objetos.", parent=self)
         rects = [(e.x, e.y, e.ancho, e.alto, e.rotacion) for e in elegidos]
@@ -1052,7 +1179,7 @@ class VentanaEditor(ctk.CTkToplevel):
         Ejemplo: tres mesas separadas 2 m, 0,5 m y 1 m → quedan a 1,16 m cada una.
         El primero y el último no se mueven (son los topes).
         """
-        elegidos = self._elementos_seleccionados()
+        elegidos = self._editables()
         if len(elegidos) < 3:
             return messagebox.showinfo(
                 "Repartir",
@@ -1073,7 +1200,7 @@ class VentanaEditor(ctk.CTkToplevel):
 
     def centrar_en_plano(self, horizontal=True, vertical=True):
         """⦿ Coloca la selección en el centro de la hoja del plano."""
-        elegidos = self._elementos_seleccionados()
+        elegidos = self._editables()
         if not elegidos:
             return messagebox.showinfo("Centrar", "Seleccioná al menos un objeto.", parent=self)
         ancho_hoja = self._px_a_metros(getattr(self, "_imagen_tk", None).width()) if self._imagen_tk else 0
@@ -1095,7 +1222,7 @@ class VentanaEditor(ctk.CTkToplevel):
 
     def igualar_tamano(self, horizontal=True):
         """↔/↕ Iguala el ancho o el alto de la selección al del primer objeto."""
-        elegidos = self._elementos_seleccionados()
+        elegidos = self._editables()
         if len(elegidos) < 2:
             return messagebox.showinfo(
                 "Igualar tamaño",
@@ -1275,7 +1402,7 @@ class VentanaEditor(ctk.CTkToplevel):
     # ================================================================ TECLADO
     def _mover_con_flechas(self, dx, dy):
         """Mueve la selección con las flechas: 10 cm por pulsación."""
-        elegidos = self._elementos_seleccionados()
+        elegidos = self._editables()
         if not elegidos:
             return
         paso = 0.10
@@ -1288,9 +1415,15 @@ class VentanaEditor(ctk.CTkToplevel):
 
     # ================================================================ ACCIONES
     def eliminar(self, _evento=None):
-        elegidos = self._elementos_seleccionados()
-        if not elegidos:
+        todos = self._elementos_seleccionados()
+        if not todos:
             return
+        elegidos = [e for e in todos if not e.bloqueado]
+        if not elegidos:
+            return messagebox.showinfo(
+                "Objeto bloqueado",
+                "Está bloqueado. Quita «Bloqueado» en Propiedades para poder eliminarlo.",
+                parent=self)
         self._snapshot()
         for elemento in elegidos:
             self.plano.elementos.remove(elemento)
@@ -1362,7 +1495,8 @@ class VentanaEditor(ctk.CTkToplevel):
         elemento = elegidos[0]
         valores = {"nombre": elemento.nombre, "ancho": "%.2f" % elemento.ancho,
                    "alto": "%.2f" % elemento.alto, "x": "%.2f" % elemento.x,
-                   "y": "%.2f" % elemento.y, "rotacion": "%.1f" % elemento.rotacion}
+                   "y": "%.2f" % elemento.y, "rotacion": "%.1f" % elemento.rotacion,
+                   "rotacion_texto": "%.1f" % (getattr(elemento, "rotacion_texto", 0) or 0)}
         for clave, entrada in self.props.items():
             entrada.delete(0, "end")
             entrada.insert(0, str(valores[clave]))
@@ -1400,6 +1534,9 @@ class VentanaEditor(ctk.CTkToplevel):
         elemento.x = numero(self.props["x"].get(), elemento.x)
         elemento.y = numero(self.props["y"].get(), elemento.y)
         elemento.rotacion = numero(self.props["rotacion"].get(), elemento.rotacion) % 360
+        elemento.rotacion_texto = numero(
+            self.props["rotacion_texto"].get(),
+            getattr(elemento, "rotacion_texto", 0) or 0) % 360
         for capa in self.plano.capas:
             if capa.nombre == self.cmb_capa.get():
                 elemento.capa = capa.id

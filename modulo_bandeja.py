@@ -111,9 +111,7 @@ class BandejaEntradaApp:
         ctk.CTkButton(barra, text="📎 Agregar PDF", width=126, font=("Arial", 11, "bold"),
                       fg_color="#27ae60", hover_color="#1e8449",
                       command=self.agregar_pdf).pack(side="right", padx=2, pady=6)
-        ctk.CTkButton(barra, text="🖨️ Escanear", width=116, font=("Arial", 11, "bold"),
-                      fg_color="#e67e22", hover_color="#ca6f1e",
-                      command=self.escanear).pack(side="right", padx=2, pady=6)
+
         ctk.CTkButton(barra, text="▶ Procesar ahora", width=150, font=("Arial", 11, "bold"),
                       fg_color="#1f538d", hover_color="#163b65",
                       command=self.procesar).pack(side="right", padx=6, pady=6)

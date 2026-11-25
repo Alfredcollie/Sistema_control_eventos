@@ -3638,14 +3638,7 @@ class ModuloBancoApp:
         self.btn_tx_cargar = ctk.CTkButton(r_comp, text="📎 Cargar PDF/imagen", width=170,
                                           command=self.cargar_comprobante_transferencia)
         self.btn_tx_cargar.pack(side="left", padx=4)
-        self.btn_tx_escanear = ctk.CTkButton(r_comp, text="🖨 Escanear + OCR", width=160,
-                                            command=lambda: self._procesar_comprobante_tx(escanear=True))
-        self.btn_tx_escanear.pack(side="left", padx=4)
-        # 📱 Escanear con el teléfono y leer el comprobante con OCR
-        self.btn_tx_tel = ctk.CTkButton(r_comp, text="📱 Escanear con el teléfono", width=200,
-                                        fg_color="#8e44ad", hover_color="#6c3483",
-                                        command=self.escanear_transferencia_telefono)
-        self.btn_tx_tel.pack(side="left", padx=4)
+
         ctk.CTkButton(r_comp, text="Quitar adjunto", width=120,
                       command=self._quitar_comprobante_tx).pack(side="left", padx=4)
         self.lbl_tx_archivo = ctk.CTkLabel(r_comp, text="Sin comprobante", anchor="w")
@@ -3944,12 +3937,9 @@ class ModuloBancoApp:
         config = dict(cargar_config())
         config.update(leer_config_disco())
         self.btn_tx_cargar.configure(state="disabled")
-        self.btn_tx_escanear.configure(state="disabled")
+
         self.btn_tx_guardar.configure(state="disabled")
-        try:
-            self.btn_tx_tel.configure(state="disabled")
-        except Exception:
-            pass
+
         self.lbl_tx_archivo.configure(text="Escaneando / leyendo OCR...")
         progreso = None
         if escanear:
@@ -4012,12 +4002,9 @@ class ModuloBancoApp:
                 pass
             self._tx_ocr_ocupado = False
             self.btn_tx_cargar.configure(state="normal")
-            self.btn_tx_escanear.configure(state="normal")
+
             self.btn_tx_guardar.configure(state="normal")
-            try:
-                self.btn_tx_tel.configure(state="normal")
-            except Exception:
-                pass
+
             if token != self._tx_ocr_token:
                 self._mostrar_archivo_tx()
                 return
@@ -10048,10 +10035,7 @@ class ModuloBancoApp:
                      font=(FAMILIA, 11, "bold")).pack(anchor="w")
         f_soporte = ctk.CTkFrame(f, fg_color="transparent")
         f_soporte.pack(fill="x", pady=(0, 4))
-        btn_soporte_tel = ctk.CTkButton(f_soporte, text="📱 Escanear con el teléfono", width=190,
-                                        font=(FAMILIA, 10, "bold"), fg_color="#5b2c6f",
-                                        hover_color="#4a2360")
-        btn_soporte_tel.pack(side="left")
+
         ctk.CTkButton(f_soporte, text="📎 Archivo", width=90, font=(FAMILIA, 10, "bold"),
                       fg_color="#34495e", hover_color="#2c3e50",
                       command=lambda: _elegir_soporte_archivo()).pack(side="left", padx=6)
@@ -10189,7 +10173,7 @@ class ModuloBancoApp:
                 messagebox.showerror("Escáner",
                                      "No se pudo abrir el escáner: " + str(error_esc), parent=v)
 
-        btn_soporte_tel.configure(command=_escanear_soporte_telefono)
+
         _pintar_soporte()
 
         ctk.CTkLabel(f, text="Monto:", font=(FAMILIA, 11, "bold")).pack(anchor="w")
@@ -10358,9 +10342,7 @@ class ModuloBancoApp:
                                     + os.path.basename(ruta) + detalle, parent=v)
             self.escanear_comprobante_pago(v, al_terminar)
 
-        ctk.CTkButton(f_comp, text="🖨️ Escanear", width=120, height=30, font=(FAMILIA, 11, "bold"),
-                      fg_color="#0e7490", hover_color="#155e75",
-                      command=escanear_comprobante).pack(side="left", padx=(6, 0))
+
 
         def escanear_comprobante_telefono():
             """📱 Abre el QR y espera la foto del teléfono."""
@@ -10378,14 +10360,7 @@ class ModuloBancoApp:
         lbl_comprobante.pack(anchor="w", pady=(0, 6))
         actualizar_lbl_comprobante()
 
-        # 📱 Escanear el comprobante con el teléfono (fila propia, ancho completo)
-        _fila_tel_banco = ctk.CTkFrame(f, fg_color="transparent")
-        _fila_tel_banco.pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(_fila_tel_banco, text="📱 Escanear con el teléfono",
-                      height=30, font=(FAMILIA, 11, "bold"),
-                      fg_color="#8e44ad", hover_color="#6c3483",
-                      command=escanear_comprobante_telefono
-                      ).pack(side="left", fill="x", expand=True)
+
 
         # ------------------------------------------------------------------
         # UNIFICACIÓN CON COMPRAS CRUZADAS (pago a tercero)

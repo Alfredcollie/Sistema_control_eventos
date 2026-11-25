@@ -54,6 +54,7 @@ class Elemento:
     tamano_texto: int = 9               # tamaño del nombre en el plano
     texto_pos: str = "abajo"            # abajo | arriba | dentro | izquierda | derecha
     color_texto: str = "#555555"
+    rotacion_texto: float = 0.0         # grados del NOMBRE, independiente del objeto
     extra: dict = field(default_factory=dict)
 
     def a_dict(self):
@@ -78,6 +79,7 @@ class Elemento:
             tamano_texto=int(d.get("tamano_texto") or 9),
             texto_pos=str(d.get("texto_pos") or "abajo"),
             color_texto=str(d.get("color_texto") or "#555555"),
+            rotacion_texto=float(d.get("rotacion_texto") or 0),
             extra=dict(d.get("extra") or {}))
 
 

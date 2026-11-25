@@ -82,8 +82,16 @@ def _dibujar_objetos(c, plano, alto_pt, solo_visibles=True, escala_pt=None):
                 p.close()
                 c.drawPath(p, stroke=1, fill=0)
             elif tipo == "texto":
-                c.setFont("Helvetica", max(6, 10))
-                c.drawCentredString(0, 0, (elemento.texto or elemento.nombre or "")[:80])
+                c.saveState()
+                try:
+                    giro = (float(getattr(elemento, "rotacion_texto", 0) or 0)
+                            + float(elemento.rotacion or 0))
+                    if giro:
+                        c.rotate(giro)
+                    c.setFont("Helvetica", max(6, 10))
+                    c.drawCentredString(0, 0, (elemento.texto or elemento.nombre or "")[:80])
+                finally:
+                    c.restoreState()
             else:
                 c.rect(x0, y0, ancho, alto, stroke=1, fill=0)
                 if tipo in ("escenario", "tarima"):
@@ -97,7 +105,7 @@ def _dibujar_objetos(c, plano, alto_pt, solo_visibles=True, escala_pt=None):
 
 
 def _texto_etiqueta(c, elemento, x0, y0, ancho, alto):
-    """Nombre del objeto respetando posición, tamaño y color elegidos."""
+    """Nombre del objeto respetando posición, tamaño, color y giro propio."""
     try:
         color = HexColor(elemento.color_texto or "#555555")
     except Exception:
@@ -110,15 +118,32 @@ def _texto_etiqueta(c, elemento, x0, y0, ancho, alto):
     texto = (elemento.nombre or "")[:40]
     cx, cy = x0 + ancho / 2.0, y0 + alto / 2.0
     if posicion == "arriba":
-        c.drawCentredString(cx, y0 + alto + margen, texto)
+        px, py, alineacion = cx, y0 + alto + margen, "center"
     elif posicion == "dentro":
-        c.drawCentredString(cx, cy - tamano * 0.35, texto)
+        px, py, alineacion = cx, cy - tamano * 0.35, "center"
     elif posicion == "izquierda":
-        c.drawRightString(x0 - margen, cy - tamano * 0.35, texto)
+        px, py, alineacion = x0 - margen, cy - tamano * 0.35, "right"
     elif posicion == "derecha":
-        c.drawString(x0 + ancho + margen, cy - tamano * 0.35, texto)
+        px, py, alineacion = x0 + ancho + margen, cy - tamano * 0.35, "left"
     else:
-        c.drawCentredString(cx, y0 - margen - tamano, texto)
+        px, py, alineacion = cx, y0 - margen - tamano, "center"
+    # 🌀 El nombre gira con su propio ángulo, no con el del objeto:
+    #    se deshace el giro del objeto y se aplica el del texto.
+    c.saveState()
+    try:
+        c.translate(px, py)
+        giro = (float(getattr(elemento, "rotacion_texto", 0) or 0)
+                + float(elemento.rotacion or 0))
+        if giro:
+            c.rotate(giro)
+        if alineacion == "center":
+            c.drawCentredString(0, 0, texto)
+        elif alineacion == "right":
+            c.drawRightString(0, 0, texto)
+        else:
+            c.drawString(0, 0, texto)
+    finally:
+        c.restoreState()
 
 
 def _exportar_hoja_blanca(plano, ruta_salida, solo_visibles=True):

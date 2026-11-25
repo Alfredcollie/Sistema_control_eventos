@@ -14,11 +14,14 @@ def _etiqueta(tags, extra=None):
     return tuple(base)
 
 
-def _texto(canvas, x, y, texto, color, tamano, tags, anchor="center"):
+def _texto(canvas, x, y, texto, color, tamano, tags, anchor="center", angle=0):
     if not texto:
         return []
-    return [canvas.create_text(x, y, text=texto, fill=color, anchor=anchor,
-                               font=("Arial", max(6, int(tamano))), tags=tags)]
+    opciones = {"text": texto, "fill": color, "anchor": anchor,
+                "font": ("Arial", max(6, int(tamano))), "tags": tags}
+    if angle:
+        opciones["angle"] = float(angle)
+    return [canvas.create_text(x, y, **opciones)]
 
 
 def dibujar(canvas, elemento, caja, tags, zoom=1.0, con_texto=True):
@@ -254,12 +257,14 @@ def dibujar(canvas, elemento, caja, tags, zoom=1.0, con_texto=True):
 
     elif tipo == "texto":
         ids.extend(_texto(canvas, cx, cy, elemento.texto or "Texto", color,
-                          max(7, int(11 * zoom)), tags))
+                          max(7, int(11 * zoom)), tags,
+                          angle=float(getattr(elemento, "rotacion_texto", 0) or 0)))
 
     elif tipo == "etiqueta":
         rect(width=1.2, fill=_suave(color))
         ids.extend(_texto(canvas, cx, cy, elemento.texto or "Etiqueta", color,
-                          max(6, int(9 * zoom)), tags))
+                          max(6, int(9 * zoom)), tags,
+                          angle=float(getattr(elemento, "rotacion_texto", 0) or 0)))
 
     elif tipo == "muro":
         # 🧱 Pared en planta: rectángulo relleno (el alto = espesor del muro)
@@ -387,7 +392,8 @@ def _etiqueta_objeto(canvas, elemento, ancho, alto, caja, tags, zoom):
         x, y, ancla = x1 + margen, cy, "w"
     else:                                  # abajo (por defecto)
         x, y, ancla = cx, y1 + margen, "n"
-    return _texto(canvas, x, y, elemento.nombre, color, tamano, tags, anchor=ancla)
+    return _texto(canvas, x, y, elemento.nombre, color, tamano, tags, anchor=ancla,
+                  angle=float(getattr(elemento, "rotacion_texto", 0) or 0))
 
 
 def _suave(color):

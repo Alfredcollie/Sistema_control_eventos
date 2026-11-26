@@ -1,0 +1,73 @@
+name: Publicar release existente (solo Release)
+
+# Publica un release SIN volver a compilar.
+# Usa los artifacts de un run anterior (build-windows + build-mac).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Versión/tag a publicar (ej. v1.5.6)'
+        required: true
+      run_id:
+        description: 'ID del run que contiene los artifacts'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Descargar artifact Windows
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.event.inputs.run_id }}
+      run: gh run download "$RUN_ID" -n windows -D release-assets
+
+    - name: Descargar artifact macOS
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.event.inputs.run_id }}
+      run: gh run download "$RUN_ID" -n mac -D release-assets
+
+    - name: Ver archivos a publicar
+      run: ls -la release-assets
+
+    - name: Publicar en GitHub Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_REPO: ${{ github.repository }}
+        TAG: ${{ github.event.inputs.tag_name }}
+      run: |
+        set -euo pipefail
+        echo "Publicando la versión $TAG"
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "El release $TAG ya existe; se reemplazarán los archivos uno por uno."
+        else
+          gh release create "$TAG" --title "ControlEventos $TAG" --notes "Compilación automática $TAG"
+        fi
+        for archivo in release-assets/*; do
+          if [ ! -f "$archivo" ]; then
+            continue
+          fi
+          echo "Subiendo $(basename "$archivo")..."
+          subido=0
+          for intento in 1 2 3 4; do
+            if gh release upload "$TAG" "$archivo" --clobber; then
+              subido=1
+              break
+            fi
+            echo "Fallo al subir $(basename "$archivo") (intento $intento). Reintentando en 10 s..."
+            sleep 10
+          done
+          if [ "$subido" -ne 1 ]; then
+            echo "ERROR: no se pudo subir $archivo" >&2
+            exit 1
+          fi
+        done
+        gh release edit "$TAG" --draft=false >/dev/null 2>&1 || true
+        echo "Release $TAG publicado correctamente."

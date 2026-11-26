@@ -43,3 +43,10 @@ config_local.json
 # token local para lanzar la compilación (NO subir)
 github_token.txt
 .github_token
+
+respaldos/*
+!respaldos/web_app.backup_20261121/
+!respaldos/web_app.backup_20261121/**
+!respaldos/banco_duplicados_huerfanos_20261123_210119.json
+!respaldos/Contrato_tomas_10281144_original_20261123_213118.pdf
+!respaldos/config_local.json.bak_ruta_drive_20261030

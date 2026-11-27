@@ -326,3 +326,36 @@ def borrar_rclone_token():
         return False
     finally:
         liberar_conexion(conn)
+
+
+# ⚙️ App Grifo: desfase y tolerancia (Flota)
+CLAVE_DESFASE_GRIFO = "desfase_app_grifo_dias"
+CLAVE_TOLERANCIA_GRIFO = "tolerancia_app_grifo_dias"
+
+
+def cargar_desfase_app_grifo():
+    try:
+        return int(float(_cargar_clave(CLAVE_DESFASE_GRIFO, "3") or 3))
+    except Exception:
+        return 3
+
+
+def guardar_desfase_app_grifo(valor):
+    try:
+        return _guardar_clave(CLAVE_DESFASE_GRIFO, str(max(0, int(float(valor)))))
+    except Exception:
+        return False
+
+
+def cargar_tolerancia_app_grifo():
+    try:
+        return int(float(_cargar_clave(CLAVE_TOLERANCIA_GRIFO, "1") or 1))
+    except Exception:
+        return 1
+
+
+def guardar_tolerancia_app_grifo(valor):
+    try:
+        return _guardar_clave(CLAVE_TOLERANCIA_GRIFO, str(max(0, int(float(valor)))))
+    except Exception:
+        return False

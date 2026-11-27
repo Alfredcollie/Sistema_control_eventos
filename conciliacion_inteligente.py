@@ -217,26 +217,36 @@ def _cerca(fechas, fecha, ventana_dias, excluir=None):
 
 
 def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
-             tolerancia=TOLERANCIA_IMPORTE, comision=0.0, tope_comision=10.0):
+             tolerancia=TOLERANCIA_IMPORTE, comision=0.0, tope_comision=10.0,
+             es_banco_app_grifo=False, desfase_app_grifo=0,
+             tolerancia_app_grifo=1, rechazos=None):
     """Devuelve las propuestas de conciliación (sin escribir nada).
 
-    movimientos_banco: [{"id", "fecha", "descripcion", "monto", "banco", "cuenta",
-                         "moneda", "referencia", "pagina"}]
-    asientos:          [{"id", "fecha", "descripcion", "monto", "banco", "cuenta",
-                         "moneda", "referencia"}]
-
-    La confianza 100 se reserva para el caso seguro:
-    misma fecha + mismo importe + ese importe no se repite en ningún lado
-    dentro de la ventana de días (o el N° de operación coincide).
-
-    Si la diferencia es la comisión del banco (configurada, o pequeña con el
-    N° de operación impreso en la descripción), se propone como
-    «CONCILIADO CON COMISIÓN» para aprobar a mano: nunca se aplica sola.
+    Reglas aprobadas:
+    • Nivel 1 (bancos sin App Grifo): misma fecha + mismo importe + único; si el
+      importe se repite ese día, se usa el N° de operación para desempatar.
+    • Nivel 2 (solo el banco configurado de App Grifo en Flota): fecha del asiento
+      + desfase configurado = fecha del banco, mismo importe y único. No exige
+      N° de operación (Interbank no lo imprime).
+    • La tolerancia ± del App Grifo solo genera sugerencia, nunca automático.
+    • `rechazos` es un set de (tabla, id_asiento, fecha_banco, monto_banco) que
+      el usuario deshizo y no debe volver a proponerse solo.
     """
     try:
         ventana_dias = max(0, int(ventana_dias))
     except Exception:
         ventana_dias = DIAS_DESFASE_POR_DEFECTO
+    try:
+        desfase_app_grifo = max(0, int(desfase_app_grifo or 0))
+    except Exception:
+        desfase_app_grifo = 0
+    try:
+        tolerancia_app_grifo = max(0, int(tolerancia_app_grifo or 0))
+    except Exception:
+        tolerancia_app_grifo = 0
+    rechazos = set(rechazos or ())
+    if es_banco_app_grifo:
+        ventana_dias = max(ventana_dias, desfase_app_grifo + tolerancia_app_grifo)
 
     movs, asis = [], []
     for i, m in enumerate(movimientos_banco):
@@ -282,6 +292,16 @@ def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
             dias = abs((mv["fecha"] - as_["fecha"]).days)
             if dias > ventana_dias:
                 continue                            # 🚫 fuera de la ventana
+            # 🚫 Pares que el usuario deshizo: no se vuelven a proponer solos.
+            if rechazos:
+                _clave_r = (
+                    str(mv["m"].get("banco") or ""),
+                    mv["fecha"].strftime("%Y-%m-%d") if mv["fecha"] else "",
+                    round(float(mv["importe"]), 2),
+                    as_["fecha"].strftime("%Y-%m-%d") if as_["fecha"] else "",
+                    round(float(as_["importe"]), 2))
+                if _clave_r in rechazos:
+                    continue
             # 🔎 N° de operación: igual en los dos lados, o impreso dentro de la
             #    descripción del banco (el PDF imprime los últimos dígitos).
             ref_ok = _refs_compatibles(mv["ref"], as_["ref"])
@@ -297,6 +317,11 @@ def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
                     continue
                 con_comision = True
             clave = (mv["importe"], mv["sentido"])
+            # ¿El mismo importe se repite ESE MISMO DÍA? (regla Nivel 1)
+            dup_dia_sis = sum(
+                1 for f in asis_por_importe.get(clave, []) if f == mv["fecha"]) - 1
+            dup_dia_banco = sum(
+                1 for f in movs_por_importe.get(clave, []) if f == as_["fecha"]) - 1
             # ¿El mismo importe se repite del otro lado dentro de la ventana?
             rivales_sis = _cerca(asis_por_importe.get(clave, []), mv["fecha"],
                                  ventana_dias, excluir=as_["fecha"])
@@ -308,7 +333,15 @@ def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
                 "sim": similitud_nombres(mv["m"].get("descripcion"),
                                          as_["m"].get("descripcion")),
                 "rivales_sis": rivales_sis, "rivales_banco": rivales_banco,
+                "dup_dia_sis": dup_dia_sis, "dup_dia_banco": dup_dia_banco,
             })
+
+    # 🔎 N° de operación único a cada lado (para desempatar sin arbitrariedad).
+    refs_mov, refs_as = {}, {}
+    for c in candidatos:
+        if c["ref_ok"]:
+            refs_mov[c["mv"]["i"]] = refs_mov.get(c["mv"]["i"], 0) + 1
+            refs_as[c["as"]["i"]] = refs_as.get(c["as"]["i"], 0) + 1
 
     # 🔢 Puntaje: el importe ya coincide (50); suma la fecha, la descripción y
     #    la referencia. Con cualquier rival el puntaje se topa en 60 (AMBIGUO).
@@ -327,11 +360,26 @@ def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
             puntos += 10
         if c["rivales_sis"] or c["rivales_banco"]:
             puntos = min(puntos, 60)
-        c["seguro"] = bool(
-            not c["con_comision"]
-            and ((c["dias"] == 0 and not c["rivales_sis"] and not c["rivales_banco"])
-                 or (c["ref_ok"] and c["dias"] == 0))
-        )
+        c["ref_unica"] = bool(
+            c["ref_ok"]
+            and refs_mov.get(c["mv"]["i"], 0) == 1
+            and refs_as.get(c["as"]["i"], 0) == 1)
+        if es_banco_app_grifo:
+            # Nivel 2: solo el banco App Grifo, fecha + desfase exactos.
+            c["seguro"] = bool(
+                not c["con_comision"]
+                and c["diferencia"] <= tolerancia
+                and c["dias"] == desfase_app_grifo
+                and not c["rivales_sis"] and not c["rivales_banco"])
+        else:
+            # Nivel 1: misma fecha + mismo importe. Si el importe se repite,
+            # solo el N° de operación único permite el automático.
+            c["seguro"] = bool(
+                not c["con_comision"]
+                and c["diferencia"] <= tolerancia
+                and c["dias"] == 0
+                and ((not c["dup_dia_sis"] and not c["dup_dia_banco"])
+                     or c["ref_unica"]))
         if c["con_comision"]:
             # Con diferencia de importe NUNCA es automático: se propone.
             c["puntaje"] = 90 if c["ref_ok"] else 85
@@ -395,8 +443,12 @@ def proponer(movimientos_banco, asientos, ventana_dias=DIAS_DESFASE_POR_DEFECTO,
             "id_gasto_compras": as_["m"].get("id_gasto_compras", 0),
             "id_factura": as_["m"].get("id_factura", 0),
             "pagina_pdf": mv["m"].get("pagina"),
-            "nivel": (3 if c["ref_ok"] else
-                      (2 if c["con_comision"] else (1 if c["dias"] == 0 else 2))),
+            "tabla_asiento": str(as_["m"].get("tabla") or ""),
+            "ref_ok": c["ref_ok"],
+            "ref_unica": c["ref_unica"],
+            "nivel": (2 if (es_banco_app_grifo and c["seguro"]) else
+                      (1 if (c["seguro"] and c["dias"] == 0) else
+                       (3 if c["ref_ok"] else (2 if c["con_comision"] else 2)))),
             "estado": estado,
             "confianza": confianza,
             "rivales": rivales,

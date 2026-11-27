@@ -46,6 +46,11 @@ except Exception:
 from tareas_seguras import ejecutar_en_hilo
 
 try:
+    import buffer_banco
+except Exception:                                     # pragma: no cover
+    buffer_banco = None
+
+try:
     import pdfplumber
 except ImportError:
     pdfplumber = None
@@ -3106,16 +3111,21 @@ class ModuloBancoApp:
             movs_todos = [m for m in movs_todos
                           if not (clave_fecha(m["fecha"]) and clave_fecha(m["fecha"]) < fecha_inicio)]
 
-        antes_del_inicio = bool(mes and fecha_inicio and mes < fecha_inicio[:7])
+        # 📅 El saldo grande es SIEMPRE el de hoy: inicial + todo lo movido
+        #    desde la fecha de inicio hasta el día presente. El mes elegido solo
+        #    filtra los importes de ingresos/egresos que se muestran.
+        hoy_iso = datetime.now().strftime("%Y-%m-%d")
+        movs_todos = [m for m in movs_todos
+                      if not clave_fecha(m["fecha"]) or clave_fecha(m["fecha"]) <= hoy_iso]
+        antes_del_inicio = bool(fecha_inicio and hoy_iso < fecha_inicio)
         if antes_del_inicio:
-            # Mes anterior a la apertura de la cuenta: todavía no había movimientos
             movs, acumulados, saldo_inicial = [], [], 0.0
-        elif mes:
-            validos = [(m, clave_fecha(m["fecha"])) for m in movs_todos]
-            movs = [m for m, f in validos if f[:7] == mes]
-            acumulados = [m for m, f in validos if f and f[:7] <= mes]
         else:
-            movs = movs_todos
+            validos = [(m, clave_fecha(m["fecha"])) for m in movs_todos]
+            if mes:
+                movs = [m for m, f in validos if f[:7] == mes]
+            else:
+                movs = list(movs_todos)
             acumulados = movs_todos
 
         ingresos = sum(m["monto"] for m in movs if m["monto"] > 0)
@@ -3127,7 +3137,9 @@ class ModuloBancoApp:
         if antes_del_inicio:
             banco_info = {"saldo": None, "fecha": "", "periodo": ""}
         else:
-            banco_info = self._saldo_segun_banco(banco, mes, ignorados=_ignorados)
+            # Comparación con el ÚLTIMO estado de cuenta cargado (no con el mes
+            # elegido): el saldo del sistema es el de hoy.
+            banco_info = self._saldo_segun_banco(banco, None, ignorados=_ignorados)
         saldo_banco = banco_info.get("saldo")
         diferencia = (round(saldo - float(saldo_banco), 2)
                       if saldo_banco is not None else None)
@@ -4483,6 +4495,19 @@ class ModuloBancoApp:
                       font=(FAMILIA, 12, "bold"), fg_color="#8e44ad", hover_color="#6c3483",
                       command=self.mostrar_diferencias_importe).pack(side="left", padx=4)
 
+        # 🧹 Limpieza de la conciliación (sin tocar los movimientos de origen)
+        f_btns4 = ctk.CTkFrame(self.tab_conciliacion, fg_color="transparent")
+        f_btns4.pack(fill="x", padx=5, pady=(0, 4))
+        ctk.CTkButton(f_btns4, text="🧹 Borrar conciliación del mes", width=250,
+                      font=(FAMILIA, 12, "bold"), fg_color="#a93226", hover_color="#7b241c",
+                      command=self.borrar_conciliacion_mes).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns4, text="↩️ Deshacer conciliación del asiento", width=290,
+                      font=(FAMILIA, 12, "bold"), fg_color="#d35400", hover_color="#a84300",
+                      command=self.deshacer_conciliacion_asiento).pack(side="left", padx=4)
+        ctk.CTkButton(f_btns4, text="🔒 Cerrar mes", width=150,
+                      font=(FAMILIA, 12, "bold"), fg_color="#1f618d", hover_color="#154360",
+                      command=self.cerrar_mes_conciliacion).pack(side="left", padx=4)
+
         self.f_resumen = ctk.CTkFrame(self.tab_conciliacion, fg_color="#eaf2f8",
                                       border_width=1, border_color="#d4e6f1", corner_radius=8)
         self.f_resumen.pack(fill="x", padx=5, pady=(0, 8))
@@ -4610,6 +4635,75 @@ class ModuloBancoApp:
             return self.bancos[0]
         return None
 
+    def _es_banco_app_grifo(self, banco):
+        """¿Este banco/cuenta es el configurado para recibir App Grifo? (Flota)."""
+        try:
+            from config_nube import cargar_cuenta_grifo
+            configurada = str(cargar_cuenta_grifo() or "").strip().upper()
+        except Exception:
+            configurada = ""
+        if not configurada:
+            return False
+        nombre = str((banco or {}).get("banco") or "").upper()
+        cuenta = str((banco or {}).get("cuenta") or "").upper()
+        return bool((nombre and nombre in configurada)
+                    or (cuenta and cuenta in configurada)
+                    or (configurada in nombre))
+
+    def _parametros_app_grifo(self):
+        """(desfase, tolerancia) del App Grifo; 0,0 si no aplica."""
+        try:
+            from config_nube import (cargar_desfase_app_grifo,
+                                     cargar_tolerancia_app_grifo)
+            return (int(cargar_desfase_app_grifo() or 0),
+                    int(cargar_tolerancia_app_grifo() or 0))
+        except Exception:
+            return 0, 0
+
+    def _cargar_rechazos(self, banco):
+        """Pares que el usuario deshizo y no deben volver a conciliarse solos."""
+        salida = set()
+        if not banco:
+            return salida
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return salida
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT COALESCE(banco,''), COALESCE(fecha_banco,''),
+                                    COALESCE(monto_banco,0), COALESCE(fecha_asiento,''),
+                                    COALESCE(monto_asiento,0)
+                             FROM conciliacion_rechazos
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                               AND COALESCE(activo, TRUE)""",
+                          (banco.get("banco", ""),))
+                for banco_r, fb, mb, fa, ma in c.fetchall():
+                    salida.add((str(banco_r or ""),
+                                str(fb or "")[:10], round(abs(float(mb or 0)), 2),
+                                str(fa or "")[:10], round(abs(float(ma or 0)), 2)))
+        except Exception as error:
+            print("[Conciliación] rechazos:", error)
+        finally:
+            liberar_conexion(conn)
+        return salida
+
+    def _limpiar_rechazo(self, cursor, banco, propuesta):
+        """Al conciliar, se borra el rechazo previo de ese mismo par."""
+        try:
+            cursor.execute("""DELETE FROM conciliacion_rechazos
+                              WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                                AND COALESCE(fecha_banco,'') = %s
+                                AND ABS(COALESCE(monto_banco,0) - %s) < 0.005
+                                AND COALESCE(fecha_asiento,'') = %s
+                                AND ABS(COALESCE(monto_asiento,0) - %s) < 0.005""",
+                           (banco.get("banco", ""),
+                            clave_fecha(propuesta.get("fecha_banco")) or "",
+                            abs(float(propuesta.get("importe_banco") or 0)),
+                            clave_fecha(propuesta.get("fecha_contable")) or "",
+                            abs(float(propuesta.get("importe_contable") or 0))))
+        except Exception as error:
+            print("[Conciliación] limpiar rechazo:", error)
+
     def ir_a_conciliacion(self, banco):
         etiquetas = [construir_etiqueta_banco(b) for b in self.bancos]
         et = construir_etiqueta_banco(banco)
@@ -4637,6 +4731,11 @@ class ModuloBancoApp:
                                 "Primero seleccione el banco a conciliar.",
                                 parent=self.parent_frame)
             return
+        # 🧠 Reglas Nivel 1/2: el App Grifo solo aplica en el banco configurado.
+        es_app_grifo = self._es_banco_app_grifo(banco)
+        desfase_grifo, tolerancia_grifo = (self._parametros_app_grifo()
+                                           if es_app_grifo else (0, 0))
+        rechazos = self._cargar_rechazos(banco)
         movs = getattr(self, "movimientos_pdf", None) or []
         if not movs:
             try:
@@ -4676,7 +4775,7 @@ class ModuloBancoApp:
                      font=(FAMILIA, 10), text_color="#7f8c8d").pack(side="left", padx=4)
         # ⚡ Se concilian solos únicamente los del MISMO DÍA con importe exacto y
         #    que no se repita en el período. La casilla permite apagarlo.
-        chk_auto = ctk.CTkCheckBox(barra, text="Conciliar mismo día + monto único",
+        chk_auto = ctk.CTkCheckBox(barra, text="Conciliar automáticamente (Nivel 1 y 2)",
                                    font=(FAMILIA, 11))
         chk_auto.select()
         chk_auto.pack(side="left", padx=(18, 4))
@@ -4779,7 +4878,11 @@ class ModuloBancoApp:
                         banco, _desde_h, _hasta_h)
                     estado["propuestas"] = ci.proponer(
                         movimientos, estado["asientos"], ventana_dias=dias,
-                        comision=_comision)
+                        comision=_comision,
+                        es_banco_app_grifo=es_app_grifo,
+                        desfase_app_grifo=desfase_grifo,
+                        tolerancia_app_grifo=tolerancia_grifo,
+                        rechazos=rechazos)
                 except Exception as error:
                     estado["error"] = str(error)
 
@@ -4860,7 +4963,11 @@ class ModuloBancoApp:
                     try:
                         if float(p.get("confianza") or 0) < 100:
                             continue
-                        if str(p.get("estado") or "") != "CONCILIADO EXACTO":
+                        estado_p = str(p.get("estado") or "")
+                        if estado_p not in ("CONCILIADO EXACTO",
+                                            "CONCILIADO CON DESFASE"):
+                            continue
+                        if estado_p == "CONCILIADO CON DESFASE" and not es_app_grifo:
                             continue
                         if self._aplicar_conciliacion_inteligente(banco, p, "APROBADO",
                                                                   origen="auto"):
@@ -7252,6 +7359,12 @@ class ModuloBancoApp:
         finally:
             liberar_conexion(conn)
         try:
+            if buffer_banco is not None:
+                buffer_banco.guardar_asientos(nombre_banco,
+                                              banco.get("cuenta", "") or "", asientos)
+        except Exception as error_buf:
+            print("[Buffer] asientos:", error_buf)
+        try:
             if _clave_cache:
                 self._cache_asientos = {'clave': _clave_cache, 'datos': asientos}
         except Exception:
@@ -7270,14 +7383,27 @@ class ModuloBancoApp:
                                  parent=self.parent_frame)
             return False
         try:
+            mes_op = clave_fecha(propuesta.get("fecha_banco"))[:7]
+        except Exception:
+            mes_op = ""
+        if mes_op and self._periodo_cerrado(banco, mes_op):
+            if origen == "auto":
+                return False
+            if not self._advertir_periodo_cerrado(banco, mes_op, "conciliar"):
+                return False
+        try:
             with conn.cursor() as c:
                 _id_asiento = propuesta.get("id_asiento")
                 _id_int = _id_asiento if isinstance(_id_asiento, int) else None
                 if decision == "APROBADO" and _id_int:
                     c.execute("""UPDATE conciliacion_bancaria
-                                 SET estado='conciliado', fecha_conciliacion=%s
+                                 SET estado='conciliado', fecha_conciliacion=%s,
+                                     fecha_hora_conciliacion=NOW(), regla=%s
                                  WHERE id=%s""",
-                              (datetime.now().strftime("%d/%m/%Y"), _id_int))
+                              (datetime.now().strftime("%d/%m/%Y"),
+                               str(propuesta.get("reglas") or "")[:120], _id_int))
+                    # 🧹 Si este par estaba rechazado, al conciliarlo se limpia.
+                    self._limpiar_rechazo(c, banco, propuesta)
                     # 🏦 Si se aprobó con DIFERENCIA (comisión del banco), la
                     #    línea del estado de cuenta también queda marcada como
                     #    conciliada para el cruce clásico (tabla y Resumen).
@@ -7327,6 +7453,11 @@ class ModuloBancoApp:
                      propuesta.get("observacion", ""), propuesta.get("accion_sugerida", ""),
                      origen or "manual", "", datetime.now().strftime("%Y-%m-%d %H:%M"), True))
             conn.commit()
+            try:
+                if buffer_banco is not None:
+                    buffer_banco.invalidar(banco.get("banco"), banco.get("cuenta"))
+            except Exception:
+                pass
             # 🧹 El asiento cambió de estado: la lista cacheada de asientos ya no
             #    sirve (si no, el recién conciliado volvía a salir como candidato).
             self._cache_asientos = None
@@ -7669,6 +7800,15 @@ class ModuloBancoApp:
         """
         if not banco:
             return []
+        # 🚀 Buffer local (SQLite): si el período está vigente, no va a Supabase.
+        if periodo and buffer_banco is not None:
+            try:
+                _buf = buffer_banco.leer_movimientos(
+                    banco.get("banco", ""), banco.get("cuenta", "") or "", periodo)
+                if _buf is not None:
+                    return _buf
+            except Exception as error_buf:
+                print("[Buffer] movimientos:", error_buf)
         conn = conectar_db(silencioso=True)
         if not conn:
             return []
@@ -7689,11 +7829,19 @@ class ModuloBancoApp:
                 sql += " ORDER BY id"
                 c.execute(sql, tuple(args))
                 filas = c.fetchall()
-                return [{"fecha": f or "", "descripcion": d or "",
-                         "monto": float(m or 0),
-                         "saldo": (float(s) if s is not None else None),
-                         "periodo": (str(per) or "") if per else ""}
-                        for f, d, m, s, per in filas]
+                resultado = [{"fecha": f or "", "descripcion": d or "",
+                              "monto": float(m or 0),
+                              "saldo": (float(s) if s is not None else None),
+                              "periodo": (str(per) or "") if per else "",
+                              "banco": nombre_banco, "cuenta": cuenta}
+                             for f, d, m, s, per in filas]
+                try:
+                    if buffer_banco is not None:
+                        buffer_banco.guardar_movimientos(
+                            nombre_banco, cuenta, periodo or "", resultado)
+                except Exception as error_buf:
+                    print("[Buffer] guardar movimientos:", error_buf)
+                return resultado
         except Exception:
             return []
         finally:
@@ -7776,6 +7924,12 @@ class ModuloBancoApp:
                         _banco_pdf, self.movimientos_pdf, ruta)
                     self._guardar_movimientos_pdf(_banco_pdf, self.movimientos_pdf,
                                                   _archivo_pdf)
+                    try:
+                        if buffer_banco is not None:
+                            buffer_banco.invalidar(_banco_pdf.get("banco"),
+                                                   _banco_pdf.get("cuenta"))
+                    except Exception as _e_buf:
+                        print("[Buffer] invalidar tras importar:", _e_buf)
                     # 🔁 Se fuerza recargar desde la base con el período correcto
                     #    (la fecha del estado recién subido puede cambiar el mes).
                     self._banco_pdf = None
@@ -7957,6 +8111,11 @@ class ModuloBancoApp:
                             f"{construir_etiqueta_banco(banco)} · {self.cmb_mes.get()} "
                             f"(PDF borradas: {borradas_pdf})")
         # Forzar recarga del PDF y del reporte
+        try:
+            if buffer_banco is not None:
+                buffer_banco.invalidar(banco.get("banco"), banco.get("cuenta"))
+        except Exception:
+            pass
         self.movimientos_pdf = []
         self._banco_pdf = None
         self._mes_pdf = ""
@@ -8145,6 +8304,437 @@ class ModuloBancoApp:
                 f["_pendiente_siguiente"] = True
                 marcados.append(f)
         return marcados
+
+    @staticmethod
+    def _cuenta_coincide(cuenta_fila, cuenta_banco):
+        """Compara cuentas aunque una tenga el prefijo del banco ('BCP - ...')."""
+        a = "".join(ch for ch in str(cuenta_fila or "") if ch.isdigit())
+        b = "".join(ch for ch in str(cuenta_banco or "") if ch.isdigit())
+        if not a or not b:
+            return True
+        return a == b or a.endswith(b) or b.endswith(a)
+
+    def _periodo_cerrado(self, banco, mes_key):
+        """Devuelve el cierre del mes (o None)."""
+        if not banco or not mes_key:
+            return None
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT id, COALESCE(saldo_sistema,0), saldo_banco, diferencia,
+                                    COALESCE(pendientes,0), COALESCE(faltantes,0),
+                                    COALESCE(diferencias,0), COALESCE(usuario,''), creado
+                             FROM conciliacion_cierres
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)
+                               AND COALESCE(cuenta,'') = %s
+                               AND periodo = %s
+                               AND COALESCE(activo, TRUE)
+                             ORDER BY id DESC LIMIT 1""",
+                          (banco.get("banco", ""), banco.get("cuenta", "") or "", mes_key))
+                r = c.fetchone()
+                if not r:
+                    return None
+                return {"id": r[0], "saldo_sistema": float(r[1] or 0),
+                        "saldo_banco": (float(r[2]) if r[2] is not None else None),
+                        "diferencia": (float(r[3]) if r[3] is not None else None),
+                        "pendientes": int(r[4] or 0), "faltantes": int(r[5] or 0),
+                        "diferencias": int(r[6] or 0), "usuario": str(r[7] or ""),
+                        "creado": r[8]}
+        except Exception as error:
+            print("[Conciliación] cierre del mes:", error)
+            return None
+        finally:
+            liberar_conexion(conn)
+
+    def _advertir_periodo_cerrado(self, banco, mes_key, accion="modificar"):
+        """True si se puede continuar; muestra una advertencia si el mes está cerrado."""
+        cierre = self._periodo_cerrado(banco, mes_key)
+        if not cierre:
+            return True
+        try:
+            cuando = cierre.get("creado")
+            cuando = cuando.strftime("%d/%m/%Y %H:%M") if hasattr(cuando, "strftime") else str(cuando or "")
+        except Exception:
+            cuando = ""
+        return messagebox.askyesno(
+            "Mes cerrado",
+            "El mes %s de %s fue cerrado el %s por %s.\n\n"
+            "¿Desea %s de todos modos? La acción quedará auditada y el cierre "
+            "histórico se conservará."
+            % (mes_key, construir_etiqueta_banco(banco), cuando or "(sin fecha)",
+               cierre.get("usuario") or "(sin usuario)", accion),
+            parent=self.parent_frame)
+
+    def cerrar_mes_conciliacion(self):
+        """🔒 Cierra el mes SOLO si está 100 % conciliado y guarda la foto."""
+        banco = self.banco_seleccionado()
+        if not banco:
+            messagebox.showinfo("Cerrar mes", "Seleccione el banco a conciliar.",
+                                parent=self.parent_frame)
+            return
+        try:
+            mes_key = mes_etiqueta_a_key(self.cmb_mes.get())
+        except Exception:
+            mes_key = ""
+        if not mes_key:
+            messagebox.showwarning("Cerrar mes", "Seleccione un mes.",
+                                   parent=self.parent_frame)
+            return
+        cierre = self._periodo_cerrado(banco, mes_key)
+        if cierre:
+            messagebox.showinfo(
+                "Cerrar mes",
+                "El mes %s ya está cerrado.\n\nCierre del %s · usuario: %s\n"
+                "Saldo sistema: %s\nPendientes: %d · Faltantes: %d · Diferencias: %d"
+                % (mes_key, cierre.get("creado") or "", cierre.get("usuario") or "",
+                   formatear_monto(cierre.get("saldo_sistema") or 0),
+                   cierre.get("pendientes") or 0, cierre.get("faltantes") or 0,
+                   cierre.get("diferencias") or 0),
+                parent=self.parent_frame)
+            return
+        pendientes = list(getattr(self, "_pendientes_sistema", []) or [])
+        faltantes = list(getattr(self, "_faltantes_estado_cuenta", []) or [])
+        diferencias = list(getattr(self, "_diferencias_importe", []) or [])
+        if pendientes or faltantes or diferencias:
+            def _importe(lista):
+                try:
+                    return sum(abs(float(x.get("monto") or x.get("diferencia") or 0))
+                               for x in lista)
+                except Exception:
+                    return 0.0
+            messagebox.showwarning(
+                "Cerrar mes",
+                "No se puede cerrar %s: todavía hay movimientos sin resolver.\n\n"
+                "• Asientos pendientes: %d (%s)\n"
+                "• Líneas del banco sin asiento: %d (%s)\n"
+                "• Diferencias por revisar: %d (%s)\n\n"
+                "Resuélvalos y vuelva a intentar."
+                % (mes_key, len(pendientes), formatear_monto(_importe(pendientes)),
+                   len(faltantes), formatear_monto(_importe(faltantes)),
+                   len(diferencias), formatear_monto(_importe(diferencias))),
+                parent=self.parent_frame)
+            return
+        resumen = self.calcular_resumen(banco, mes=mes_key)
+        saldo_sistema = float(resumen.get("saldo_actual") or 0)
+        saldo_banco = resumen.get("saldo_banco")
+        diferencia = resumen.get("diferencia")
+        if not messagebox.askyesno(
+                "Cerrar mes",
+                "¿Cerrar %s de %s?\n\nSaldo sistema: %s\nSaldo banco: %s\nDiferencia: %s\n\n"
+                "Se guardará una foto del cierre. Después se podrá conciliar con advertencia."
+                % (mes_key, construir_etiqueta_banco(banco),
+                   formatear_monto(saldo_sistema),
+                   (formatear_monto(saldo_banco) if saldo_banco is not None else "—"),
+                   (formatear_monto(diferencia) if diferencia is not None else "—")),
+                parent=self.parent_frame):
+            return
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Cerrar mes", "Sin conexión a la base de datos.",
+                                 parent=self.parent_frame)
+            return
+        try:
+            with conn.cursor() as c:
+                c.execute("""INSERT INTO conciliacion_cierres
+                    (banco, cuenta, periodo, saldo_sistema, saldo_banco, diferencia,
+                     pendientes, pendientes_importe, faltantes, faltantes_importe,
+                     diferencias, detalle, usuario, creado, activo)
+                    VALUES (%s,%s,%s,%s,%s,%s,0,0,0,0,0,%s,%s,NOW(),TRUE)""",
+                          (banco.get("banco", ""), banco.get("cuenta", "") or "", mes_key,
+                           saldo_sistema, saldo_banco, diferencia,
+                           "Cierre sin pendientes", getattr(self, "usuario_activo", "")))
+            conn.commit()
+        except Exception as error:
+            conn.rollback()
+            messagebox.showerror("Cerrar mes", "No se pudo guardar el cierre:\n%s" % error,
+                                 parent=self.parent_frame)
+            return
+        finally:
+            liberar_conexion(conn)
+        registrar_auditoria(getattr(self, "usuario_activo", "Sistema"), "Banco",
+                            "Cerró el mes %s de %s · saldo sistema %s"
+                            % (mes_key, construir_etiqueta_banco(banco),
+                               formatear_monto(saldo_sistema)))
+        messagebox.showinfo("Cerrar mes", "Mes cerrado y guardado.", parent=self.parent_frame)
+
+    def borrar_conciliacion_mes(self):
+        """🧹 Borra SOLO los asientos agregados del estado de cuenta del mes.
+
+        Se conservan los asientos del sistema (Compras/Ventas) y los creados
+        desde Banco. Los asientos del sistema que estaban conciliados vuelven a
+        quedar pendientes. También se borran las líneas crudas del PDF del mes
+        para poder volver a subir el estado de cuenta.
+        """
+        banco = self.banco_seleccionado()
+        if not banco:
+            messagebox.showinfo("Borrar conciliación",
+                                "Seleccione el banco a conciliar.", parent=self.parent_frame)
+            return
+        try:
+            mes_key = mes_etiqueta_a_key(self.cmb_mes.get())
+        except Exception:
+            mes_key = ""
+        if not mes_key:
+            messagebox.showwarning("Borrar conciliación",
+                                   "Seleccione un mes para borrar su conciliación.",
+                                   parent=self.parent_frame)
+            return
+        if self._periodo_cerrado(banco, mes_key):
+            if not self._advertir_periodo_cerrado(banco, mes_key, "borrar la conciliación"):
+                return
+        nombre_banco = str(banco.get("banco") or "")
+        cuenta = str(banco.get("cuenta") or "")
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Borrar conciliación",
+                                 "Sin conexión a la base de datos.", parent=self.parent_frame)
+            return
+        ids_estado, ids_sistema, ids_pdf = [], [], []
+        try:
+            with conn.cursor() as c:
+                c.execute("""SELECT id, fecha, COALESCE(origen,''), COALESCE(tabla,''),
+                                    COALESCE(estado,''), COALESCE(monto,0), COALESCE(cuenta,'')
+                             FROM conciliacion_bancaria
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)""",
+                          (nombre_banco,))
+                for fila in c.fetchall():
+                    if not self._cuenta_coincide(fila[6], cuenta):
+                        continue
+                    if clave_fecha(fila[1])[:7] != mes_key:
+                        continue
+                    origen = str(fila[2] or "")
+                    tabla = str(fila[3] or "")
+                    if origen == "e" or (origen == "manual" and tabla == "estado_cuenta"):
+                        ids_estado.append(fila[0])
+                    elif origen.startswith("s:") and str(fila[4] or "").lower() == "conciliado":
+                        ids_sistema.append(fila[0])
+                c.execute("""SELECT id, fecha, COALESCE(periodo,''), COALESCE(cuenta,'')
+                             FROM conciliacion_movimientos_pdf
+                             WHERE UPPER(COALESCE(banco,'')) = UPPER(%s)""",
+                          (nombre_banco,))
+                for fila in c.fetchall():
+                    if not self._cuenta_coincide(fila[3], cuenta):
+                        continue
+                    if str(fila[2] or "") == mes_key or clave_fecha(fila[1])[:7] == mes_key:
+                        ids_pdf.append(fila[0])
+        except Exception as error:
+            liberar_conexion(conn)
+            messagebox.showerror("Borrar conciliación",
+                                 "No se pudo leer la conciliación:\n%s" % error,
+                                 parent=self.parent_frame)
+            return
+
+        if not ids_estado and not ids_pdf and not ids_sistema:
+            liberar_conexion(conn)
+            messagebox.showinfo("Borrar conciliación",
+                                "No hay asientos del estado de cuenta que borrar en %s\n"
+                                "para %s." % (self.cmb_mes.get(), construir_etiqueta_banco(banco)),
+                                parent=self.parent_frame)
+            return
+        if not messagebox.askyesno(
+                "Borrar conciliación del mes",
+                "Se borrarán SOLO los asientos agregados del estado de cuenta de %s · %s:\n\n"
+                "• Asientos del estado de cuenta: %d\n"
+                "• Líneas del PDF de ese mes: %d\n"
+                "• Asientos del sistema que vuelven a pendiente: %d\n\n"
+                "NO se borran los pagos, cobros, gastos ni los movimientos creados "
+                "desde Banco: esos asientos se conservan.\n\n¿Continuar?"
+                % (construir_etiqueta_banco(banco), self.cmb_mes.get(),
+                   len(ids_estado), len(ids_pdf), len(ids_sistema)),
+                parent=self.parent_frame):
+            liberar_conexion(conn)
+            return
+        try:
+            with conn.cursor() as c:
+                if ids_estado:
+                    c.execute("DELETE FROM conciliacion_bancaria WHERE id = ANY(%s)",
+                              (ids_estado,))
+                if ids_pdf:
+                    c.execute("DELETE FROM conciliacion_movimientos_pdf WHERE id = ANY(%s)",
+                              (ids_pdf,))
+                if ids_sistema:
+                    c.execute("""UPDATE conciliacion_bancaria
+                                 SET estado='', fecha_conciliacion=NULL
+                                 WHERE id = ANY(%s)""", (ids_sistema,))
+            conn.commit()
+        except Exception as error:
+            conn.rollback()
+            messagebox.showerror("Borrar conciliación",
+                                 "No se pudo borrar:\n%s" % error, parent=self.parent_frame)
+            return
+        finally:
+            liberar_conexion(conn)
+        try:
+            if buffer_banco is not None:
+                buffer_banco.invalidar(banco.get("banco"), banco.get("cuenta"))
+        except Exception:
+            pass
+        try:
+            self.movimientos_pdf = []
+            self._banco_pdf = None
+            self._mes_pdf = ""
+            self._cache_asientos = None
+        except Exception:
+            pass
+        registrar_auditoria(getattr(self, "usuario_activo", "Sistema"), "Banco",
+                            "Borró la conciliación del estado de cuenta de %s · %s "
+                            "(asientos: %d · líneas PDF: %d · sistema a pendiente: %d)"
+                            % (construir_etiqueta_banco(banco), self.cmb_mes.get(),
+                               len(ids_estado), len(ids_pdf), len(ids_sistema)))
+        self.generar_reporte()
+        messagebox.showinfo(
+            "Borrar conciliación",
+            "Listo.\n\nSe quitaron %d asiento(s) del estado de cuenta y %d línea(s) del PDF.\n"
+            "Los asientos del sistema y de Banco se conservaron."
+            % (len(ids_estado), len(ids_pdf)), parent=self.parent_frame)
+
+    def deshacer_conciliacion_asiento(self):
+        """↩️ Deshace la conciliación del asiento seleccionado, sin borrar el origen.
+
+        • Asiento agregado del estado de cuenta: se quita de la conciliación.
+        • Asiento del sistema o creado en Banco: vuelve a quedar pendiente.
+        Los pagos, cobros, gastos y movimientos de Banco NO se borran.
+        """
+        filas = self._filas_seleccionadas()
+        if not filas:
+            messagebox.showinfo("Deshacer conciliación",
+                                "Seleccione uno o más asientos de la tabla.",
+                                parent=self.parent_frame)
+            return
+        banco = self.banco_seleccionado()
+        if not banco:
+            return
+        try:
+            mes_op = mes_etiqueta_a_key(self.cmb_mes.get())
+        except Exception:
+            mes_op = ""
+        if mes_op and self._periodo_cerrado(banco, mes_op):
+            if not self._advertir_periodo_cerrado(banco, mes_op, "desconciliar"):
+                return
+        nombre_banco = str(banco.get("banco") or "")
+        cuenta = str(banco.get("cuenta") or "")
+        quitar, deshacer, sin_id = [], [], 0
+        for f in filas:
+            try:
+                idm = int(f.get("id") or 0)
+            except Exception:
+                idm = 0
+            origen = str(f.get("origen") or "")
+            tabla = str(f.get("tabla") or "")
+            if origen in ("e", "estado_cuenta") or tabla == "estado_cuenta":
+                if idm > 0:
+                    quitar.append(idm)
+                else:
+                    sin_id += 1
+            elif origen == "manual":
+                if idm > 0:
+                    deshacer.append(("manual", idm, None, None, f))
+            elif origen.startswith("s:") or origen == "sistema":
+                origen_bd = origen if origen.startswith("s:") else ("s:" + tabla if tabla else "")
+                if origen_bd and idm:
+                    deshacer.append((origen_bd, idm, tabla, float(f.get("monto") or 0), f))
+            elif idm > 0:
+                deshacer.append(("id", idm, None, None, f))
+        if not quitar and not deshacer:
+            messagebox.showinfo("Deshacer conciliación",
+                                "No se pudo identificar el asiento seleccionado."
+                                + (" Las líneas crudas del PDF no tienen conciliación guardada."
+                                   if sin_id else ""),
+                                parent=self.parent_frame)
+            return
+        if not messagebox.askyesno(
+                "Deshacer conciliación",
+                "¿Deshacer la conciliación de %d asiento(s)?\n\n"
+                "• %d agregado(s) del estado de cuenta se quitarán de la conciliación.\n"
+                "• %d asiento(s) del sistema/Banco volverán a pendiente.\n\n"
+                "No se borran pagos, cobros, gastos ni movimientos de Banco."
+                % (len(quitar) + len(deshacer), len(quitar), len(deshacer)),
+                parent=self.parent_frame):
+            return
+        conn = conectar_db(silencioso=True)
+        if not conn:
+            messagebox.showerror("Deshacer conciliación",
+                                 "Sin conexión a la base de datos.", parent=self.parent_frame)
+            return
+        try:
+            with conn.cursor() as c:
+                if quitar:
+                    c.execute("DELETE FROM conciliacion_bancaria WHERE id = ANY(%s)", (quitar,))
+                for tipo, idm, tabla, monto, fila in deshacer:
+                    if tipo == "manual" or tipo == "id":
+                        c.execute("""UPDATE conciliacion_bancaria
+                                     SET estado='', fecha_conciliacion=NULL
+                                     WHERE id=%s AND UPPER(COALESCE(banco,''))=UPPER(%s)""",
+                                  (idm, nombre_banco))
+                    elif tabla == "transferencias_bancarias":
+                        c.execute("""UPDATE conciliacion_bancaria
+                                     SET estado='', fecha_conciliacion=NULL
+                                     WHERE UPPER(COALESCE(banco,''))=UPPER(%s)
+                                       AND origen=%s AND id_movimiento=%s
+                                       AND SIGN(monto)=SIGN(%s)""",
+                                  (nombre_banco, tipo, idm, monto))
+                    else:
+                        c.execute("""UPDATE conciliacion_bancaria
+                                     SET estado='', fecha_conciliacion=NULL
+                                     WHERE UPPER(COALESCE(banco,''))=UPPER(%s)
+                                       AND origen=%s AND id_movimiento=%s""",
+                                  (nombre_banco, tipo, idm))
+                    # 🚫 Se registra el rechazo del par: el motor no lo vuelve a
+                    #    proponer solo hasta que el usuario lo apruebe de nuevo.
+                    try:
+                        if fila.get("fecha_banco"):
+                            _fb = clave_fecha(fila.get("fecha_banco")) or ""
+                            _mb = abs(float(fila.get("monto_mostrar", fila.get("monto")) or 0))
+                            _tabla_r = str(fila.get("tabla") or "")
+                            _id_r = int(fila.get("id") or 0)
+                            c.execute("""SELECT 1 FROM conciliacion_rechazos
+                                         WHERE UPPER(COALESCE(banco,''))=UPPER(%s)
+                                           AND COALESCE(cuenta,'')=%s
+                                           AND COALESCE(tabla,'')=%s
+                                           AND COALESCE(id_asiento,0)=%s
+                                           AND ABS(COALESCE(monto_banco,0)-%s) < 0.005
+                                           AND COALESCE(activo,TRUE) LIMIT 1""",
+                                      (nombre_banco, cuenta, _tabla_r, _id_r, _mb))
+                            if not c.fetchone():
+                                c.execute("""INSERT INTO conciliacion_rechazos
+                                             (banco, cuenta, tabla, id_asiento, fecha_asiento,
+                                              monto_asiento, fecha_banco, monto_banco,
+                                              descripcion_banco, usuario, motivo, creado, activo)
+                                             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),TRUE)""",
+                                          (nombre_banco, cuenta, _tabla_r, _id_r,
+                                           clave_fecha(fila.get("fecha")) or "",
+                                           abs(float(fila.get("monto") or 0)), _fb, _mb,
+                                           str(fila.get("descripcion_banco") or ""),
+                                           getattr(self, "usuario_activo", ""),
+                                           "Desconciliación manual"))
+                    except Exception as _e_rech:
+                        print("[Conciliación] registrar rechazo:", _e_rech)
+            conn.commit()
+        except Exception as error:
+            conn.rollback()
+            messagebox.showerror("Deshacer conciliación",
+                                 "No se pudo deshacer:\n%s" % error, parent=self.parent_frame)
+            return
+        finally:
+            liberar_conexion(conn)
+        try:
+            if buffer_banco is not None:
+                buffer_banco.invalidar(banco.get("banco"), banco.get("cuenta"))
+        except Exception:
+            pass
+        try:
+            self._cache_asientos = None
+        except Exception:
+            pass
+        registrar_auditoria(getattr(self, "usuario_activo", "Sistema"), "Banco",
+                            "Deshizo la conciliación de %d asiento(s) en %s"
+                            % (len(quitar) + len(deshacer), construir_etiqueta_banco(banco)))
+        self.generar_reporte()
+        messagebox.showinfo("Deshacer conciliación",
+                            "%d asiento(s) quedaron sin conciliar."
+                            % (len(quitar) + len(deshacer)), parent=self.parent_frame)
 
     def generar_reporte(self):
         banco = self.banco_seleccionado()

@@ -409,7 +409,13 @@ def _numero_peru(txt):
                 t = t.replace(",", "")
         elif "," in t:
             partes = t.split(",")
-            t = t.replace(",", ".") if len(partes[-1]) <= 2 else t.replace(",", "")
+            if (len(partes) == 2 and len(partes[0]) <= 3
+                    and len(partes[1]) in (4, 5) and partes[1].isdigit()):
+                # El OCR perdió el punto decimal: "1,06820" -> "1068.20"
+                _digitos = partes[0] + partes[1]
+                t = _digitos[:-2] + "." + _digitos[-2:]
+            else:
+                t = t.replace(",", ".") if len(partes[-1]) <= 2 else t.replace(",", "")
         elif t.count(".") > 1:
             partes = t.split(".")
             t = ("".join(partes[:-1]) + "." + partes[-1]) if len(partes[-1]) <= 2 else "".join(partes)
@@ -906,7 +912,12 @@ def comision_del_comprobante(texto):
 
 def datos_de_comprobante(ruta):
     """Extrae monto, fecha, N° de operación y N° de facturas del comprobante."""
-    texto = texto_de_comprobante(ruta)
+    try:
+        texto = _ocr_comprobante_con_reintentos([str(ruta)]) or ""
+    except Exception:
+        texto = ""
+    if not str(texto or "").strip():
+        texto = texto_de_comprobante(ruta)
     datos = {"monto": "", "fecha": "", "operacion": "", "facturas": [], "texto": texto,
              "comision": 0.0}
     if not texto.strip():
@@ -929,7 +940,12 @@ def datos_de_comprobante(ruta):
                 valor = valor.replace(",", "")
         elif "," in valor:
             partes = valor.split(",")
-            valor = "".join(partes) if len(partes[-1]) == 3 and len(partes) == 2 else valor.replace(",", ".")
+            if (len(partes) == 2 and len(partes[0]) <= 3
+                    and len(partes[1]) in (4, 5) and partes[1].isdigit()):
+                _digitos = partes[0] + partes[1]
+                valor = _digitos[:-2] + "." + _digitos[-2:]
+            else:
+                valor = "".join(partes) if len(partes[-1]) == 3 and len(partes) == 2 else valor.replace(",", ".")
         valor = valor.rstrip(".").rstrip(",")
         try:
             datos["monto"] = "%.2f" % float(valor)
@@ -3761,41 +3777,174 @@ def _log_escaneo_comprobante(etiqueta, ruta="", fecha="", operacion="", monto=0.
         pass
 
 
-def _ocr_comprobante_con_reintentos(paginas, intentos=3):
-    """OCR de las páginas recién escaneadas, esperando a que el archivo esté listo.
+def _aviso_ocr_comprobante(parent):
+    """Ventana pequeña mientras se analiza el OCR de un comprobante de pago."""
+    try:
+        ventana = ctk.CTkToplevel(parent)
+        ventana.title("Analizando OCR")
+        ventana.geometry("400x125")
+        ventana.resizable(False, False)
+        try:
+            ventana.transient(parent)
+            ventana.attributes("-topmost", True)
+            ventana.grab_set()
+        except Exception:
+            pass
+        ctk.CTkLabel(ventana, text="⏳ Analizando el comprobante con OCR...",
+                     font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(18, 4))
+        ctk.CTkLabel(ventana, text="Espere, no cierre la ventana.",
+                     font=("Arial", 10), text_color="gray").pack()
+        barra = ctk.CTkProgressBar(ventana, width=330, mode="indeterminate")
+        barra.pack(pady=8)
+        barra.start()
+        ventana.update_idletasks()
+        ventana.update()
+        return ventana
+    except Exception:
+        return None
 
-    Al escanear, el JPG se termina de escribir unos instantes después; si el OCR
-    corre antes, devuelve vacío y la ventana se queda sin fecha/operación/monto.
-    Aquí se espera, se reintenta y se devuelve el mejor texto obtenido.
+
+def _cerrar_aviso_ocr_comprobante(ventana):
+    try:
+        ventana.grab_release()
+    except Exception:
+        pass
+    try:
+        ventana.destroy()
+    except Exception:
+        pass
+
+
+def _ocr_comprobante_con_reintentos(paginas, intentos=3):
+    """OCR rápido y preciso de comprobantes de pago bancarios.
+
+    Los vouchers tienen mucho fondo y letra clara. Se recorta la zona central,
+    se amplía y se aplica umbral para que Windows OCR lea bien la fecha, el
+    monto y el N° de operación. Se prueba primero ese recorte; solo si no
+    devuelve los tres datos se usa una versión de la página completa.
     """
     import time as _time
+
     paginas = [str(p) for p in (paginas or []) if p and os.path.exists(str(p))]
     if not paginas:
         return ""
-    mejor = ""
-    for intento in range(max(1, int(intentos))):
-        # se espera a que el tamaño del archivo se estabilice (escritura terminada)
-        try:
-            tam1 = os.path.getsize(paginas[0])
-            _time.sleep(0.25)
-            tam2 = os.path.getsize(paginas[0])
-            if tam1 != tam2:
-                _time.sleep(0.40)
-        except Exception:
-            pass
-        texto = ""
-        try:
-            import escaner as _esc
-            texto = _esc.texto_de_resultados(_esc.ocr_paginas(paginas)) or ""
-        except Exception as e:
-            print("[Compras] OCR del comprobante (intento %d): %s" % (intento + 1, e))
-        if len(str(texto).strip()) > len(str(mejor).strip()):
-            mejor = texto
-        if len("".join(str(mejor).split())) >= 20:
-            return mejor
-        _time.sleep(0.35 * (intento + 1))
-    return mejor
 
+    MESES = (r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+             r"setiembre|septiembre|octubre|noviembre|diciembre")
+
+    def _tiene_datos(t):
+        t = str(t or "")
+        return (re.search(r"S/\s*[\d.,]+", t, re.IGNORECASE) is not None
+                and re.search(r"\b\d{1,2}\s+(?:de\s+)?(?:%s)\b" % MESES,
+                              t, re.IGNORECASE) is not None
+                and re.search(r"operaci", t, re.IGNORECASE) is not None
+                and re.search(r"\b\d{8,}\b", t) is not None)
+
+    def _puntaje(texto):
+        t = str(texto or "")
+        if not t.strip():
+            return -1.0
+        puntos = min(len(" ".join(t.split())) / 180.0, 5.0)
+        if re.search(r"operaci", t, re.IGNORECASE) and re.search(r"\b\d{8,}\b", t):
+            puntos += 22
+        elif re.search(r"\b\d{5,}\b", t):
+            puntos += 6
+        if re.search(r"\b\d{1,2}\s+(?:de\s+)?(?:%s)\b" % MESES,
+                     t, re.IGNORECASE):
+            puntos += 20
+        if re.search(r"S/\s*[\d.,]+", t, re.IGNORECASE):
+            puntos += 15
+        return puntos
+
+    def _crear_variantes():
+        import tempfile
+        from PIL import Image, ImageOps, ImageFilter
+        carpeta = tempfile.mkdtemp(prefix="pago_ocr_")
+        salida = []
+        for idx, ruta in enumerate(paginas[:2]):
+            base = ruta
+            try:
+                if str(ruta).lower().endswith(".pdf"):
+                    import fitz
+                    doc = fitz.open(str(ruta))
+                    try:
+                        # Se prefiere la imagen nativa del PDF (rápida).
+                        imagenes_pdf = doc[0].get_images(full=True)
+                        extraida = False
+                        if imagenes_pdf:
+                            info = doc.extract_image(imagenes_pdf[0][0])
+                            if info and info.get("image"):
+                                ext = str(info.get("ext") or "png").lower()
+                                base = os.path.join(carpeta, "nativa_%d.%s" % (idx, ext))
+                                with open(base, "wb") as f:
+                                    f.write(info["image"])
+                                extraida = True
+                        if not extraida:
+                            base = os.path.join(carpeta, "pag_%d.png" % idx)
+                            doc[0].get_pixmap(dpi=200).save(base)
+                    finally:
+                        doc.close()
+                with Image.open(base) as original:
+                    original.load()
+                    imagen = ImageOps.exif_transpose(original).convert("RGB")
+                ancho, alto = imagen.size
+                if not ancho or not alto:
+                    continue
+                # Recorte central del voucher en dos escalas: una lectura
+                # rápida a 1.6x y otra a 2.0x para recuperar el último dígito.
+                recorte = imagen.crop((int(ancho * 0.08), int(alto * 0.08),
+                                       int(ancho * 0.93), int(alto * 0.80)))
+                for escala in (1.6, 2.0):
+                    g = ImageOps.autocontrast(ImageOps.grayscale(recorte), cutoff=1)
+                    g = g.resize((max(1, int(g.width * escala)),
+                                  max(1, int(g.height * escala))), Image.LANCZOS)
+                    g = g.filter(ImageFilter.UnsharpMask(radius=2, percent=200, threshold=2))
+                    g = g.point(lambda p: 255 if p > 170 else 0)
+                    ruta_crop = os.path.join(carpeta, "crop_%s_%d.png" % (str(escala).replace(".", "_"), idx))
+                    g.save(ruta_crop, "PNG")
+                    salida.append(ruta_crop)
+
+                # Respaldo: página completa (solo si el recorte no basta).
+                g2 = ImageOps.autocontrast(ImageOps.grayscale(imagen), cutoff=1)
+                g2 = g2.resize((max(1, int(g2.width * 1.2)),
+                                max(1, int(g2.height * 1.2))), Image.LANCZOS)
+                g2 = g2.point(lambda p: 255 if p > 170 else 0)
+                ruta_full = os.path.join(carpeta, "full_%d.png" % idx)
+                g2.save(ruta_full, "PNG")
+                salida.append(ruta_full)
+            except Exception as e_var:
+                print("[Compras] No se pudo preparar el comprobante para OCR:", e_var)
+        return salida
+
+    variantes = _crear_variantes() or paginas
+    # Una sola espera breve por si el escáner acaba de escribir el archivo.
+    try:
+        tam1 = os.path.getsize(paginas[0])
+        _time.sleep(0.15)
+        if os.path.getsize(paginas[0]) != tam1:
+            _time.sleep(0.25)
+    except Exception:
+        pass
+
+    mejor = ""
+    mejor_puntaje = -1.0
+    try:
+        import escaner as _esc
+        for variante in variantes:
+            try:
+                texto = _esc.texto_de_resultados(_esc.ocr_paginas([variante])) or ""
+            except Exception as e_ocr:
+                print("[Compras] OCR comprobante variante:", e_ocr)
+                continue
+            if _tiene_datos(texto):
+                return texto
+            puntos = _puntaje(texto)
+            if puntos > mejor_puntaje:
+                mejor_puntaje = puntos
+                mejor = texto
+    except Exception as e:
+        print("[Compras] OCR del comprobante:", e)
+    return mejor
 
 class FacturasRecibidasTab:
     def __init__(self, tab_frame, main_root, app_padre):
@@ -9957,9 +10106,17 @@ class CuentasPorPagarTab:
             else:
                 lbl_comp.configure(text="Sin comprobante cargado", text_color="#999999")
         def aplicar_ocr(ruta):
-            """🔎 Lee el comprobante con OCR y rellena el monto y el N° de operación."""
+            """🔎 Lee el comprobante con OCR y rellena fecha, monto y N° de operación."""
             try:
-                _texto = leer_ocr_windows(ruta)
+                lbl_comp.configure(text="⏳ Analizando OCR del comprobante... espere",
+                                   text_color="#b9770e")
+                v.update_idletasks()
+            except Exception:
+                pass
+            try:
+                _texto = _ocr_comprobante_con_reintentos([ruta]) or ""
+                if not _texto.strip():
+                    _texto = leer_ocr_windows(ruta) or ""
                 if not _texto.strip():
                     try:
                         _texto = escaner.texto_de_resultados(escaner.ocr_paginas([ruta]))
@@ -9969,6 +10126,11 @@ class CuentasPorPagarTab:
                 print("[OCR comprobante] error:", _e_ocr)
                 _texto = ""
             if not _texto.strip():
+                try:
+                    lbl_comp.configure(text="⚠️ No se pudo leer el comprobante. Complete a mano.",
+                                       text_color="#b9770e")
+                except Exception:
+                    pass
                 return
             _num, _monto = "", 0.0
             try:
@@ -9998,6 +10160,24 @@ class CuentasPorPagarTab:
                 except Exception:
                     pass
                 _avisos.append("Monto: %.2f" % float(_monto))
+            try:
+                _fecha = extraer_fecha_comprobante(_texto) or ""
+            except Exception:
+                _fecha = ""
+            if _fecha:
+                try:
+                    _fecha_campo = _fecha_dd_mm_aaaa(_fecha) or _fecha
+                    ent_fecha.delete(0, tk.END)
+                    ent_fecha.insert(0, _fecha_campo)
+                except Exception:
+                    pass
+                _avisos.append("Fecha: " + _fecha)
+            else:
+                try:
+                    ent_fecha.delete(0, tk.END)
+                except Exception:
+                    pass
+                _avisos.append("⚠️ Fecha no leída del comprobante")
             if _avisos:
                 try:
                     lbl_comp.configure(text="📎 " + os.path.basename(ruta) + "   ·   " + " · ".join(_avisos),
@@ -10758,7 +10938,11 @@ class CuentasPorPagarTab:
                 except Exception:
                     pass
                 return ""
-            _texto_ocr = _ocr_comprobante_con_reintentos(_pags)
+            _aviso_ocr = _aviso_ocr_comprobante(padre)
+            try:
+                _texto_ocr = _ocr_comprobante_con_reintentos(_pags)
+            finally:
+                _cerrar_aviso_ocr_comprobante(_aviso_ocr)
             _num = _fecha = ""
             _monto = 0.0
             try:

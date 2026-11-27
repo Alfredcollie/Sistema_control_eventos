@@ -68,23 +68,42 @@ def _ventana_activa():
     return None
 
 
-def _padre(parent):
-    """Ventana principal para colgar los diálogos (aunque no se pase parent)."""
+def _vivo(widget):
     try:
-        if parent is not None:
-            return parent.winfo_toplevel()
+        return widget is not None and bool(widget.winfo_exists())
     except Exception:
-        pass
+        return False
+
+
+def _padre(parent):
+    """Ventana principal VIVA para colgar los diálogos (aunque no se pase parent).
+
+    Si la ventana que manda el módulo ya fue destruida (por ejemplo, un diálogo
+    que se cerró), se sube por sus padres hasta una ventana viva y, si no hay,
+    se usa la raíz. Así no se crean ventanas sobre un «bad window path».
+    """
+    actual = parent
+    while actual is not None:
+        try:
+            if _vivo(actual):
+                try:
+                    return actual.winfo_toplevel()
+                except Exception:
+                    return actual
+        except Exception:
+            pass
+        actual = getattr(actual, "master", None)
     ventana = _ventana_activa()
-    if ventana is not None:
+    if _vivo(ventana):
         return ventana
     try:
         import tkinter as tk
-        if tk._default_root is not None:
-            return tk._default_root
+        raiz = tk._default_root
+        if _vivo(raiz):
+            return raiz
     except Exception:
         pass
-    return parent
+    return None
 
 
 def _config():
@@ -405,6 +424,10 @@ def instalar_selector_global():
         from tkinter import filedialog
     except Exception:
         return
+    # 🛡️ Si otro módulo ya instaló el selector, no se envuelve dos veces.
+    if getattr(filedialog.askopenfilename, "_selector_collie", False):
+        _instalado = True
+        return
     _original_open = filedialog.askopenfilename
     _original_open_multi = filedialog.askopenfilenames
 
@@ -429,6 +452,7 @@ def instalar_selector_global():
             if multiple:
                 return tuple(rutas or [])
             return rutas[0] if rutas else ""
+        _pedir._selector_collie = True
         return _pedir
 
     filedialog.askopenfilename = _envoltura(_original_open, False)

@@ -437,6 +437,22 @@ def escanear_desde_telefono(parent, config=None, al_recibir=None, al_terminar=No
 
     familia = "Helvetica" if __import__("sys").platform == "darwin" else "Arial"
 
+    # 🛡️ Si la ventana que abrió el diálogo ya no existe, se usa una viva:
+    #    antes se creaba la ventana sobre un «bad window path» y se caía.
+    try:
+        if parent is not None and not parent.winfo_exists():
+            parent = None
+    except Exception:
+        parent = None
+    if parent is None:
+        try:
+            import tkinter as _tk
+            parent = _tk._default_root
+        except Exception:
+            parent = None
+    if parent is None:
+        return None
+
     carpeta = None
     try:
         import escaner

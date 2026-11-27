@@ -3915,8 +3915,19 @@ class ModuloBancoApp:
             config = {}
 
         def al_recibir(rutas, tipo_doc):
-            if rutas:
-                self._procesar_comprobante_tx(ruta=rutas[0], escanear=False)
+            if not rutas:
+                return
+
+            def lanzar():
+                try:
+                    self._procesar_comprobante_tx(ruta=rutas[0], escanear=False)
+                except Exception as error_proc:
+                    print("[Banco] comprobante del teléfono:", error_proc)
+
+            try:
+                self.parent_frame.after(0, lanzar)
+            except Exception:
+                pass
 
         try:
             escaner_movil.escanear_desde_telefono(
@@ -10143,27 +10154,37 @@ class ModuloBancoApp:
             def al_recibir(rutas, tipo_doc):
                 if not rutas:
                     return
-                _fijar_soporte(rutas[0])
-                # 🧠 OCR en segundo plano: no congela la ventana mientras lee
-                paginas = list(rutas or [])
 
-                def trabajo_ocr():
-                    texto = ""
+                def lanzar():
                     try:
-                        import escaner as _esc
-                        texto = _esc.texto_de_resultados(_esc.ocr_paginas(paginas)) or ""
-                    except Exception as error_ocr:
-                        print("[Banco] OCR del comprobante:", error_ocr)
+                        _fijar_soporte(rutas[0])
+                    except Exception as error_soporte:
+                        print("[Banco] soporte del teléfono:", error_soporte)
+                    # 🧠 OCR en segundo plano: no congela la ventana mientras lee
+                    paginas = list(rutas or [])
+
+                    def trabajo_ocr():
+                        texto = ""
+                        try:
+                            import escaner as _esc
+                            texto = _esc.texto_de_resultados(_esc.ocr_paginas(paginas)) or ""
+                        except Exception as error_ocr:
+                            print("[Banco] OCR del comprobante:", error_ocr)
+                        try:
+                            v.after(0, lambda: _completar_con_texto(texto))
+                        except Exception:
+                            pass
+
                     try:
-                        v.after(0, lambda: _completar_con_texto(texto))
-                    except Exception:
-                        pass
+                        threading.Thread(target=trabajo_ocr, daemon=True).start()
+                    except Exception as error_hilo:
+                        print("[Banco] hilo de OCR:", error_hilo)
+                        _completar_con_texto("")
 
                 try:
-                    threading.Thread(target=trabajo_ocr, daemon=True).start()
-                except Exception as error_hilo:
-                    print("[Banco] hilo de OCR:", error_hilo)
-                    _completar_con_texto("")
+                    v.after(0, lanzar)
+                except Exception:
+                    pass
 
             try:
                 escaner_movil.escanear_desde_telefono(

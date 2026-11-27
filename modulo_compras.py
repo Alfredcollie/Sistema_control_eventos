@@ -831,6 +831,52 @@ def texto_de_comprobante(ruta):
         import escaner as mod_escaner
         resultado = mod_escaner.ocr_paginas(imagenes)
         texto = mod_escaner.texto_de_resultados(resultado)
+        # 🔎 El N° de operación suele ir al pie, a la derecha, y el OCR de la
+        #    página completa a veces lo omite (lee el rótulo pero no el número).
+        #    En ese caso se lee también el pie ampliado y se une al texto.
+        try:
+            if "operaci" in texto.lower() and not re.search(
+                    r"operaci[oó]n[^\d]{0,40}\d{4,}", texto, re.IGNORECASE):
+                carpeta_pie = tempfile.mkdtemp(prefix="ocr_pie_")
+                pies = []
+                from PIL import Image as _ImagePie
+                _fuentes_pie = []
+                if str(ruta).lower().endswith(".pdf"):
+                    # 🖨️ Se rasteriza la página a 300 ppp: la imagen nativa del
+                    #    PDF puede venir borrosa y el OCR pierde el N° del pie.
+                    try:
+                        import fitz as _fitz_pie
+                        _doc_pie = _fitz_pie.open(str(ruta))
+                        for _i_pie in range(min(2, _doc_pie.page_count)):
+                            _pag_pie = os.path.join(carpeta_pie, "pag_%d.png" % _i_pie)
+                            _doc_pie[_i_pie].get_pixmap(dpi=300).save(_pag_pie)
+                            _fuentes_pie.append(_pag_pie)
+                        _doc_pie.close()
+                    except Exception as _e_pdf_pie:
+                        print("Aviso - render del pie:", _e_pdf_pie)
+                        _fuentes_pie = []
+                if not _fuentes_pie:
+                    _fuentes_pie = list(imagenes[:2])
+                for indice, ruta_img in enumerate(_fuentes_pie):
+                    try:
+                        _img = _ImagePie.open(ruta_img)
+                        _ancho, _alto = _img.size
+                        _pie = _img.crop((0, int(_alto * 0.70), _ancho, _alto))
+                        if _ancho < 1800:
+                            _escala = max(1.0, 1800.0 / max(1, _ancho))
+                            _pie = _pie.resize((int(_ancho * _escala), int(_pie.height * _escala)))
+                        _ruta_pie = os.path.join(carpeta_pie, "pie_%d.png" % indice)
+                        _pie.save(_ruta_pie)
+                        pies.append(_ruta_pie)
+                    except Exception:
+                        pass
+                if pies:
+                    _res_pie = mod_escaner.ocr_paginas(pies)
+                    _texto_pie = mod_escaner.texto_de_resultados(_res_pie)
+                    if _texto_pie.strip():
+                        texto = (texto.rstrip() + "\n" + _texto_pie.strip())[:6000]
+        except Exception as _e_pie:
+            print("Aviso - OCR del pie del comprobante:", _e_pie)
         return texto[:6000]
     except Exception as e:
         print("Aviso - OCR del comprobante:", e)
@@ -961,10 +1007,16 @@ def datos_de_comprobante(ruta):
         # sin etiqueta legible: se toma el grupo de dígitos más largo del recibo
         datos["operacion"] = max(grupos_digitos, key=lambda g: len(g[1]))[1]
 
-    # Respaldo: valor alfanumérico pegado a la etiqueta (ej. "operación: AB-123456")
+    # ❌ Un año suelto ("2021", "2026") NO es un N° de operación
+    if datos["operacion"] and re.fullmatch(r"20\d{2}", str(datos["operacion"])):
+        datos["operacion"] = ""
+
+    # Respaldo: código alfanumérico pegado a la etiqueta (ej. "operación: Q5587883")
     if not datos["operacion"]:
-        operacion = re.search(r"(?:n[uú]mero\s*de\s*operaci[oó]n|operaci[oó]n|referencia)"
-                              r"\D{0,20}([A-Za-z][A-Za-z0-9\-]{4,24})", plano, re.IGNORECASE)
+        operacion = re.search(
+            r"(?:n[uú]mero\s*de\s*operaci[oó]n|operaci[oó]n|referencia)"
+            r"[\s\S]{0,40}?([A-Za-z]{1,3}\d{4,20}|\d{5,20})",
+            plano, re.IGNORECASE)
         if operacion:
             valor = operacion.group(1).strip("-.:")
             if valor.lower() not in ("es", "del", "de", "la", "banco"):
@@ -5080,10 +5132,10 @@ class FacturasRecibidasTab:
         f_autos = ctk.CTkFrame(self.f_form, fg_color="transparent")
         f_autos.pack(fill="x", padx=10, pady=(5, 15))
         
-        btn_auto_pdf = ctk.CTkButton(f_autos, text="📄 Desde PDF", font=("Arial", 11, "bold"), fg_color="#1f538d", hover_color="#163b65", command=self.autocompletar_desde_pdf, width=140)
+        btn_auto_pdf = ctk.CTkButton(f_autos, text="📄 Escanear archivo con OCR", font=("Arial", 10, "bold"), fg_color="#1f538d", hover_color="#163b65", command=self.autocompletar_desde_pdf, width=175)
         btn_auto_pdf.pack(side="left", fill="x", expand=True, padx=(0, 5))
         
-        btn_auto_xml = ctk.CTkButton(f_autos, text="📥 Desde XML", font=("Arial", 11, "bold"), fg_color="#d35400", hover_color="#a84300", command=self.autocompletar_desde_xml, width=140)
+        btn_auto_xml = ctk.CTkButton(f_autos, text="📥 Desde XML", font=("Arial", 10, "bold"), fg_color="#d35400", hover_color="#a84300", command=self.autocompletar_desde_xml, width=120)
         btn_auto_xml.pack(side="left", fill="x", expand=True, padx=(5, 0))
 
 
@@ -7804,7 +7856,7 @@ class FacturasRecibidasTab:
             detalle = ("El archivo de la factura no está adjunto (o el archivo ya no está en "
                        "este equipo).")
             pista = ("Usá «✏️ Editar factura» para adjuntar el PDF/imagen de la factura, "
-                     "o escaneala con «Escanear factura (OCR)».")
+                     "o escaneala con «Escanear archivo con OCR».")
         mensaje = detalle + chr(10) + chr(10) + pista
         if numero:
             mensaje = "Factura " + numero + chr(10) + chr(10) + mensaje
@@ -8523,7 +8575,10 @@ class FacturasRecibidasTab:
                 try:
                     v.after(0, lanzar)
                 except Exception:
-                    lanzar()
+                    try:
+                        self.main_root.after(0, lanzar)
+                    except Exception:
+                        pass
 
             try:
                 escaner_movil.escanear_desde_telefono(

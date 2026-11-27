@@ -9,6 +9,10 @@ FINAL_COTIZACIONES.PY - MOTOR OFICIAL DE PDF (OPTIMIZADO)
 - FIX: Exoneración de Fee incorporada dinámicamente.
 - FIX: Respeta el orden manual de los ítems (ORDER BY id ASC).
 - FIX: "Descripción del Proyecto" ajustada automáticamente (Word Wrap) para que no se salga del recuadro gris.
+- FIX: "Términos y Condiciones" ya no se cortan: se calcula su altura antes de
+  dibujar y, si no caben bajo los totales, pasan a la hoja siguiente (con
+  "continuación"). La separación totales/condiciones se deduce de la altura real
+  del bloque de totales, así el rótulo nunca se monta sobre el total en dólares.
 """
 
 import os
@@ -611,9 +615,6 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
                 c.showPage()
                 y_pos = Y_INICIO_PAGINA_CONTINUACION
             y_totales = y_pos - 65
-        # Ancla FIJA del bloque "Términos y Condiciones": no se mueve aunque el bloque
-        # de totales crezca con las filas de IGV / financiamiento / total sin IGV.
-        y_totales_terminos = y_totales
 
         # 🚀 LÓGICA DE EXONERACIÓN DE FEE + FINANCIAMIENTO VARIABLE PARA EL PDF
         fee_produccion = 0.0 if sin_fee_db else (subtotal_acumulado * 0.15)
@@ -655,12 +656,62 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         alto_bloque_totales = espacio_detalle * (n_filas_totales - 1) + 2 * espacio_cierre
         # Si el bloque es más alto que el original (2 filas) se sube todo lo que permita
         # el espacio libre bajo la tabla, de modo que la última línea (el total en
-        # dólares) quede siempre a la misma altura. Lo que no se pueda subir desplaza
-        # hacia abajo "Términos y Condiciones" para que nunca se solapen.
+        # dólares) quede a la misma altura. La separación hasta "Términos y Condiciones"
+        # se deduce de la altura REAL del bloque: así el rótulo nunca se le monta
+        # encima al total (con 2 filas son los 55 pt de siempre).
         sobrante_bloque = max(0.0, alto_bloque_totales - 57.0)
         subida_bloque = min(sobrante_bloque, max(0.0, (y_pos - 50) - y_totales))
         y_totales += subida_bloque
-        desplazo_terminos = sobrante_bloque - subida_bloque
+        sep_tot_cond = alto_bloque_totales - 2.0  # deja 23 pt bajo la última línea
+
+        # =======================================================
+        # 🚀 TÉRMINOS Y CONDICIONES: se maquetan ANTES de dibujar los totales.
+        # Se calcula su altura exacta para reservarle el espacio en la hoja. Antes
+        # se dibujaban "a ciegas" debajo de los totales y, cuando la tabla terminaba
+        # baja en la página, el texto se salía por el borde inferior: el PDF salía
+        # cortado en las condiciones. Ahora el bloque nunca se corta.
+        # =======================================================
+        ALTO_LINEA_COND = 12.0          # interlineado de las condiciones
+        MARGEN_INFERIOR_COND = 40.0     # margen inferior mínimo de la hoja (pt)
+        Y_TOPE_COND = 745.0             # primera línea útil en una hoja nueva
+
+        terminos_default = (
+            "Precios no incluyen IGV.\n"
+            "Cotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\n"
+            "Penalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, "
+            "se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
+        )
+        terminos_config = str(config.get("terminos_cotizacion", terminos_default)).strip()
+
+        # Cada renglón: [texto, x, prefijo]. El prefijo ("Forma de pago: ") se
+        # dibuja pegado al margen y el texto a continuación, como siempre.
+        x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
+        lineas_condiciones = []
+        for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
+            lineas_condiciones.append([linea, x_pago, None])
+        if lineas_condiciones:
+            lineas_condiciones[0][2] = "Forma de pago: "
+        if terminos_config:
+            for linea in wrap_text(terminos_config, "Helvetica", 8, 530):
+                lineas_condiciones.append([linea, 40, None])
+        n_cond = len(lineas_condiciones)
+        # Altura desde el rótulo hasta la última línea de condiciones.
+        alto_cond = (13.0 + ALTO_LINEA_COND * (n_cond - 1)) if n_cond else 0.0
+
+        # y_totales mínima para que TODAS las condiciones quepan en esta hoja.
+        y_totales_para_cond = MARGEN_INFERIOR_COND + alto_cond + sep_tot_cond
+        if n_cond and y_totales < y_totales_para_cond:
+            if y_totales_para_cond <= (y_pos - 60):
+                # Hay espacio libre bajo la tabla: sube el bloque de totales y
+                # totales + condiciones quedan juntos en esta página.
+                y_totales = y_totales_para_cond
+            elif y_totales_para_cond <= (Y_TOPE_COND - 45):
+                # No cabe bajo la tabla: totales y condiciones pasan juntos a una
+                # hoja nueva (así nunca quedan partidos ni cortados).
+                c.showPage()
+                y_totales = Y_TOPE_COND - 45.0
+            # Si ni siquiera caben en una hoja entera, los totales se quedan aquí
+            # (pegados a la tabla) y las condiciones siguen en la hoja siguiente.
 
         c.setLineWidth(1)
         c.setStrokeColorRGB(0.85, 0.85, 0.85)
@@ -691,29 +742,36 @@ def generar_reporte_cotizacion_pdf(conn_shared, codigo_cotizacion):
         c.drawString(475, y_cursor, "$")
         c.drawRightString(565, y_cursor, f"{formatear_numero(total_general_dolares)} USD")
 
-        c.setFont("Helvetica-Bold", 8.5)
-        c.setFillColorRGB(*rgb_primario)
-        c.drawString(40, y_totales_terminos - 55 - desplazo_terminos, "TÉRMINOS Y CONDICIONES:")
-        
-        c.setFont("Helvetica", 8)
-        c.setFillColorRGB(0.3, 0.3, 0.3)
-        y_cond_actual = y_totales_terminos - 68 - desplazo_terminos
-        
-        # 🚀 IMPRIMIR FORMA DE PAGO PRIMERO (DINÁMICO POR EVENTO)
-        c.drawString(40, y_cond_actual, "Forma de pago: ")
-        x_pago = 40 + c.stringWidth("Forma de pago: ", "Helvetica", 8)
-        for linea in wrap_text(forma_pago_pdf, "Helvetica", 8, 570 - x_pago):
-            c.drawString(x_pago, y_cond_actual, linea)
-            y_cond_actual -= 12
+        # 🚀 TÉRMINOS Y CONDICIONES (paginados: nunca se cortan)
+        y_rotulo = y_totales - sep_tot_cond
+        if n_cond and (y_rotulo - alto_cond) < MARGEN_INFERIOR_COND:
+            # Aun subiendo los totales no entraban: comienzan en una hoja nueva.
+            c.showPage()
+            y_rotulo = Y_TOPE_COND
 
-        # 🚀 IMPRIMIR TÉRMINOS Y CONDICIONES EDITABLES
-        terminos_default = "Precios no incluyen IGV.\nCotización válida por 7 días. Posterior a ello podría haber cambios en el presupuesto.\nPenalidad: Si el presupuesto es aprobado y finalmente el proyecto no se lleva a cabo, se facturará al cliente un 10% del valor total como compensación por gastos administrativos."
-        terminos_config = str(config.get("terminos_cotizacion", terminos_default)).strip()
-        
-        if terminos_config:
-            for linea in wrap_text(terminos_config, "Helvetica", 8, 530):
-                c.drawString(40, y_cond_actual, linea)
-                y_cond_actual -= 12
+        idx_cond, pagina_cond = 0, 1
+        while idx_cond < n_cond:
+            c.setFont("Helvetica-Bold", 8.5)
+            c.setFillColorRGB(*rgb_primario)
+            rotulo = "TÉRMINOS Y CONDICIONES:" if pagina_cond == 1 else "TÉRMINOS Y CONDICIONES (continuación):"
+            c.drawString(40, y_rotulo, rotulo)
+            y_linea = y_rotulo - 13.0
+            dibujadas = 0
+            # "dibujadas == 0" garantiza que cada hoja avance al menos un renglón.
+            while idx_cond < n_cond and (y_linea >= MARGEN_INFERIOR_COND or dibujadas == 0):
+                texto_linea, x_linea, prefijo = lineas_condiciones[idx_cond]
+                c.setFont("Helvetica", 8)
+                c.setFillColorRGB(0.3, 0.3, 0.3)
+                if prefijo:
+                    c.drawString(40, y_linea, prefijo)
+                c.drawString(x_linea, y_linea, texto_linea)
+                y_linea -= ALTO_LINEA_COND
+                idx_cond += 1
+                dibujadas += 1
+            if idx_cond < n_cond:
+                c.showPage()
+                pagina_cond += 1
+                y_rotulo = Y_TOPE_COND
 
         c.save()
 

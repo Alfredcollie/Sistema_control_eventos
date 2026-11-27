@@ -1935,8 +1935,15 @@ def validar_destinatario(datos, config=None, texto=""):
         # Solo se da por 'dudoso' cuando hay texto del OCR (pudo leer mal los dígitos);
         # si el RUC se leyó de un PDF o de un archivo, se mantiene el rechazo.
         if texto and ruc_empresa not in digitos_del_texto:
-            return "dudoso", (f"⚠️ El OCR leyó «{detalle}», pero puede haberse equivocado en algún "
-                              f"dígito.\nLa empresa configurada es RUC {ruc_empresa}"
+            # Solo es "dudoso" si el RUC leído se parece mucho al de la empresa
+            # (1 o 2 dígitos de diferencia). Si es otro RUC claramente distinto,
+            # es una factura de otra empresa y NO se debe crear el proveedor.
+            _diferencias = sum(1 for _a, _b in zip(cliente_ruc, ruc_empresa)
+                               if _a != _b)
+            if (len(cliente_ruc) == len(ruc_empresa)
+                    and _diferencias <= 2):
+                return "dudoso", (f"⚠️ El OCR leyó «{detalle}», pero puede haberse equivocado en algún "
+                                  f"dígito.\nLa empresa configurada es RUC {ruc_empresa}"
                               + (f" — {nombre_empresa}" if nombre_empresa else "")
                               + ".\nConfirme que la factura esté a nombre de la empresa antes de guardarla.")
         return "ajeno", (f"❌ Esta factura está a nombre de OTRA empresa: {detalle}.\n"
@@ -3925,7 +3932,7 @@ class FacturasRecibidasTab:
         v_prog.transient(self.main_root)
         v_prog.grab_set()
         _al_cerrar_modal(v_prog)
-        ctk.CTkLabel(v_prog, text="🖨️ Escaneando y leyendo la factura...", font=("Arial", 13, "bold"),
+        ctk.CTkLabel(v_prog, text="🖨️ Escaneando y analizando OCR... espere", font=("Arial", 13, "bold"),
                      text_color="#1f538d").pack(pady=(18, 4))
         ctk.CTkLabel(v_prog, text=instruccion, font=("Arial", 10), text_color="gray",
                      justify="center", wraplength=380).pack(pady=(0, 10))
@@ -3951,7 +3958,7 @@ class FacturasRecibidasTab:
                 _al_cerrar_modal(ventana)
             except Exception:
                 pass
-            ctk.CTkLabel(ventana, text="📱 Foto recibida — leyendo el documento…",
+            ctk.CTkLabel(ventana, text="📱 Foto recibida — analizando OCR...",
                          font=("Arial", 13, "bold"), text_color="#1f538d").pack(pady=(20, 6))
             barra = ctk.CTkProgressBar(ventana, width=340, mode="indeterminate")
             barra.pack(pady=6)
@@ -4044,6 +4051,12 @@ class FacturasRecibidasTab:
                 resultado["destino"] = estado_destino_w
                 if estado_destino_w == "ajeno":
                     resultado["proveedor"] = {"estado": "ajeno",
+                                              "datos": {"nombre": nombre_prov, "ruc": ruc_prov,
+                                                        "direccion_fiscal": "", "ubicacion": ""}}
+                elif estado_destino_w == "dudoso":
+                    # 🚫 No se crea todavía: primero el usuario debe confirmar que
+                    #    la factura es de la empresa en la ventana de revisión.
+                    resultado["proveedor"] = {"estado": "dudoso",
                                               "datos": {"nombre": nombre_prov, "ruc": ruc_prov,
                                                         "direccion_fiscal": "", "ubicacion": ""}}
                 elif nombre_prov or ruc_prov:
@@ -4272,7 +4285,7 @@ class FacturasRecibidasTab:
                     pass
             estado_prov = (resultado.get("proveedor") or {}).get("estado", "")
             nombre_final = ent_prov_nombre.get().strip() or datos.get("proveedor", "")
-            if estado_prov in ("", "sin-datos") and estado_destino != "ajeno" and nombre_final:
+            if estado_prov in ("", "sin-datos", "error", "sin-conexion") and estado_destino != "ajeno" and nombre_final:
                 # Se registra con la razón social que quedó en la ventana
                 # (SUNAT ya no se vuelve a consultar para no demorar el escaneo).
                 estado_nuevo, datos_finales = asegurar_proveedor(nombre_final, datos.get("ruc", ""),
@@ -4556,9 +4569,12 @@ class FacturasRecibidasTab:
             # 🏢 El proveedor ya quedó registrado al escanear (con los datos de SUNAT).
             # Solo si el escaneo es anterior a esta mejora se crea aquí.
             estado_prov = (getattr(self, "_escaneo_actual", {}) or {}).get("proveedor", {}).get("estado", "")
-            if not estado_prov:
+            if (estado_prov in ("", "sin-datos", "dudoso", "error", "sin-conexion")
+                    and (datos.get("proveedor") or datos.get("ruc"))):
                 try:
-                    estado_prov, _datos_prov = asegurar_proveedor(datos.get("proveedor"), datos.get("ruc"))
+                    estado_prov, _datos_prov = asegurar_proveedor(
+                        datos.get("proveedor"), datos.get("ruc"),
+                        usar_internet=False)
                 except Exception:
                     estado_prov = "error"
             self._estado_proveedor_escaneo = estado_prov
@@ -4583,9 +4599,18 @@ class FacturasRecibidasTab:
                        ("Imágenes", "*.png *.jpg *.jpeg")])
         if not ruta: return
         
+        _aviso = None
         try:
             self.bloquear_autocompletado_ruc = True
             self._limpiar_montos_carga()
+            try:
+                if hasattr(self, "btn_auto_pdf"):
+                    self.btn_auto_pdf.configure(text="⏳ Analizando OCR... espere")
+                self.main_root.update_idletasks()
+            except Exception:
+                pass
+            _aviso = self._aviso_procesando(
+                "⏳ Leyendo el documento con OCR... espere, no cierre la ventana.")
             
             _ext = os.path.splitext(str(ruta))[1].lower()
             texto = ""
@@ -4599,6 +4624,12 @@ class FacturasRecibidasTab:
                 texto = "".join(partes_texto)
                 if not texto.strip():
                     texto = leer_ocr_windows(ruta) or ""
+            try:
+                if _aviso is not None:
+                    self._cerrar_aviso(_aviso)
+                    _aviso = None
+            except Exception:
+                pass
                     
             if not texto.strip(): 
                 self.bloquear_autocompletado_ruc = False
@@ -4828,24 +4859,69 @@ class FacturasRecibidasTab:
             except Exception:
                 pass
 
-            # 🏢 Si el proveedor del PDF no está registrado, se agrega a 📦 Proveedores
-            estado_prov = crear_proveedor_si_no_existe(datos_txt.get("proveedor") or self.combo_proveedor.get(),
-                                                       datos_txt.get("ruc") or self.ent_desc.get())
-            if estado_prov == "creado":
-                messagebox.showinfo("Proveedor agregado",
-                                    "El proveedor de la factura no estaba registrado y se agregó a 📦 Proveedores.", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+            # 🏢 Si el proveedor del PDF no está registrado, se agrega automáticamente.
+            #    No se crea si la factura está a nombre de otra empresa.
+            aviso_prov = ""
+            estado_prov = "sin-datos"
+            _nombre_prov = str(datos_txt.get("proveedor") or self.combo_proveedor.get() or "").strip()
+            _ruc_prov = re.sub(r"\D", "", str(datos_txt.get("ruc") or self.ent_desc.get() or ""))
+            if estado_destino in ("ajeno", "dudoso"):
+                aviso_prov = ("  ⚠️ No se creó el proveedor porque la factura no se pudo "
+                              "confirmar como de la empresa.")
+            elif not _nombre_prov and len(_ruc_prov) != 11:
+                aviso_prov = "  ⚠️ No se pudo identificar al proveedor para registrarlo."
+            else:
+                try:
+                    estado_prov, datos_prov = asegurar_proveedor(_nombre_prov, _ruc_prov)
+                except Exception as e_prov:
+                    print("Aviso - creando proveedor desde PDF:", e_prov)
+                    estado_prov, datos_prov = "error", {}
+                if estado_prov in ("creado", "creado_sin_sunat", "completado"):
+                    _nom_final = str(datos_prov.get("nombre") or _nombre_prov).strip()
+                    if _nom_final:
+                        try:
+                            _vals = [str(x) for x in (self.combo_proveedor.cget("values") or [])]
+                            if _nom_final not in _vals:
+                                _vals.insert(0, _nom_final)
+                                self.combo_proveedor.configure(values=_vals)
+                            self.combo_proveedor.set(_nom_final)
+                        except Exception:
+                            pass
+                    if datos_prov.get("ruc"):
+                        try:
+                            self.ent_desc.delete(0, tk.END)
+                            self.ent_desc.insert(0, str(datos_prov["ruc"]))
+                        except Exception:
+                            pass
+                    aviso_prov = ("  🏢 Proveedor agregado automáticamente."
+                                  if estado_prov in ("creado", "creado_sin_sunat")
+                                  else "  🏢 Ficha del proveedor completada.")
+                elif estado_prov == "error":
+                    aviso_prov = "  ⚠️ No se pudo registrar el proveedor automáticamente."
             
             messagebox.showinfo("Extracción Inteligente",
                                 "Se extrajeron los datos del PDF."
                                 + (("\n\nRecargo al consumo (8%% del valor de venta) "
                                     "aplicado: %s") % formatear_moneda(recargo_calculado)
-                                   if recargo_calculado > 0 else ""),
+                                   if recargo_calculado > 0 else "")
+                                + (("\n\n" + aviso_prov) if aviso_prov else ""),
                                 parent=ventana_para_mensaje(getattr(self, "main_root", None)))
             self.bloquear_autocompletado_ruc = False
             
         except Exception as e: 
             self.bloquear_autocompletado_ruc = False
             messagebox.showerror("Error", f"Ocurrió un error:\n{e}", parent=ventana_para_mensaje(getattr(self, "main_root", None)))
+        finally:
+            try:
+                if _aviso is not None:
+                    self._cerrar_aviso(_aviso)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "btn_auto_pdf"):
+                    self.btn_auto_pdf.configure(text="📄 Escanear archivo con OCR")
+            except Exception:
+                pass
 
     # 🚀 MOTOR DE LECTURA XML (UBL)
     def autocompletar_desde_xml(self):
